@@ -1,12 +1,12 @@
 use clap::Parser;
 // use distributed_online_cc::cli_command::*;
 // use distributed_online_cc::peer_message::*;
-use bytes::{Buf, BufMut, BytesMut};
+use distributed_online_cc::network::peer::peer_task;
 use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
 use distributed_online_cc::state::pending_reuests::PendingRequestManager;
 use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage, RequestId};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -40,125 +40,6 @@ fn get_address_from_id(id: PeerId) -> String {
 
 fn get_id_from_address(addr: &std::net::SocketAddr) -> PeerId {
     (addr.port() - 7000) as PeerId
-}
-
-// spawn tasks that communicate with a certain peer
-async fn peer_task(
-    peer_id: PeerId,
-    mut stream: TcpStream,
-    mut rx: mpsc::Receiver<PeerMessage>,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    pending_request_manager: Arc<Mutex<PendingRequestManager>>,
-) {
-    let mut read_buf = BytesMut::with_capacity(1024);
-
-    loop {
-        tokio::select! {
-            // send msg
-            Some(msg) = rx.recv() => {
-                let msg_bytes = serde_json::to_vec(&msg).unwrap();
-
-                // prefix the json data with its length for raw framing
-                let mut framed_msg = BytesMut::with_capacity(4 + msg_bytes.len());
-                framed_msg.put_u32(msg_bytes.len() as u32);
-                framed_msg.extend_from_slice(&msg_bytes);
-
-                if stream.write_all(&framed_msg).await.is_err() {
-                    eprintln!("error sending to peer {}", peer_id);
-                    break;
-                }
-            }
-            // receive msg
-            result = stream.read_buf(&mut read_buf) => {
-                match result {
-                    Ok(0) => {
-                        // connection closed
-                        println!("got zero bytes. peer {} disconnected", peer_id);
-                        break;
-                    }
-                    Ok(_) => {
-                        // some bytes received
-                        loop {
-                            if read_buf.len() < 4 {
-                                // not even enough for length prefix
-                                break;
-                            }
-
-                            let len = u32::from_be_bytes([read_buf[0], read_buf[1], read_buf[2], read_buf[3]]) as usize;
-
-                            if read_buf.len() < 4 + len {
-                                // (some) message bytes (still) missing
-                                break;
-                            }
-
-                            read_buf.advance(4);
-                            let msg_bytes = read_buf.split_to(len);
-
-                            let msg: PeerMessage = serde_json::from_slice(&msg_bytes).unwrap();
-
-                            handle_message(peer_id, msg, peer_manager.clone(), pending_request_manager.clone()).await;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("error reading from peer: {}", e);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    println!("Peer connection closed");
-}
-
-async fn handle_message(
-    peer_id: PeerId,
-    msg: PeerMessage,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    pending_request_manager: Arc<Mutex<PendingRequestManager>>,
-) {
-    match msg {
-        PeerMessage::Request { id, payload } => {
-            println!(
-                "received request; peer_id: {}, request_id: {}, payload: {}",
-                peer_id, id, payload
-            );
-
-            // send response
-            let response = PeerMessage::Response {
-                id,
-                payload: format!("ACK '{}'", payload),
-            };
-
-            let sender = {
-                let pm = peer_manager.lock().await;
-                pm.get_sender(&peer_id)
-            };
-            if let Some(sender) = sender {
-                sender.send(response).await.unwrap();
-            }
-        }
-        PeerMessage::Response { id, payload } => {
-            println!(
-                "received response; peer_id: {}, request_id: {}, payload: {}",
-                peer_id, id, payload
-            );
-
-            let sender = {
-                let mut prm = pending_request_manager.lock().await;
-                prm.remove(&id)
-            };
-            if let Some(tx) = sender {
-                tx.send(PeerMessage::Response { id, payload }).unwrap();
-                println!(
-                    "matched response with pending request. {} pending requests left",
-                    pending_request_manager.lock().await.len()
-                );
-            } else {
-                println!("no pending request found for response with id {}", id);
-            }
-        }
-    }
 }
 
 #[tokio::main]
