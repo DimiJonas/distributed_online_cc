@@ -4,6 +4,7 @@ use clap::Parser;
 use distributed_online_cc::network::peer::peer_task;
 use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
 use distributed_online_cc::state::pending_reuests::PendingRequestManager;
+use distributed_online_cc::state::request_id_container::RequestIdContainer;
 use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage, RequestId};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -14,24 +15,6 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 #[derive(Parser)]
 struct Input {
     id: PeerId,
-}
-
-struct RequestIdContainer {
-    next_id: RequestId,
-}
-
-impl RequestIdContainer {
-    fn new(initial_value: RequestId) -> Self {
-        Self {
-            next_id: initial_value,
-        }
-    }
-
-    fn get_next_id(&mut self) -> RequestId {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
 }
 
 fn get_address_from_id(id: PeerId) -> String {
@@ -53,6 +36,11 @@ async fn main() {
     let pending_request_manager = Arc::new(Mutex::new(PendingRequestManager::new()));
 
     // peer listener task
+    spawn_listener(
+        &host_address,
+        peer_manager.clone(),
+        pending_request_manager.clone(),
+    );
     let listener = TcpListener::bind(&host_address).await.unwrap();
     println!("listening for peer messages on {}", host_address);
     let pm_clone = peer_manager.clone();
