@@ -1,11 +1,9 @@
 use clap::Parser;
-// use distributed_online_cc::cli_command::*;
-// use distributed_online_cc::peer_message::*;
 use distributed_online_cc::network::peer::peer_task;
 use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
 use distributed_online_cc::state::pending_reuests::PendingRequestManager;
 use distributed_online_cc::state::request_id_container::RequestIdContainer;
-use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage, RequestId};
+use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -36,11 +34,6 @@ async fn main() {
     let pending_request_manager = Arc::new(Mutex::new(PendingRequestManager::new()));
 
     // peer listener task
-    spawn_listener(
-        &host_address,
-        peer_manager.clone(),
-        pending_request_manager.clone(),
-    );
     let listener = TcpListener::bind(&host_address).await.unwrap();
     println!("listening for peer messages on {}", host_address);
     let pm_clone = peer_manager.clone();
@@ -147,21 +140,27 @@ async fn main() {
 
                     let peer_address = get_address_from_id(peer_id);
 
-                    let stream = TcpStream::connect(&peer_address).await.unwrap();
-                    println!("connected to peer {}", peer_id);
+                    match TcpStream::connect(&peer_address).await {
+                        Ok(stream) => {
+                            println!("connected to peer {}", peer_id);
 
-                    let (tx, rx) = mpsc::channel(100);
-                    peer_manager
-                        .lock()
-                        .await
-                        .insert(peer_id, PeerHandle::new(tx.clone()));
-                    tokio::spawn(peer_task(
-                        peer_id,
-                        stream,
-                        rx,
-                        peer_manager.clone(),
-                        pending_request_manager.clone(),
-                    ));
+                            let (tx, rx) = mpsc::channel(100);
+                            peer_manager
+                                .lock()
+                                .await
+                                .insert(peer_id, PeerHandle::new(tx.clone()));
+                            tokio::spawn(peer_task(
+                                peer_id,
+                                stream,
+                                rx,
+                                peer_manager.clone(),
+                                pending_request_manager.clone(),
+                            ));
+                        }
+                        Err(e) => {
+                            println!("error connecting to peer {}: {}", peer_id, e);
+                        }
+                    }
                 }
             }
         }
