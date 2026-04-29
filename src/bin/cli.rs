@@ -3,8 +3,8 @@ use clap::Parser;
 // use distributed_online_cc::peer_message::*;
 use bytes::{Buf, BufMut, BytesMut};
 use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
+use distributed_online_cc::state::pending_reuests::PendingRequestManager;
 use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage, RequestId};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -31,18 +31,6 @@ impl RequestIdContainer {
         let id = self.next_id;
         self.next_id += 1;
         id
-    }
-}
-
-struct PendingRequestManager {
-    requests: HashMap<RequestId, oneshot::Sender<PeerMessage>>,
-}
-
-impl PendingRequestManager {
-    fn new() -> Self {
-        Self {
-            requests: HashMap::new(),
-        }
     }
 }
 
@@ -158,13 +146,13 @@ async fn handle_message(
 
             let sender = {
                 let mut prm = pending_request_manager.lock().await;
-                prm.requests.remove(&id)
+                prm.remove(&id)
             };
             if let Some(tx) = sender {
                 tx.send(PeerMessage::Response { id, payload }).unwrap();
                 println!(
                     "matched response with pending request. {} pending requests left",
-                    pending_request_manager.lock().await.requests.len()
+                    pending_request_manager.lock().await.len()
                 );
             } else {
                 println!("no pending request found for response with id {}", id);
@@ -265,11 +253,11 @@ async fn main() {
                         pm.get_sender(&peer_id)
                     };
                     if let Some(sender) = sender {
-                        prm_clone_clone.lock().await.requests.insert(request_id, tx);
+                        prm_clone_clone.lock().await.insert(request_id, tx);
                         sender.send(message).await.unwrap();
                         println!(
                             "sent request. now {} pending requests in total",
-                            pending_request_manager.lock().await.requests.len()
+                            pending_request_manager.lock().await.len()
                         );
                         match rx.await {
                             Ok(resp) => println!("got response: {:?}", resp),
