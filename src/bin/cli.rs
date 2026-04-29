@@ -1,49 +1,19 @@
 use clap::Parser;
 // use distributed_online_cc::cli_command::*;
 // use distributed_online_cc::peer_message::*;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::net::{TcpStream, TcpListener};
+use bytes::{Buf, BufMut, BytesMut};
+use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
+use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage, RequestId};
 use std::collections::HashMap;
 use std::sync::Arc;
-use bytes::{BytesMut, BufMut, Buf};
-use serde::{Serialize, Deserialize};
-
-type PeerId = u8;
-type RequestId = u64;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 // parse command line arguments
 #[derive(Parser)]
 struct Input {
     id: PeerId,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-enum PeerMessage {
-    Request { id: RequestId, payload: String },
-    Response { id: RequestId, payload: String },
-}
-
-#[derive(Debug)]
-enum CliCommand {
-    Send { peer_id: PeerId, msg: String },
-    Connect { peer_id: PeerId },
-}
-
-struct PeerHandle {
-    sender: mpsc::Sender<PeerMessage>,
-}
-
-struct PeerManager {
-    peers: HashMap<PeerId, PeerHandle>,
-}
-
-impl PeerManager {
-    fn new() -> Self {
-        Self {
-            peers: HashMap::new(),
-        }
-    }
 }
 
 struct RequestIdContainer {
@@ -52,7 +22,9 @@ struct RequestIdContainer {
 
 impl RequestIdContainer {
     fn new(initial_value: RequestId) -> Self {
-        Self { next_id: initial_value }
+        Self {
+            next_id: initial_value,
+        }
     }
 
     fn get_next_id(&mut self) -> RequestId {
@@ -149,38 +121,51 @@ async fn peer_task(
     }
 
     println!("Peer connection closed");
-
 }
 
-async fn handle_message(peer_id: PeerId, msg: PeerMessage, peer_manager: Arc<Mutex<PeerManager>>, pending_request_manager: Arc<Mutex<PendingRequestManager>>) {
+async fn handle_message(
+    peer_id: PeerId,
+    msg: PeerMessage,
+    peer_manager: Arc<Mutex<PeerManager>>,
+    pending_request_manager: Arc<Mutex<PendingRequestManager>>,
+) {
     match msg {
         PeerMessage::Request { id, payload } => {
-            println!("received request; peer_id: {}, request_id: {}, payload: {}", peer_id, id, payload);
-            
+            println!(
+                "received request; peer_id: {}, request_id: {}, payload: {}",
+                peer_id, id, payload
+            );
+
             // send response
             let response = PeerMessage::Response {
-                id: id,
+                id,
                 payload: format!("ACK '{}'", payload),
             };
-            
+
             let sender = {
                 let pm = peer_manager.lock().await;
-                pm.peers.get(&peer_id).map(|handle| handle.sender.clone())
+                pm.get_sender(&peer_id)
             };
             if let Some(sender) = sender {
                 sender.send(response).await.unwrap();
             }
         }
         PeerMessage::Response { id, payload } => {
-            println!("received response; peer_id: {}, request_id: {}, payload: {}", peer_id, id, payload);
-            
+            println!(
+                "received response; peer_id: {}, request_id: {}, payload: {}",
+                peer_id, id, payload
+            );
+
             let sender = {
                 let mut prm = pending_request_manager.lock().await;
                 prm.requests.remove(&id)
             };
             if let Some(tx) = sender {
                 tx.send(PeerMessage::Response { id, payload }).unwrap();
-                println!("matched response with pending request. {} pending requests left", pending_request_manager.lock().await.requests.len());
+                println!(
+                    "matched response with pending request. {} pending requests left",
+                    pending_request_manager.lock().await.requests.len()
+                );
             } else {
                 println!("no pending request found for response with id {}", id);
             }
@@ -211,8 +196,17 @@ async fn main() {
             let peer_id = get_id_from_address(&addr);
 
             let (tx, rx) = mpsc::channel(100);
-            pm_clone.lock().await.peers.insert(peer_id, PeerHandle { sender: tx.clone() });
-            tokio::spawn(peer_task(peer_id, stream, rx, pm_clone.clone(), prm_clone.clone()));
+            pm_clone
+                .lock()
+                .await
+                .insert(peer_id, PeerHandle::new(tx.clone()));
+            tokio::spawn(peer_task(
+                peer_id,
+                stream,
+                rx,
+                pm_clone.clone(),
+                prm_clone.clone(),
+            ));
         }
     });
 
@@ -240,7 +234,7 @@ async fn main() {
                     // send message
                     cmd_tx.send(command).await.unwrap();
                 }
-                [cmd, id_str] if cmd == "connect"=> {
+                [cmd, id_str] if cmd == "connect" => {
                     let command = CliCommand::Connect {
                         peer_id: id_str.parse().unwrap(),
                     };
@@ -250,7 +244,7 @@ async fn main() {
             }
         }
     });
-        
+
     // task that receives the command and interprets it to send a message to the peer
     let prm_clone_clone = pending_request_manager.clone();
     tokio::spawn(async move {
@@ -264,19 +258,25 @@ async fn main() {
                     };
                     // waiting channel for response
                     let (tx, rx) = oneshot::channel();
-                    
+
                     // send msg to peer_address
                     let sender = {
                         let pm = peer_manager.lock().await;
-                        pm.peers.get(&peer_id).map(|handle| handle.sender.clone())
+                        pm.get_sender(&peer_id)
                     };
                     if let Some(sender) = sender {
                         prm_clone_clone.lock().await.requests.insert(request_id, tx);
                         sender.send(message).await.unwrap();
-                        println!("sent request. now {} pending requests in total", pending_request_manager.lock().await.requests.len());
+                        println!(
+                            "sent request. now {} pending requests in total",
+                            pending_request_manager.lock().await.requests.len()
+                        );
                         match rx.await {
                             Ok(resp) => println!("got response: {:?}", resp),
-                            Err(_) => println!("error when trying to receive response for request id {}", request_id),
+                            Err(_) => println!(
+                                "error when trying to receive response for request id {}",
+                                request_id
+                            ),
                         }
                     } else {
                         println!("peer {} not connected yet", peer_id);
@@ -291,11 +291,20 @@ async fn main() {
                     let peer_address = get_address_from_id(peer_id);
 
                     let stream = TcpStream::connect(&peer_address).await.unwrap();
-                    println!("connected to peer {}" , peer_id);
+                    println!("connected to peer {}", peer_id);
 
                     let (tx, rx) = mpsc::channel(100);
-                    peer_manager.lock().await.peers.insert(peer_id, PeerHandle { sender: tx.clone() });
-                    tokio::spawn(peer_task(peer_id, stream, rx, peer_manager.clone(), pending_request_manager.clone()));
+                    peer_manager
+                        .lock()
+                        .await
+                        .insert(peer_id, PeerHandle::new(tx.clone()));
+                    tokio::spawn(peer_task(
+                        peer_id,
+                        stream,
+                        rx,
+                        peer_manager.clone(),
+                        pending_request_manager.clone(),
+                    ));
                 }
             }
         }
