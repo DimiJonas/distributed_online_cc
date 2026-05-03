@@ -1,20 +1,17 @@
 use crate::protocol::handler::handle_message;
-use crate::state::peer_manager::PeerManager;
-use crate::state::pending_reuests::PendingRequestManager;
+use crate::state::app_state::AppState;
 use crate::types::{PeerId, PeerMessage};
 use bytes::BytesMut;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 // spawn tasks that communicate with a certain peer
 pub async fn peer_task(
     peer_id: PeerId,
     mut stream: TcpStream,
     mut rx: mpsc::Receiver<PeerMessage>,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    pending_request_manager: Arc<Mutex<PendingRequestManager>>,
+    state: AppState,
 ) {
     let mut read_buf = BytesMut::with_capacity(1024);
 
@@ -36,7 +33,8 @@ pub async fn peer_task(
                         // connection closed
                         println!("got zero bytes. peer {} disconnected", peer_id);
                         println!("removing peer {} from peer manager", peer_id);
-                        peer_manager.lock().await.remove(&peer_id);
+                        let mut peers = state.peers.lock().unwrap();
+                        peers.remove(&peer_id);
                         break;
                     }
                     Ok(_) => {
@@ -48,7 +46,7 @@ pub async fn peer_task(
 
                             let msg: PeerMessage = crate::network::framing::decode(&mut read_buf);
                             println!("decoded message from peer {}: {}", peer_id, serde_json::to_string_pretty(&msg).unwrap());
-                            handle_message(peer_id, msg, peer_manager.clone(), pending_request_manager.clone()).await;
+                            handle_message(peer_id, msg, state.clone()).await;
                         }
                     }
                     Err(e) => {

@@ -1,15 +1,7 @@
-use crate::state::peer_manager::PeerManager;
-use crate::state::pending_reuests::PendingRequestManager;
+use crate::state::app_state::AppState;
 use crate::types::{PeerId, PeerMessage};
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
-pub async fn handle_message(
-    peer_id: PeerId,
-    msg: PeerMessage,
-    peer_manager: Arc<Mutex<PeerManager>>,
-    pending_request_manager: Arc<Mutex<PendingRequestManager>>,
-) {
+pub async fn handle_message(peer_id: PeerId, msg: PeerMessage, state: AppState) {
     match msg {
         PeerMessage::Request { id, payload } => {
             println!(
@@ -24,8 +16,8 @@ pub async fn handle_message(
             };
 
             let sender = {
-                let pm = peer_manager.lock().await;
-                pm.get_sender(&peer_id)
+                let peers = state.peers.lock().unwrap();
+                peers.get_sender(&peer_id)
             };
             if let Some(sender) = sender {
                 sender.send(response).await.unwrap();
@@ -37,15 +29,16 @@ pub async fn handle_message(
                 peer_id, id, payload
             );
 
-            let sender = {
-                let mut prm = pending_request_manager.lock().await;
-                prm.remove(&id)
+            let (sender, len) = {
+                let mut pending = state.pending.lock().unwrap();
+                (pending.remove(&id), pending.len())
             };
+
             if let Some(tx) = sender {
                 tx.send(PeerMessage::Response { id, payload }).unwrap();
                 println!(
                     "matched response with pending request. {} pending requests left",
-                    pending_request_manager.lock().await.len()
+                    len
                 );
             } else {
                 println!("no pending request found for response with id {}", id);

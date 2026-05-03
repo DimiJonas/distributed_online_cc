@@ -1,13 +1,11 @@
 use clap::Parser;
 use distributed_online_cc::network::peer::peer_task;
-use distributed_online_cc::state::peer_manager::{PeerHandle, PeerManager};
-use distributed_online_cc::state::pending_reuests::PendingRequestManager;
-use distributed_online_cc::state::request_id_container::RequestIdContainer;
+use distributed_online_cc::state::app_state::AppState;
+use distributed_online_cc::state::peer_manager::PeerHandle;
 use distributed_online_cc::types::{CliCommand, PeerId, PeerMessage};
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 // parse command line arguments
 #[derive(Parser)]
@@ -29,34 +27,30 @@ async fn main() {
     let host_id = args.id;
     let host_address = get_address_from_id(host_id);
 
-    let request_id_container = Arc::new(Mutex::new(RequestIdContainer::new(host_id as u64 * 100)));
-    let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
-    let pending_request_manager = Arc::new(Mutex::new(PendingRequestManager::new()));
+    // let request_id_container = Arc::new(Mutex::new(RequestIdContainer::new(host_id as u64 * 100)));
+    // let peer_manager = Arc::new(Mutex::new(PeerManager::new()));
+    // let pending_request_manager = Arc::new(Mutex::new(PendingRequestManager::new()));
+
+    let state = AppState::new(host_id as u64 * 100);
+    let listener_state = state.clone();
 
     // peer listener task
     let listener = TcpListener::bind(&host_address).await.unwrap();
     println!("listening for peer messages on {}", host_address);
-    let pm_clone = peer_manager.clone();
-    let prm_clone = pending_request_manager.clone();
     tokio::spawn(async move {
         loop {
             let (stream, addr) = listener.accept().await.unwrap();
             println!("new peer connection from {}", addr);
-
             let peer_id = get_id_from_address(&addr);
-
             let (tx, rx) = mpsc::channel(100);
-            pm_clone
-                .lock()
-                .await
-                .insert(peer_id, PeerHandle::new(tx.clone()));
-            tokio::spawn(peer_task(
-                peer_id,
-                stream,
-                rx,
-                pm_clone.clone(),
-                prm_clone.clone(),
-            ));
+
+            // drop lock before spawning tasks
+            {
+                let mut peers = listener_state.peers.lock().unwrap();
+                peers.insert(peer_id, PeerHandle::new(tx.clone()));
+            }
+
+            tokio::spawn(peer_task(peer_id, stream, rx, listener_state.clone()));
         }
     });
 
@@ -96,12 +90,16 @@ async fn main() {
     });
 
     // task that receives the command and interprets it to send a message to the peer
-    let prm_clone_clone = pending_request_manager.clone();
+    let cmd_interpreter_state = state.clone();
     tokio::spawn(async move {
         while let Some(command) = cmd_rx.recv().await {
             match command {
                 CliCommand::Send { peer_id, msg } => {
-                    let request_id = request_id_container.lock().await.get_next_id();
+                    let request_id = {
+                        let mut request_ids = cmd_interpreter_state.request_ids.lock().unwrap();
+                        request_ids.get_next_id()
+                    };
+
                     let message = PeerMessage::Request {
                         id: request_id,
                         payload: msg.clone(),
@@ -111,16 +109,18 @@ async fn main() {
 
                     // send msg to peer_address
                     let sender = {
-                        let pm = peer_manager.lock().await;
-                        pm.get_sender(&peer_id)
+                        let peers = state.peers.lock().unwrap();
+                        peers.get_sender(&peer_id)
                     };
                     if let Some(sender) = sender {
-                        prm_clone_clone.lock().await.insert(request_id, tx);
+                        let len = {
+                            let mut pending = cmd_interpreter_state.pending.lock().unwrap();
+                            pending.insert(request_id, tx);
+                            pending.len()
+                        };
+
                         sender.send(message).await.unwrap();
-                        println!(
-                            "sent request. now {} pending requests in total",
-                            pending_request_manager.lock().await.len()
-                        );
+                        println!("sent request. now {} pending requests in total", len);
                         match rx.await {
                             Ok(resp) => println!("got response: {:?}", resp),
                             Err(_) => println!(
@@ -145,16 +145,16 @@ async fn main() {
                             println!("connected to peer {}", peer_id);
 
                             let (tx, rx) = mpsc::channel(100);
-                            peer_manager
-                                .lock()
-                                .await
-                                .insert(peer_id, PeerHandle::new(tx.clone()));
+                            {
+                                let mut peers = cmd_interpreter_state.peers.lock().unwrap();
+                                peers.insert(peer_id, PeerHandle::new(tx.clone()));
+                            }
+
                             tokio::spawn(peer_task(
                                 peer_id,
                                 stream,
                                 rx,
-                                peer_manager.clone(),
-                                pending_request_manager.clone(),
+                                cmd_interpreter_state.clone(),
                             ));
                         }
                         Err(e) => {
