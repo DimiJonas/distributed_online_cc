@@ -1,4 +1,4 @@
-// pub mod app;
+pub mod app;
 pub mod cli;
 pub mod network;
 pub mod protocol;
