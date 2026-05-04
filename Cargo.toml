@@ -21,3 +21,5 @@ shell-words = "1.1.1"
 quick-xml = { version = "0.39.2", features = ["async-tokio"] }
 # handle gregorian calendar time
 chrono = { version = "0.4.44", features = ["serde"] }
+# some process mining utilities
+process_mining = "0.5.5"

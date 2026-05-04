@@ -1,8 +1,7 @@
-use crate::state::app_state::AppState;
-use crate::types::XesEvent;
+use crate::{state::app_state::AppState, types::TracedEvent};
 use tokio::sync::mpsc;
 
-pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<XesEvent>) {
+pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<TracedEvent>) {
     tokio::spawn(async move {
         loop {
             if let Some(event) = event_q.recv().await {

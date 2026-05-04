@@ -25,7 +25,7 @@ the peer has to be running in another temrinal
 
 then send a message
 
-> send <peer_id> "<string message>"
+> send <peer_id> <string message>
 
 e.g.
 

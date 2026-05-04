@@ -1,6 +1,6 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+use process_mining::core::event_data::case_centric::{Event, XESEditableAttribute};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub type PeerId = u8;
 pub type RequestId = u64;
@@ -17,34 +17,30 @@ pub enum CliCommand {
     Connect { peer_id: PeerId },
 }
 
+// augmenting the Event struct from rust4pm with a trace id
 #[derive(Debug, Clone, Serialize)]
-pub enum XesAttributeValue {
-    String(String),
-    Date(DateTime<Utc>),
-    Int(i64),
-    Float(f64),
-    Boolean(bool),
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct XesEvent {
-    // from parent <trace>'s concept:name
+pub struct TracedEvent {
     pub trace_id: String,
-    pub attributes: HashMap<String, XesAttributeValue>,
+    pub event: Event,
 }
 
-impl XesEvent {
-    pub fn name(&self) -> Option<&str> {
-        match self.attributes.get("concept:name") {
-            Some(XesAttributeValue::String(name)) => Some(name.as_str()),
-            _ => None,
-        }
+impl TracedEvent {
+    pub fn timestamp(&self) -> Option<&DateTime<FixedOffset>> {
+        self.event
+            .attributes
+            .get_by_key("time:timestamp")
+            .and_then(|a| a.value.try_as_date())
     }
 
-    pub fn timestamp(&self) -> Option<DateTime<Utc>> {
-        match self.attributes.get("time:timestamp") {
-            Some(XesAttributeValue::Date(timestamp)) => Some(*timestamp),
-            _ => None,
-        }
+    pub fn timestamo_utc(&self) -> Option<DateTime<Utc>> {
+        self.timestamp().map(|dt| dt.with_timezone(&Utc))
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        self.event
+            .attributes
+            .get_by_key("concept:name")
+            .and_then(|a| a.value.try_as_string())
+            .map(|s| s.as_str())
     }
 }
