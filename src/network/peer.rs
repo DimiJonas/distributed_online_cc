@@ -1,4 +1,5 @@
-use crate::protocol::handler::handle_message;
+use crate::network::framing::*;
+use crate::protocol::tcp_handler::handle_message;
 use crate::state::app_state::AppState;
 use crate::types::{PeerId, PeerMessage};
 use bytes::BytesMut;
@@ -19,7 +20,7 @@ pub async fn peer_task(
         tokio::select! {
             // send msg
             Some(msg) = rx.recv() => {
-                let framed_msg = crate::network::framing::encode(&msg);
+                let framed_msg = encode(&msg);
 
                 if stream.write_all(&framed_msg).await.is_err() {
                     eprintln!("error sending to peer {}", peer_id);
@@ -40,11 +41,11 @@ pub async fn peer_task(
                     Ok(_) => {
                         // some bytes received
                         loop {
-                            if !crate::network::framing::check_frame(&read_buf) {
+                            if !check_frame(&read_buf) {
                                 break;
                             }
 
-                            let msg: PeerMessage = crate::network::framing::decode(&mut read_buf);
+                            let msg: PeerMessage = decode(&mut read_buf);
                             println!("decoded message from peer {}: {}", peer_id, serde_json::to_string_pretty(&msg).unwrap());
                             handle_message(peer_id, msg, state.clone()).await;
                         }

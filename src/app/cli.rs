@@ -6,10 +6,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
-fn get_address_from_id(id: PeerId) -> String {
-    format!("127.0.0.1:{}", 7000 + id as u16)
-}
-
 pub fn spawn_cli(state: AppState, host_id: PeerId) {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -96,7 +92,8 @@ pub fn spawn_cli(state: AppState, host_id: PeerId) {
                         continue;
                     }
 
-                    let peer_address = get_address_from_id(peer_id);
+                    let peer_address =
+                        crate::util::address_id_conversion::get_address_from_id(peer_id);
 
                     match TcpStream::connect(&peer_address).await {
                         Ok(stream) => {

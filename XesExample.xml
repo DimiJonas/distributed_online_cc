@@ -1,0 +1,28 @@
+<!--
+- A log contains multiple traces (also called cases)
+- A trace represents one process instance (e.g. one transaction, one peer session)
+- A trace contains multiple events
+- Each event has typed attributes: string, date, int, float, boolean
+- concept:name and time:timestamp are the standard mandatory fields
+-->
+
+<?xml version="1.0" encoding="UTF-8"?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-1"/>   <!-- trace/case identifier -->
+    <event>
+      <string key="concept:name" value="peer_connected"/>   <!-- event name -->
+      <string key="org:resource" value="peer-42"/>          <!-- who did it -->
+      <date key="time:timestamp" value="2026-05-03T10:00:00Z"/>
+      <int key="some:count" value="7"/>
+      <float key="some:ratio" value="0.9"/>
+      <boolean key="some:flag" value="true"/>
+    </event>
+    <event>
+      <!-- another event in the same trace/case -->
+    </event>
+  </trace>
+  <trace>
+    <!-- another case -->
+  </trace>
+</log>

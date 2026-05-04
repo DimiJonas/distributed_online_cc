@@ -1,13 +1,8 @@
 use crate::network::peer::peer_task;
 use crate::state::app_state::AppState;
 use crate::state::peer_manager::PeerHandle;
-use crate::types::PeerId;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-
-fn get_id_from_address(addr: &std::net::SocketAddr) -> PeerId {
-    (addr.port() - 7000) as PeerId
-}
 
 pub fn spawn_listener(state: AppState, host_address: String) {
     tokio::spawn(async move {
@@ -17,7 +12,7 @@ pub fn spawn_listener(state: AppState, host_address: String) {
         loop {
             let (stream, addr) = listener.accept().await.unwrap();
             println!("new peer connection from {}", addr);
-            let peer_id = get_id_from_address(&addr);
+            let peer_id = crate::util::address_id_conversion::get_id_from_address(&addr);
             let (tx, rx) = mpsc::channel(100);
 
             // drop lock before spawning tasks

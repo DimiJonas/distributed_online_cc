@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-1"/>
+    <event>
+      <string key="concept:name" value="peer_connected"/>
+      <string key="org:resource" value="peer-42"/>
+      <date key="time:timestamp" value="2026-05-04T10:00:00Z"/>
+      <int key="some:count" value="3"/>
+    </event>
+  </trace>
+</log>
