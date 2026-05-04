@@ -24,6 +24,9 @@ impl PeerManager {
     }
 
     pub fn insert(&mut self, peer_id: PeerId, handle: PeerHandle) {
+        if self.peers.contains_key(&peer_id) {
+            println!("peer with id {} already exists, overwriting", peer_id);
+        }
         self.peers.insert(peer_id, handle);
     }
 
