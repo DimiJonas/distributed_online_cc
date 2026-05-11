@@ -1,4 +1,5 @@
 use crate::config::types::NodeConfig;
+use crate::state::cc_result_store::CCResultStore;
 use crate::state::peer_manager::PeerManager;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::request_id_container::RequestIdContainer;
@@ -15,6 +16,7 @@ pub struct AppState {
     pub request_ids: Arc<Mutex<RequestIdContainer>>,
     pub event_q: mpsc::Sender<TracedEvent>,
     pub token_store: Arc<Mutex<TokenStore>>,
+    pub cc_results: Arc<Mutex<CCResultStore>>,
     // handler registry?
 }
 
@@ -31,6 +33,7 @@ impl AppState {
             request_ids: Arc::new(Mutex::new(RequestIdContainer::new(initial_request_id))),
             event_q,
             token_store: Arc::new(Mutex::new(TokenStore::new())),
+            cc_results: Arc::new(Mutex::new(CCResultStore::new())),
         }
     }
 }

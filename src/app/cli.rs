@@ -1,6 +1,6 @@
 use crate::network::peer::peer_task_initiated;
 use crate::state::app_state::AppState;
-use crate::types::{CliCommand, CliTestMessage, PeerId, PeerMessage};
+use crate::types::{CliCommand, CliTestMessage, PeerMessage};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -56,7 +56,7 @@ pub fn spawn_cli(state: AppState) {
                     let message = PeerMessage::cli(CliTestMessage {
                         request_id,
                         message: msg.clone(),
-                        sender_addr: cmd_interpreter_state.config.listen_address.clone(),
+                        sender_addr: cmd_interpreter_state.config.listen_address,
                     });
                     // waiting channel for response
                     let (tx, rx) = oneshot::channel();

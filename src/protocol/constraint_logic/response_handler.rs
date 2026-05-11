@@ -1,4 +1,4 @@
-use process_mining::core::event_data::case_centric::Event;
+use std::net::SocketAddr;
 
 /*
     a Response constraint defines that after Event/Activity A happened, Event/Activity B must also happen at some point after that
@@ -24,7 +24,8 @@ use process_mining::core::event_data::case_centric::Event;
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::state::app_state::AppState;
 use crate::types::{
-    CCMessage, CCMessageType, ConstraintId, ConstraintType, PeerId, Token, TokenId, TracedEvent,
+    CCMessage, CCMessageType, CaseId, ConstraintId, ConstraintResultType, ConstraintType,
+    PeerMessage, Token, TokenId, TracedEvent,
 };
 use async_trait::async_trait;
 
@@ -37,7 +38,7 @@ pub struct ResponseProducerHandler {
 impl ConstraintHandler for ResponseProducerHandler {
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         let token = Token::new(
-            event.trace_id.clone(),
+            event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Response,
             state.config.node_id,
@@ -55,11 +56,35 @@ impl ConstraintHandler for ResponseProducerHandler {
                 store.remove_out(&message.case_id, &self.constraint_id);
             }
             CCMessageType::CaseTerminated => {
-                let mut store = state.token_store.lock().unwrap();
-                let response_satisfied =
-                    !store.has_open_token(&message.case_id, &self.constraint_id);
-                store.remove_out(&message.case_id, &self.constraint_id);
-                // TODO: do something with the constraint result
+                let (constraint_result, token) = {
+                    let mut token_store = state.token_store.lock().unwrap();
+                    let constraint_result: ConstraintResultType =
+                        match token_store.has_open_token(&message.case_id, &self.constraint_id) {
+                            true => ConstraintResultType::Violated,
+                            false => ConstraintResultType::Satisfied,
+                        };
+                    (
+                        constraint_result,
+                        token_store.remove_out(&message.case_id, &self.constraint_id),
+                    )
+                };
+                let info = match token {
+                    Some(t) => format!(
+                        "token still exists. id: {} timestamp: {}",
+                        t.id, t.created_at
+                    ),
+                    None => "no tokens exist".to_string(),
+                };
+                {
+                    let mut result_store = state.cc_results.lock().unwrap();
+                    result_store.update(
+                        &message.case_id,
+                        &self.constraint_id,
+                        constraint_result,
+                        info,
+                    );
+                    // TODO: some grace period or something?
+                }
             }
             _ => {}
         }
@@ -69,26 +94,44 @@ impl ConstraintHandler for ResponseProducerHandler {
 pub struct ResponseConsumerHandler {
     pub constraint_id: ConstraintId,
     pub event_id: String,
-    pub producer_peers: Vec<PeerId>,
+    pub producer_peers: Vec<SocketAddr>,
 }
 
 #[async_trait]
 impl ConstraintHandler for ResponseConsumerHandler {
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        let delete_trigger_messages: Vec<CCMessage> = self
-            .producer_peers
-            .iter()
-            .map(|&p| {
-                CCMessage::delete_token(
-                    state.config.node_id,
-                    p,
-                    event.trace_id.clone(),
-                    self.constraint_id.clone(),
-                    TokenId::nil(),
-                )
-            })
-            .collect();
-        // TODO: send messages
+        for &peer_addr in self.producer_peers.iter() {
+            send_delete_token(
+                peer_addr,
+                event.case_id.clone(),
+                self.constraint_id.clone(),
+                &state,
+            )
+            .await;
+        }
     }
-    async fn handle_message(&self, _state: AppState, _message: CCMessage) {}
+}
+
+async fn send_delete_token(
+    peer_addr: SocketAddr,
+    trace_id: CaseId,
+    constraint_id: ConstraintId,
+    state: &AppState,
+) {
+    let message = PeerMessage::conformance(CCMessage::delete_token(
+        trace_id,
+        constraint_id,
+        TokenId::nil(),
+    ));
+    let sender = {
+        let peers = state.peers.lock().unwrap();
+        peers.get_sender(&peer_addr)
+    };
+    match sender {
+        Some(sender) => {
+            sender.send(message).await.unwrap();
+            println!("sent delete token message to {}", peer_addr);
+        }
+        None => println!("peer {} not connected yet", peer_addr),
+    }
 }

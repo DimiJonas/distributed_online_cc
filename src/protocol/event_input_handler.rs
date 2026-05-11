@@ -1,4 +1,4 @@
-use crate::types::TracedEvent;
+use crate::types::{CaseId, TracedEvent};
 use bytes::BytesMut;
 use process_mining::core::event_data::case_centric::xes::build_ignore_attributes;
 use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
@@ -36,10 +36,11 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
 
         let log = import_xes_slice(&read_buf, false, import_options).unwrap();
         for trace in log.traces {
-            let trace_id = get_trace_id(&trace);
+            let trace_id: CaseId = get_trace_id(&trace);
+
             for event in trace.events {
                 let traced_event = TracedEvent {
-                    trace_id: trace_id.clone(),
+                    case_id: trace_id.clone(),
                     event,
                 };
 

@@ -1,7 +1,6 @@
 use clap::Parser;
 use distributed_online_cc::config::config_loader::load_config;
 use distributed_online_cc::state::app_state::AppState;
-use distributed_online_cc::types::PeerId;
 
 // parse command line arguments
 #[derive(Parser)]
@@ -20,6 +19,8 @@ async fn main() {
 
     let state = AppState::new(config, host_id as u64 * 1000, event_q_tx);
 
+    initialize_node(state.clone());
+
     distributed_online_cc::app::tcp_listener::spawn_listener(
         state.clone(),
         state.config.listen_address,
@@ -34,4 +35,8 @@ async fn main() {
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();
     println!("shutting down main");
+}
+
+fn initialize_node(state: AppState) {
+    // TODO: create tcp channels from config
 }

@@ -1,7 +1,6 @@
 use crate::state::app_state::AppState;
 use crate::types::{
-    CCMessage, CliTestMessage, OverlayMessage, PeerMessage, PeerMessagePayload,
-    TerminationDetectionMessage,
+    CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
 };
 
 pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
@@ -19,7 +18,7 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
             (pending.remove(&msg.request_id), pending.len())
         };
 
-        if let Some(_) = sender {
+        if sender.is_some() {
             println!(
                 "matched response with pending request. {} pending requests left",
                 len
@@ -34,12 +33,11 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
         // its a request
 
         // send response
-        let resp_payload = PeerMessagePayload::Cli(CliTestMessage {
+        let response = PeerMessage::cli(CliTestMessage {
             request_id: msg.request_id,
             message: format!("ACK '{}'", msg.message),
-            sender_addr: state.config.listen_address.clone(),
+            sender_addr: state.config.listen_address,
         });
-        let response = PeerMessage::new(resp_payload);
 
         let sender = {
             let peers = state.peers.lock().unwrap();

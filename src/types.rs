@@ -26,7 +26,7 @@ pub enum CliCommand {
 // augmenting the Event struct from rust4pm with a trace id
 #[derive(Debug, Clone, Serialize)]
 pub struct TracedEvent {
-    pub trace_id: String,
+    pub case_id: CaseId,
     pub event: Event,
 }
 
@@ -51,9 +51,33 @@ impl TracedEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConstraintType {
     Response,
+}
+
+impl ConstraintType {
+    // each constraint type can start with a different result
+    pub fn initial_result(&self) -> ConstraintResultType {
+        match self {
+            ConstraintType::Response => ConstraintResultType::Satisfied,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ConstraintResultType {
+    Violated,
+    TemporarilyViolated,
+    Satisfied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstraintResult {
+    pub constraint_type: ConstraintType,
+    pub constraint_result: ConstraintResultType,
+    pub info: String,
+    pub history: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
