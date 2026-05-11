@@ -18,6 +18,7 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
         }
 
         let import_options: XESImportOptions = XESImportOptions {
+            // TODO:
             // only parse the attributes actually needed
             ignore_event_attributes_except: Some(build_ignore_attributes(vec![
                 "concept:name",
@@ -41,6 +42,9 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
                     trace_id: trace_id.clone(),
                     event,
                 };
+
+                // TODO: filter events to only put events that are configured to be checked (are part of a constraint for this node) into the queue
+
                 if event_q.send(traced_event).await.is_err() {
                     // error, shut down event handler worker task
                     eprintln!("event input handler dropped, unable to send event");
@@ -52,6 +56,7 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
 }
 
 fn get_trace_id(trace: &Trace) -> String {
+    // TODO: handle events from Isa if the case id is an event attribute named 'case:concept:name'
     trace
         .attributes
         .get_by_key("concept:name")

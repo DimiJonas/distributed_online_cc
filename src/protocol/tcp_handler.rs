@@ -1,48 +1,58 @@
 use crate::state::app_state::AppState;
-use crate::types::{PeerId, PeerMessage};
+use crate::types::{
+    CCMessage, CliTestMessage, OverlayMessage, PeerMessage, PeerMessagePayload,
+    TerminationDetectionMessage,
+};
 
-pub async fn handle_message(peer_id: PeerId, msg: PeerMessage, state: AppState) {
-    match msg {
-        PeerMessage::Request { id, payload } => {
+pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
+    println!(
+        "received cli message; {}",
+        serde_json::to_string_pretty(&msg).unwrap()
+    );
+
+    if msg.message.starts_with("ACK") {
+        // its a response
+
+        // remove pending request
+        let (sender, len) = {
+            let mut pending = state.pending.lock().unwrap();
+            (pending.remove(&msg.request_id), pending.len())
+        };
+
+        if let Some(_) = sender {
             println!(
-                "received request; peer_id: {}, request_id: {}, payload: {}",
-                peer_id, id, payload
+                "matched response with pending request. {} pending requests left",
+                len
             );
-
-            // send response
-            let response = PeerMessage::Response {
-                id,
-                payload: format!("ACK '{}'", payload),
-            };
-
-            let sender = {
-                let peers = state.peers.lock().unwrap();
-                peers.get_sender(&peer_id)
-            };
-            if let Some(sender) = sender {
-                sender.send(response).await.unwrap();
-            }
+        } else {
+            println!(
+                "no pending request found for response with id {}",
+                msg.request_id
+            );
         }
-        PeerMessage::Response { id, payload } => {
-            println!(
-                "received response; peer_id: {}, request_id: {}, payload: {}",
-                peer_id, id, payload
-            );
+    } else {
+        // its a request
 
-            let (sender, len) = {
-                let mut pending = state.pending.lock().unwrap();
-                (pending.remove(&id), pending.len())
-            };
+        // send response
+        let resp_payload = PeerMessagePayload::Cli(CliTestMessage {
+            request_id: msg.request_id,
+            message: format!("ACK '{}'", msg.message),
+            sender_addr: state.config.listen_address.clone(),
+        });
+        let response = PeerMessage::new(resp_payload);
 
-            if let Some(tx) = sender {
-                tx.send(PeerMessage::Response { id, payload }).unwrap();
-                println!(
-                    "matched response with pending request. {} pending requests left",
-                    len
-                );
-            } else {
-                println!("no pending request found for response with id {}", id);
-            }
+        let sender = {
+            let peers = state.peers.lock().unwrap();
+            peers.get_sender(&msg.sender_addr)
+        };
+        if let Some(sender) = sender {
+            sender.send(response).await.unwrap();
         }
     }
 }
+
+pub async fn handle_cc_message(msg: CCMessage, state: AppState) {}
+
+pub async fn handle_td_message(msg: TerminationDetectionMessage, state: AppState) {}
+
+pub async fn handle_overlay_message(msg: OverlayMessage, state: AppState) {}

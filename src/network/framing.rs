@@ -12,6 +12,7 @@ pub fn encode(msg: &PeerMessage) -> BytesMut {
     framed_msg.extend_from_slice(&msg_bytes);
     framed_msg
 }
+
 pub fn decode(buf: &mut BytesMut) -> PeerMessage {
     let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
 

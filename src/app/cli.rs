@@ -1,12 +1,11 @@
-use crate::network::peer::peer_task;
+use crate::network::peer::peer_task_initiated;
 use crate::state::app_state::AppState;
-use crate::state::peer_manager::PeerHandle;
-use crate::types::{CliCommand, PeerId, PeerMessage};
+use crate::types::{CliCommand, CliTestMessage, PeerId, PeerMessage};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
-pub fn spawn_cli(state: AppState, host_id: PeerId) {
+pub fn spawn_cli(state: AppState) {
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     // connects command listener task and command interpreter task
@@ -24,17 +23,17 @@ pub fn spawn_cli(state: AppState, host_id: PeerId) {
             };
 
             match parts.as_slice() {
-                [cmd, id_str, msg] if cmd == "send" => {
+                [cmd, addr_str, msg] if cmd == "send" => {
                     let command = CliCommand::Send {
-                        peer_id: id_str.parse().unwrap(),
+                        peer_address: addr_str.parse().unwrap(),
                         msg: msg.to_string(),
                     };
                     // send message
                     cmd_tx.send(command).await.unwrap();
                 }
-                [cmd, id_str] if cmd == "connect" => {
+                [cmd, addr_str] if cmd == "connect" => {
                     let command = CliCommand::Connect {
-                        peer_id: id_str.parse().unwrap(),
+                        peer_address: addr_str.parse().unwrap(),
                     };
                     cmd_tx.send(command).await.unwrap();
                 }
@@ -48,23 +47,24 @@ pub fn spawn_cli(state: AppState, host_id: PeerId) {
     tokio::spawn(async move {
         while let Some(command) = cmd_rx.recv().await {
             match command {
-                CliCommand::Send { peer_id, msg } => {
+                CliCommand::Send { peer_address, msg } => {
                     let request_id = {
                         let mut request_ids = cmd_interpreter_state.request_ids.lock().unwrap();
                         request_ids.get_next_id()
                     };
 
-                    let message = PeerMessage::Request {
-                        id: request_id,
-                        payload: msg.clone(),
-                    };
+                    let message = PeerMessage::cli(CliTestMessage {
+                        request_id,
+                        message: msg.clone(),
+                        sender_addr: cmd_interpreter_state.config.listen_address.clone(),
+                    });
                     // waiting channel for response
                     let (tx, rx) = oneshot::channel();
 
                     // send msg to peer_address
                     let sender = {
                         let peers = state.peers.lock().unwrap();
-                        peers.get_sender(&peer_id)
+                        peers.get_sender(&peer_address)
                     };
                     if let Some(sender) = sender {
                         let len = {
@@ -83,37 +83,25 @@ pub fn spawn_cli(state: AppState, host_id: PeerId) {
                             ),
                         }
                     } else {
-                        println!("peer {} not connected yet", peer_id);
+                        println!("peer {} not connected yet", peer_address);
                     }
                 }
-                CliCommand::Connect { peer_id } => {
-                    if peer_id == host_id {
+                CliCommand::Connect { peer_address } => {
+                    if peer_address == state.config.listen_address {
                         println!("cannot connect to self");
                         continue;
                     }
 
-                    let peer_address =
-                        crate::util::address_id_conversion::get_address_from_id(peer_id);
-
                     match TcpStream::connect(&peer_address).await {
                         Ok(stream) => {
-                            println!("connected to peer {}", peer_id);
-
-                            let (tx, rx) = mpsc::channel(100);
-                            {
-                                let mut peers = cmd_interpreter_state.peers.lock().unwrap();
-                                peers.insert(peer_id, PeerHandle::new(tx.clone()));
-                            }
-
-                            tokio::spawn(peer_task(
-                                peer_id,
+                            tokio::spawn(peer_task_initiated(
+                                peer_address,
                                 stream,
-                                rx,
                                 cmd_interpreter_state.clone(),
                             ));
                         }
                         Err(e) => {
-                            println!("error connecting to peer {}: {}", peer_id, e);
+                            println!("error connecting to peer {}: {}", peer_address, e);
                         }
                     }
                 }

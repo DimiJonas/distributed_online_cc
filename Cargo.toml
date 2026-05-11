@@ -15,6 +15,8 @@ bytes = "1.11.1"
 # serialization + deserialization
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+# serde compatible toml parsing library to parse config
+toml = "1.1.2+spec-1.1.0"
 # understand shell quotes
 shell-words = "1.1.1"
 # xml parsing
@@ -23,3 +25,7 @@ quick-xml = { version = "0.39.2", features = ["async-tokio"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 # some process mining utilities
 process_mining = "0.5.5"
+# generate uuids
+uuid = { version = "1.23.1", features = ["v4", "serde"] }
+# using async functions in traits
+async-trait = "0.1.89"

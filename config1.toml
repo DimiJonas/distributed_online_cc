@@ -1,0 +1,8 @@
+node_id = 1
+listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener1.sock"
+
+[[constraints]]
+constraint_role = "ResponseProducer"
+constraint_id = "response_order_shipped"
+event_id = "order_placed"

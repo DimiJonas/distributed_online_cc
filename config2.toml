@@ -1,0 +1,9 @@
+node_id = 2
+listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener2.sock"
+
+[[constraints]]
+constraint_role = "ResponseConsumer"
+constraint_id = "response_order_shipped"
+event_id = "order_shipped"
+node_a_peers = [127.0.0.1:8001]
