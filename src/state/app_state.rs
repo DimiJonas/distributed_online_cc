@@ -21,12 +21,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config_path: String, event_q: mpsc::Sender<TracedEvent>) -> Self {
-        let config = Arc::new(NodeConfig::load_config(&config_path));
+    pub fn new(config: NodeConfig, event_q: mpsc::Sender<TracedEvent>) -> Self {
         let handlers = Arc::new(HandlerRegistry::build(&config));
         let initial_request_id = config.node_id as u64 * 1000;
         Self {
-            config,
+            config: Arc::new(config),
             peers: Arc::new(Mutex::new(PeerManager::new())),
             pending: Arc::new(Mutex::new(PendingRequestManager::new())),
             request_ids: Arc::new(Mutex::new(RequestIdContainer::new(initial_request_id))),

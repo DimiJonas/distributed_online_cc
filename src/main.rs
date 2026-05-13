@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use distributed_online_cc::config::node_config::NodeConfig;
 use distributed_online_cc::network::tcp_channel::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
 
@@ -14,10 +15,10 @@ struct Input {
 #[tokio::main]
 async fn main() {
     let args = Input::parse();
+    let config: NodeConfig = NodeConfig::load_config(&args.config_path);
+    let (event_q_tx, _event_q_rx) = tokio::sync::mpsc::channel(config.event_queue_size);
 
-    let (event_q_tx, _event_q_rx) = tokio::sync::mpsc::channel(100);
-
-    let state = AppState::new(args.config_path, event_q_tx);
+    let state = AppState::new(config, event_q_tx);
 
     initialize_node(state.clone()).await;
 

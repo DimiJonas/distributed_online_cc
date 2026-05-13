@@ -60,7 +60,7 @@ pub async fn peer_task_initiated(peer_address: SocketAddr, mut stream: TcpStream
         return;
     }
 
-    let (tx, rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
 
     {
         let mut peers = state.peers.lock().unwrap();
@@ -111,7 +111,7 @@ pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
         return;
     }
 
-    let (tx, rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
 
     {
         let mut peers = state.peers.lock().unwrap();

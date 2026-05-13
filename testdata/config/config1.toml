@@ -1,6 +1,8 @@
 node_id = 1
 listen_address = "127.0.0.1:8001"
 unix_socket = "/tmp/event_listener1.sock"
+event_queue_size = "100"
+tcp_channel_queue_size = "100"
 
 [[constraints]]
 constraint_role = "ResponseProducer"

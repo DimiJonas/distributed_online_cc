@@ -66,6 +66,10 @@ pub struct NodeConfig {
     pub unix_socket: String,
     #[serde(default)]
     pub peers: Vec<String>,
+    #[serde(default = "default_event_q_size")]
+    pub event_queue_size: usize,
+    #[serde(default = "default_tcp_channel_queue_size")]
+    pub tcp_channel_queue_size: usize,
     pub constraints: Vec<ConstraintConfig>,
 }
 
@@ -74,4 +78,12 @@ impl NodeConfig {
         let contents = fs::read_to_string(path).expect("could not read config file");
         toml::from_str(&contents).expect("could not parse config file")
     }
+}
+
+fn default_event_q_size() -> usize {
+    100
+}
+
+fn default_tcp_channel_queue_size() -> usize {
+    100
 }
