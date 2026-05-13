@@ -1,5 +1,7 @@
 use crate::types::RequestId;
 
+// right now only used for test cli messages
+// TODO: consider removing this and just generating uuids as request ids or something similar
 pub struct RequestIdContainer {
     next_id: RequestId,
 }

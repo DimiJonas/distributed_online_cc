@@ -1,8 +1,7 @@
-use crate::network::peer::peer_task_initiated;
+use crate::network::peer::connect_peer;
 use crate::state::app_state::AppState;
 use crate::types::{CliCommand, CliTestMessage, PeerMessage};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
 pub fn spawn_cli(state: AppState) {
@@ -91,19 +90,7 @@ pub fn spawn_cli(state: AppState) {
                         println!("cannot connect to self");
                         continue;
                     }
-
-                    match TcpStream::connect(&peer_address).await {
-                        Ok(stream) => {
-                            tokio::spawn(peer_task_initiated(
-                                peer_address,
-                                stream,
-                                cmd_interpreter_state.clone(),
-                            ));
-                        }
-                        Err(e) => {
-                            println!("error connecting to peer {}: {}", peer_address, e);
-                        }
-                    }
+                    connect_peer(peer_address, state.clone()).await;
                 }
             }
         }

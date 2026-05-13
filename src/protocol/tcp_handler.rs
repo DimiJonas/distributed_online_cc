@@ -1,9 +1,11 @@
+use uuid::Uuid;
+
 use crate::state::app_state::AppState;
 use crate::types::{
     CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
 };
 
-pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
+pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uuid) {
     println!(
         "received cli message; {}",
         serde_json::to_string_pretty(&msg).unwrap()
@@ -49,8 +51,14 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState) {
     }
 }
 
-pub async fn handle_cc_message(msg: CCMessage, state: AppState) {}
+pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
+    println!("handling conformance message with id {}", &msg_id);
 
-pub async fn handle_td_message(msg: TerminationDetectionMessage, state: AppState) {}
+    if let Some(handler) = state.handlers.get_by_constraint_id(&msg.constraint_id) {
+        handler.handle_message(state.clone(), msg).await;
+    }
+}
 
-pub async fn handle_overlay_message(msg: OverlayMessage, state: AppState) {}
+pub async fn handle_td_message(msg: TerminationDetectionMessage, state: AppState, msg_id: Uuid) {}
+
+pub async fn handle_overlay_message(msg: OverlayMessage, state: AppState, msg_id: Uuid) {}

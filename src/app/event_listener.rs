@@ -3,12 +3,12 @@ use crate::state::app_state::AppState;
 use tokio::net::UnixListener;
 
 pub fn spawn_event_listener(state: AppState) {
-    let socket_path = "/tmp/event_listener.sock";
+    let socket_path = state.config.unix_socket.clone();
     // remove existing file, possibly from previous run
-    let _ = std::fs::remove_file(socket_path);
+    let _ = std::fs::remove_file(&socket_path);
 
     tokio::spawn(async move {
-        let listener = UnixListener::bind(socket_path).unwrap();
+        let listener = UnixListener::bind(&socket_path).unwrap();
         println!("event listener started on {}", socket_path);
 
         loop {

@@ -18,6 +18,7 @@
 
 use crate::types::{ConstraintId, ConstraintType, PeerId};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -30,9 +31,12 @@ pub enum ConstraintConfig {
     ResponseConsumer {
         constraint_id: ConstraintId,
         event_id: String,
-        // nodes holding the A token, should be IPs - not PeerIds
-        // TODO: switch to IP addresses instead of the current u8 PeerIds
-        node_a_peers: Vec<SocketAddr>,
+        // nodes holding the produced response token
+        producer_peers: Vec<SocketAddr>,
+    },
+    EndActivity {
+        constraint_id: ConstraintId,
+        event_id: String,
     },
     // TODO: add more
 }
@@ -42,6 +46,7 @@ impl ConstraintConfig {
         match self {
             ConstraintConfig::ResponseProducer { constraint_id, .. } => constraint_id,
             ConstraintConfig::ResponseConsumer { constraint_id, .. } => constraint_id,
+            ConstraintConfig::EndActivity { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -49,6 +54,7 @@ impl ConstraintConfig {
         match self {
             ConstraintConfig::ResponseProducer { .. } => ConstraintType::Response,
             ConstraintConfig::ResponseConsumer { .. } => ConstraintType::Response,
+            ConstraintConfig::EndActivity { .. } => ConstraintType::EndActivity,
         }
     }
 }
@@ -61,4 +67,11 @@ pub struct NodeConfig {
     #[serde(default)]
     pub peers: Vec<String>,
     pub constraints: Vec<ConstraintConfig>,
+}
+
+impl NodeConfig {
+    pub fn load_config(path: &str) -> Self {
+        let contents = fs::read_to_string(path).expect("could not read config file");
+        toml::from_str(&contents).expect("could not parse config file")
+    }
 }

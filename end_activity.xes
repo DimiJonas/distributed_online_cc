@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-11"/>
+    <event>
+      <string key="concept:name" value="dummy_end_activity"/>
+      <date key="time:timestamp" value="2026-09-04T12:00:00Z"/>
+    </event>
+  </trace>
+</log>

@@ -10,6 +10,43 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+// convenience method to build tcp channel to another peer
+pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
+    match TcpStream::connect(&peer_address).await {
+        Ok(stream) => {
+            tokio::spawn(peer_task_initiated(peer_address, stream, state.clone()));
+        }
+        Err(e) => {
+            println!("error connecting to peer {}: {}", peer_address, e);
+        }
+    }
+}
+
+pub async fn send_to_peer(peer_address: SocketAddr, msg: PeerMessage, state: AppState) {
+    // retrieve correct tcp channel and send it
+    let sender = {
+        let peers = state.peers.lock().unwrap();
+        peers.get_sender(&peer_address)
+    };
+    match sender {
+        Some(sender) => {
+            sender.send(msg).await.unwrap();
+            println!("sent message to {}", peer_address);
+        }
+        None => {
+            println!("peer {} not connected yet", peer_address);
+            println!("connecting to peer {}", peer_address);
+            connect_peer(peer_address, state.clone()).await;
+            let sender = {
+                let peers = state.peers.lock().unwrap();
+                peers.get_sender(&peer_address).unwrap()
+            };
+            sender.send(msg).await.unwrap();
+            println!("sent message to {}", peer_address);
+        }
+    }
+}
+
 // initiate a tcp channel to another peer - send hello
 pub async fn peer_task_initiated(peer_address: SocketAddr, mut stream: TcpStream, state: AppState) {
     let my_address = state.config.listen_address;
@@ -59,8 +96,20 @@ pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
             }
         }
     };
-
     println!("accepted tcp connection from peer {}", peer_address);
+
+    let already_exists = {
+        let peers = state.peers.lock().unwrap();
+        peers.contains(&peer_address)
+    };
+    if already_exists {
+        eprintln!(
+            "there already exists a tcp channel to {}, dropping connection",
+            peer_address
+        );
+        return;
+    }
+
     let (tx, rx) = mpsc::channel(100);
 
     {
@@ -117,16 +166,16 @@ pub async fn peer_task(
                                     eprintln!("unexpected Hello from peer {} as connection is already established", peer_address);
                                 },
                                 PeerMessagePayload::Cli(cli_msg) => {
-                                    tokio::spawn(handle_cli_message(cli_msg, state.clone()));
+                                    tokio::spawn(handle_cli_message(cli_msg, state.clone(), msg.message_id));
                                 },
                                 PeerMessagePayload::Conformance(cc_msg) => {
-                                    tokio::spawn(handle_cc_message(cc_msg, state.clone()));
+                                    tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
                                 },
                                 PeerMessagePayload::Overlay(overlay_msg) => {
-                                    tokio::spawn(handle_overlay_message(overlay_msg, state.clone()));
+                                    tokio::spawn(handle_overlay_message(overlay_msg, state.clone(), msg.message_id));
                                 }
                                 PeerMessagePayload::TerminationDetection(td_msg) => {
-                                    tokio::spawn(handle_td_message(td_msg, state.clone()));
+                                    tokio::spawn(handle_td_message(td_msg, state.clone(), msg.message_id));
                                 }
                             }
                         }

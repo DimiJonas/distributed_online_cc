@@ -1,25 +1,25 @@
+use std::net::SocketAddr;
+
 use clap::Parser;
-use distributed_online_cc::config::config_loader::load_config;
+use distributed_online_cc::network::peer::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
 
 // parse command line arguments
 #[derive(Parser)]
 struct Input {
     #[arg(short, long, default_value = "config.toml")]
-    pub config: String,
+    pub config_path: String,
 }
 
 #[tokio::main]
 async fn main() {
     let args = Input::parse();
-    let config = load_config(&args.config);
-    let host_id = config.node_id;
 
     let (event_q_tx, _event_q_rx) = tokio::sync::mpsc::channel(100);
 
-    let state = AppState::new(config, host_id as u64 * 1000, event_q_tx);
+    let state = AppState::new(args.config_path, event_q_tx);
 
-    initialize_node(state.clone());
+    initialize_node(state.clone()).await;
 
     distributed_online_cc::app::tcp_listener::spawn_listener(
         state.clone(),
@@ -37,6 +37,14 @@ async fn main() {
     println!("shutting down main");
 }
 
-fn initialize_node(state: AppState) {
-    // TODO: create tcp channels from config
+async fn initialize_node(state: AppState) {
+    // create tcp channels from config
+    let constraint_peers: Vec<SocketAddr> = state
+        .handlers
+        .all()
+        .flat_map(|h| h.configured_peers())
+        .collect();
+    for peer_address in constraint_peers {
+        connect_peer(peer_address, state.clone()).await;
+    }
 }

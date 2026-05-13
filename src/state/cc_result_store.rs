@@ -40,6 +40,7 @@ impl CCResultStore {
        info gives some information on the result change
        history preserves the previous states of the constraint result with corresponding info
     */
+    #[allow(clippy::collapsible_if)]
     pub fn update(
         &mut self,
         case_id: &CaseId,

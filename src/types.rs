@@ -54,6 +54,7 @@ impl TracedEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConstraintType {
     Response,
+    EndActivity,
 }
 
 impl ConstraintType {
@@ -61,6 +62,7 @@ impl ConstraintType {
     pub fn initial_result(&self) -> ConstraintResultType {
         match self {
             ConstraintType::Response => ConstraintResultType::Satisfied,
+            ConstraintType::EndActivity => ConstraintResultType::Satisfied,
         }
     }
 }

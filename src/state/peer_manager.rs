@@ -24,19 +24,23 @@ impl PeerManager {
         }
     }
 
-    pub fn insert(&mut self, peer_id: SocketAddr, handle: PeerHandle) {
-        if self.peers.contains_key(&peer_id) {
-            println!("peer with id {} already exists, overwriting", peer_id);
+    pub fn insert(&mut self, peer_address: SocketAddr, handle: PeerHandle) {
+        if self.peers.contains_key(&peer_address) {
+            println!("peer with id {} already exists, overwriting", peer_address);
         }
-        self.peers.insert(peer_id, handle);
+        self.peers.insert(peer_address, handle);
     }
 
-    pub fn remove(&mut self, peer_id: &SocketAddr) {
-        self.peers.remove(peer_id);
+    pub fn remove(&mut self, peer_address: &SocketAddr) {
+        self.peers.remove(peer_address);
     }
 
-    pub fn get_sender(&self, peer_id: &SocketAddr) -> Option<mpsc::Sender<PeerMessage>> {
-        self.peers.get(peer_id).map(|h| h.sender.clone())
+    pub fn get_sender(&self, peer_address: &SocketAddr) -> Option<mpsc::Sender<PeerMessage>> {
+        self.peers.get(peer_address).map(|h| h.sender.clone())
+    }
+
+    pub fn contains(&self, peer_address: &SocketAddr) -> bool {
+        self.peers.contains_key(peer_address)
     }
 }
 
