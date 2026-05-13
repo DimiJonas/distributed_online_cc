@@ -71,7 +71,7 @@ impl CCResultStore {
 
     // check if case already exists (or if it is a new case)
     pub fn has_case(&self, case_id: &CaseId) -> bool {
-        self.results.get(case_id).is_some()
+        self.results.contains_key(case_id)
     }
 
     pub fn has_violations(&self, case_id: &CaseId) -> bool {

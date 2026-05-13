@@ -6,8 +6,11 @@ use crate::types::{
 };
 
 pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uuid) {
+    println!("handling conformance message with id {}", &msg_id);
+
     println!(
-        "received cli message; {}",
+        "received cli message id={} msg={}",
+        msg_id,
         serde_json::to_string_pretty(&msg).unwrap()
     );
 
@@ -59,6 +62,10 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
     }
 }
 
-pub async fn handle_td_message(msg: TerminationDetectionMessage, state: AppState, msg_id: Uuid) {}
+pub async fn handle_td_message(_msg: TerminationDetectionMessage, _state: AppState, _msg_id: Uuid) {
+    // TODO
+}
 
-pub async fn handle_overlay_message(msg: OverlayMessage, state: AppState, msg_id: Uuid) {}
+pub async fn handle_overlay_message(_msg: OverlayMessage, _state: AppState, _msg_id: Uuid) {
+    // TODO
+}
