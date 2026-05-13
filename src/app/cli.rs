@@ -1,6 +1,7 @@
-use crate::network::peer::connect_peer;
+use crate::network::message_types::{CliTestMessage, PeerMessage};
+use crate::network::tcp_channel::connect_peer;
 use crate::state::app_state::AppState;
-use crate::types::{CliCommand, CliTestMessage, PeerMessage};
+use crate::types::CliCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 

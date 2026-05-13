@@ -1,4 +1,5 @@
-use crate::types::{PeerMessage, RequestId};
+use crate::network::message_types::PeerMessage;
+use crate::types::RequestId;
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 

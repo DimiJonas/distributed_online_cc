@@ -1,2 +1,3 @@
 pub mod framing;
-pub mod peer;
+pub mod message_types;
+pub mod tcp_channel;

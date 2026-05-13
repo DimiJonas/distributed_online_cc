@@ -1,8 +1,9 @@
 use crate::{
-    config::types::NodeConfig,
+    config::node_config::NodeConfig,
     state::app_state::AppState,
     types::{ConstraintId, ConstraintType, TracedEvent},
 };
+
 use std::sync::Arc;
 use tokio::sync::mpsc;
 

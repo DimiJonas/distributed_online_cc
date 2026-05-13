@@ -1,7 +1,8 @@
 use std::net::SocketAddr;
 
+use crate::network::message_types::CCMessage;
 use crate::state::app_state::AppState;
-use crate::types::{CCMessage, CaseId, TracedEvent};
+use crate::types::{CaseId, TracedEvent};
 use async_trait::async_trait;
 
 #[async_trait]

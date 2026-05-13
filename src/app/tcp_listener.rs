@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::network::peer::peer_task_accepted;
+use crate::network::tcp_channel::peer_task_accepted;
 use crate::state::app_state::AppState;
 use tokio::net::TcpListener;
 

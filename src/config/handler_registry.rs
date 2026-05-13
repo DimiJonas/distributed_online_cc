@@ -1,6 +1,6 @@
-use crate::config::types::{ConstraintConfig, NodeConfig};
+use crate::config::node_config::{ConstraintConfig, NodeConfig};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
-use crate::protocol::constraint_logic::end_activity::EndActivityHandler;
+use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
 use crate::protocol::constraint_logic::response_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };

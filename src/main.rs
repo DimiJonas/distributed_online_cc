@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
-use distributed_online_cc::network::peer::connect_peer;
+use distributed_online_cc::network::tcp_channel::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
 
 // parse command line arguments

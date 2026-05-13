@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
 
 use crate::network::framing::*;
+use crate::network::message_types::{HelloMessage, PeerMessage, PeerMessagePayload};
 use crate::protocol::tcp_handler::*;
 use crate::state::app_state::AppState;
 use crate::state::peer_manager::PeerHandle;
-use crate::types::{HelloMessage, PeerMessage, PeerMessagePayload};
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -22,6 +22,7 @@ pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
     }
 }
 
+// convenience method to send something to a peer with some error handling
 pub async fn send_to_peer(peer_address: SocketAddr, msg: PeerMessage, state: AppState) {
     // retrieve correct tcp channel and send it
     let sender = {

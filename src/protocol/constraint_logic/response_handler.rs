@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::impl_constraint_handler_fields;
-use crate::network::peer::send_to_peer;
+use crate::network::tcp_channel::send_to_peer;
 /*
     a Response constraint defines that after Event/Activity A happened, Event/Activity B must also happen at some point after that
 
@@ -25,11 +25,11 @@ use crate::network::peer::send_to_peer;
             producer_peers = ["127.0.0.1:8001"]
 
 */
+use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::state::app_state::AppState;
 use crate::types::{
-    CCMessage, CCMessageType, CaseId, ConstraintId, ConstraintResultType, ConstraintType,
-    PeerMessage, Token, TokenId, TracedEvent,
+    CaseId, ConstraintId, ConstraintResultType, ConstraintType, Token, TokenId, TracedEvent,
 };
 use async_trait::async_trait;
 

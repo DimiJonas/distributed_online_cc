@@ -1,4 +1,4 @@
-use crate::types::PeerMessage;
+use crate::network::message_types::PeerMessage;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;

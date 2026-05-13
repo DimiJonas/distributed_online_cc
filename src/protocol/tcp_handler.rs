@@ -1,9 +1,9 @@
 use uuid::Uuid;
 
-use crate::state::app_state::AppState;
-use crate::types::{
+use crate::network::message_types::{
     CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
 };
+use crate::state::app_state::AppState;
 
 pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uuid) {
     println!("handling conformance message with id {}", &msg_id);

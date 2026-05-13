@@ -1,5 +1,4 @@
-use crate::config::types::NodeConfig;
-use crate::protocol::constraint_logic::handler_registry::HandlerRegistry;
+use crate::config::{handler_registry::HandlerRegistry, node_config::NodeConfig};
 use crate::state::cc_result_store::CCResultStore;
 use crate::state::peer_manager::PeerManager;
 use crate::state::pending_requests::PendingRequestManager;

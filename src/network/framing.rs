@@ -1,4 +1,4 @@
-use crate::types::PeerMessage;
+use crate::network::message_types::PeerMessage;
 use bytes::{Buf, BufMut, BytesMut};
 
 static HEADER_LENGTH: usize = 4; // 4 bytes for the length prefix
