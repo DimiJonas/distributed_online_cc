@@ -6,12 +6,11 @@ run program with
 
 e.g.
 
-> cargo run -- -c config1.toml
+> cargo run -- -c testdata/config/config.toml
 
-this will start the program and listen on tcp port 7001
-it will also start a unix socket listening on /tmp/event_listener.sock that expects to receive xes formatted events
+this will start the program and with a tcp listener and a unix socket for event input
 
-# TCP peer connections
+# manual TCP peer connections
 
 then connect to another peer with
 
@@ -33,12 +32,12 @@ e.g.
 
 # Unix socket event listener
 
-pipe a test file into the socket
+pipe a test file into the event listener unix socket
 
 > socat -u FILE:<path_to_test_file> UNIX-CONNECT:<socket_path>
 
 e.g.
 
-> socat -u FILE:test_single.xes UNIX-CONNECT:/tmp/event_listener1.sock
+> socat -u FILE:testdata/xes/test_single.xes UNIX-CONNECT:/tmp/event_listener1.sock
 
-the test files are in the project root directory
+the test files are in the testdata directory
