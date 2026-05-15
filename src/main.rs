@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
-
 use clap::Parser;
 use distributed_online_cc::config::node_config::NodeConfig;
 use distributed_online_cc::network::tcp_channel::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
+use log::LevelFilter;
+use std::net::SocketAddr;
 
 // parse command line arguments
 #[derive(Parser)]
@@ -16,11 +16,16 @@ struct Input {
 async fn main() {
     let args = Input::parse();
     let config: NodeConfig = NodeConfig::load_config(&args.config_path);
+
+    setup_logging(&config.log_file).expect("failed to initialize logging");
+    log::info!("starting node");
+
+    // create event queue
     let (event_q_tx, _event_q_rx) = tokio::sync::mpsc::channel(config.event_queue_size);
 
     let state = AppState::new(config, event_q_tx);
 
-    initialize_node(state.clone()).await;
+    setup_tcp_channels(state.clone()).await;
 
     distributed_online_cc::app::tcp_listener::spawn_listener(
         state.clone(),
@@ -38,7 +43,7 @@ async fn main() {
     println!("shutting down main");
 }
 
-async fn initialize_node(state: AppState) {
+async fn setup_tcp_channels(state: AppState) {
     // create tcp channels from config
     let constraint_peers: Vec<SocketAddr> = state
         .handlers
@@ -48,4 +53,35 @@ async fn initialize_node(state: AppState) {
     for peer_address in constraint_peers {
         connect_peer(peer_address, state.clone()).await;
     }
+}
+
+fn setup_logging(log_file: &str) -> Result<(), fern::InitError> {
+    let format =
+        |out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::Record| {
+            out.finish(format_args!(
+                "[{} {} {}] {}",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
+                record.level(),  // error, warn, info, debug
+                record.target(), // module path, e.g. "distributed_online_cc::network::tcp_channel"
+                message
+            ))
+        };
+
+    // read desired level from env var, default to Info
+    // e.g. RUST_LOG=info cargo run
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LevelFilter::Info);
+
+    fern::Dispatch::new()
+        .format(format)
+        .level(level)
+        // stdout for Info and above
+        .chain(std::io::stdout())
+        // file gets everything
+        .chain(fern::log_file(log_file)?)
+        .apply()?;
+
+    Ok(())
 }

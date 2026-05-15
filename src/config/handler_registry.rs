@@ -112,6 +112,7 @@ mod tests {
             node_id: 1,
             listen_address: "127.0.0.1:9000".parse().unwrap(),
             unix_socket: "/tmp/test.sock".to_string(),
+            log_file: "test.log".to_string(),
             peers: vec![],
             event_queue_size: 100,
             tcp_channel_queue_size: 100,

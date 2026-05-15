@@ -1,8 +1,9 @@
 node_id = 1
 listen_address = "127.0.0.1:8001"
-unix_socket = "/tmp/event_listener1.sock"
+unix_socket = "/tmp/event_listener.sock"
 event_queue_size = "100"
 tcp_channel_queue_size = "100"
+log_file = "app.log"
 
 [[constraints]]
 constraint_role = "EndActivity"

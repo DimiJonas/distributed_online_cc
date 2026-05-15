@@ -63,7 +63,10 @@ impl ConstraintConfig {
 pub struct NodeConfig {
     pub node_id: PeerId,
     pub listen_address: SocketAddr,
+    #[serde(default = "default_unix_socket")]
     pub unix_socket: String,
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
     #[serde(default)]
     pub peers: Vec<String>,
     #[serde(default = "default_event_q_size")]
@@ -78,6 +81,14 @@ impl NodeConfig {
         let contents = fs::read_to_string(path).expect("could not read config file");
         toml::from_str(&contents).expect("could not parse config file")
     }
+}
+
+fn default_unix_socket() -> String {
+    "/tmp/event_listener.sock".to_string()
+}
+
+fn default_log_file() -> String {
+    "app.log".to_string()
 }
 
 fn default_event_q_size() -> usize {
