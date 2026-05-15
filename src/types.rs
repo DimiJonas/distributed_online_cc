@@ -112,3 +112,71 @@ impl Token {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constraint_type_response_initial_result_is_satisfied() {
+        assert!(matches!(
+            ConstraintType::Response.initial_result(),
+            ConstraintResultType::Satisfied
+        ));
+    }
+
+    #[test]
+    fn constraint_type_end_activity_initial_result_is_satisfied() {
+        assert!(matches!(
+            ConstraintType::EndActivity.initial_result(),
+            ConstraintResultType::Satisfied
+        ));
+    }
+
+    #[test]
+    fn token_new_sets_fields_correctly() {
+        let token = Token::new(
+            "my-case".to_string(),
+            "my-constraint".to_string(),
+            ConstraintType::Response,
+            7,
+            None,
+        );
+        assert_eq!(token.case_id, "my-case");
+        assert_eq!(token.constraint_id, "my-constraint");
+        assert_eq!(token.created_by, 7);
+        assert!(token.payload.is_none());
+    }
+
+    #[test]
+    fn token_new_generates_unique_ids() {
+        let t1 = Token::new(
+            "c".to_string(),
+            "x".to_string(),
+            ConstraintType::Response,
+            1,
+            None,
+        );
+        let t2 = Token::new(
+            "c".to_string(),
+            "x".to_string(),
+            ConstraintType::Response,
+            1,
+            None,
+        );
+        assert_ne!(t1.id, t2.id);
+    }
+
+    #[test]
+    fn token_with_payload() {
+        let payload = serde_json::json!({ "key": "value" });
+        let token = Token::new(
+            "c".to_string(),
+            "x".to_string(),
+            ConstraintType::Response,
+            1,
+            Some(payload.clone()),
+        );
+        assert_eq!(token.payload.unwrap(), payload);
+    }
+}

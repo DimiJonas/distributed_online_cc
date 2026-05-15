@@ -101,3 +101,94 @@ impl Default for HandlerRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::node_config::{ConstraintConfig, NodeConfig};
+
+    fn make_config(constraints: Vec<ConstraintConfig>) -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            listen_address: "127.0.0.1:9000".parse().unwrap(),
+            unix_socket: "/tmp/test.sock".to_string(),
+            peers: vec![],
+            event_queue_size: 100,
+            tcp_channel_queue_size: 100,
+            constraints,
+        }
+    }
+
+    #[test]
+    fn empty_registry_returns_nothing() {
+        let registry = HandlerRegistry::new();
+        assert!(registry.get_by_event_id("any").is_empty());
+    }
+
+    #[test]
+    fn build_registers_response_producer() {
+        let config = make_config(vec![ConstraintConfig::ResponseProducer {
+            constraint_id: "rp".to_string(),
+            event_id: "order_placed".to_string(),
+        }]);
+        let registry = HandlerRegistry::build(&config);
+
+        let handlers = registry.get_by_event_id("order_placed");
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0].constraint_id(), "rp");
+    }
+
+    #[test]
+    fn get_by_constraint_id_finds_handler() {
+        let config = make_config(vec![ConstraintConfig::EndActivity {
+            constraint_id: "ea".to_string(),
+            event_id: "case_end".to_string(),
+        }]);
+        let registry = HandlerRegistry::build(&config);
+
+        assert!(registry.get_by_constraint_id(&"ea".to_string()).is_some());
+    }
+
+    #[test]
+    fn get_by_constraint_id_returns_none_for_unknown() {
+        let registry = HandlerRegistry::new();
+        assert!(
+            registry
+                .get_by_constraint_id(&"ghost".to_string())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn multiple_constraints_for_same_event_id() {
+        let config = make_config(vec![
+            ConstraintConfig::ResponseProducer {
+                constraint_id: "rp-1".to_string(),
+                event_id: "shared_event".to_string(),
+            },
+            ConstraintConfig::EndActivity {
+                constraint_id: "ea-1".to_string(),
+                event_id: "shared_event".to_string(),
+            },
+        ]);
+        let registry = HandlerRegistry::build(&config);
+
+        assert_eq!(registry.get_by_event_id("shared_event").len(), 2);
+    }
+
+    #[test]
+    fn all_returns_all_handlers() {
+        let config = make_config(vec![
+            ConstraintConfig::ResponseProducer {
+                constraint_id: "rp".to_string(),
+                event_id: "e1".to_string(),
+            },
+            ConstraintConfig::EndActivity {
+                constraint_id: "ea".to_string(),
+                event_id: "e2".to_string(),
+            },
+        ]);
+        let registry = HandlerRegistry::build(&config);
+        assert_eq!(registry.all().count(), 2);
+    }
+}

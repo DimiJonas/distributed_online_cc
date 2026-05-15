@@ -49,3 +49,58 @@ impl Default for PeerManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_handle() -> PeerHandle {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        PeerHandle::new(tx)
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    #[test]
+    fn new_manager_is_empty() {
+        let pm = PeerManager::new();
+        assert!(!pm.contains(&addr(8000)));
+    }
+
+    #[test]
+    fn insert_and_contains() {
+        let mut pm = PeerManager::new();
+        pm.insert(addr(8001), dummy_handle());
+        assert!(pm.contains(&addr(8001)));
+    }
+
+    #[test]
+    fn get_sender_returns_some_after_insert() {
+        let mut pm = PeerManager::new();
+        pm.insert(addr(8002), dummy_handle());
+        assert!(pm.get_sender(&addr(8002)).is_some());
+    }
+
+    #[test]
+    fn get_sender_returns_none_for_unknown_peer() {
+        let pm = PeerManager::new();
+        assert!(pm.get_sender(&addr(9999)).is_none());
+    }
+
+    #[test]
+    fn remove_clears_entry() {
+        let mut pm = PeerManager::new();
+        pm.insert(addr(8003), dummy_handle());
+        pm.remove(&addr(8003));
+        assert!(!pm.contains(&addr(8003)));
+        assert!(pm.get_sender(&addr(8003)).is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent_does_not_panic() {
+        let mut pm = PeerManager::new();
+        pm.remove(&addr(9999)); // should not panic
+    }
+}

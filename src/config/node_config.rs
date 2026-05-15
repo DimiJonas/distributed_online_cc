@@ -87,3 +87,55 @@ fn default_event_q_size() -> usize {
 fn default_tcp_channel_queue_size() -> usize {
     100
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constraint_id_matches_for_all_variants() {
+        let rp = ConstraintConfig::ResponseProducer {
+            constraint_id: "rp-id".to_string(),
+            event_id: "e1".to_string(),
+        };
+        assert_eq!(rp.constraint_id(), "rp-id");
+
+        let rc = ConstraintConfig::ResponseConsumer {
+            constraint_id: "rc-id".to_string(),
+            event_id: "e2".to_string(),
+            producer_peers: vec![],
+        };
+        assert_eq!(rc.constraint_id(), "rc-id");
+
+        let ea = ConstraintConfig::EndActivity {
+            constraint_id: "ea-id".to_string(),
+            event_id: "e3".to_string(),
+        };
+        assert_eq!(ea.constraint_id(), "ea-id");
+    }
+
+    #[test]
+    fn constraint_type_response_for_producer_and_consumer() {
+        let rp = ConstraintConfig::ResponseProducer {
+            constraint_id: "x".to_string(),
+            event_id: "e".to_string(),
+        };
+        assert!(matches!(rp.constraint_type(), ConstraintType::Response));
+
+        let rc = ConstraintConfig::ResponseConsumer {
+            constraint_id: "x".to_string(),
+            event_id: "e".to_string(),
+            producer_peers: vec![],
+        };
+        assert!(matches!(rc.constraint_type(), ConstraintType::Response));
+    }
+
+    #[test]
+    fn constraint_type_end_activity_for_end_activity() {
+        let ea = ConstraintConfig::EndActivity {
+            constraint_id: "x".to_string(),
+            event_id: "e".to_string(),
+        };
+        assert!(matches!(ea.constraint_type(), ConstraintType::EndActivity));
+    }
+}

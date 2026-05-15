@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::network::tcp_channel::peer_task_accepted;
+use crate::network::tcp_channel::accept_incoming_tcp_connection;
 use crate::state::app_state::AppState;
 use tokio::net::TcpListener;
 
@@ -12,7 +12,7 @@ pub fn spawn_listener(state: AppState, host_address: SocketAddr) {
         loop {
             let (stream, _) = listener.accept().await.unwrap();
 
-            tokio::spawn(peer_task_accepted(stream, state.clone()));
+            tokio::spawn(accept_incoming_tcp_connection(stream, state.clone()));
         }
     });
 }

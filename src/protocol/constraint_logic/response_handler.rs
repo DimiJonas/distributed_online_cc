@@ -161,6 +161,6 @@ async fn send_delete_token(
     ));
 
     // send message
-    println!("sening delete token message to {}", peer_addr);
+    println!("sending delete token message to {}", peer_addr);
     send_to_peer(peer_addr, message, state.clone()).await;
 }

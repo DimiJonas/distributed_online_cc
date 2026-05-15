@@ -153,3 +153,71 @@ pub struct OverlayMessage {
 pub struct TerminationDetectionMessage {
     // TODO
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConstraintType, Token, TokenId};
+
+    #[test]
+    fn push_token_has_correct_type_and_token() {
+        let token = Token::new(
+            "case-1".to_string(),
+            "c-1".to_string(),
+            ConstraintType::Response,
+            1,
+            None,
+        );
+        let msg = CCMessage::push_token(token.clone());
+        assert_eq!(msg.message_type, CCMessageType::PushToken);
+        assert!(msg.token.is_some());
+        assert_eq!(msg.case_id, "case-1");
+    }
+
+    #[test]
+    fn delete_token_has_correct_type_and_token_id() {
+        let msg = CCMessage::delete_token("case-2".to_string(), "c-2".to_string(), TokenId::nil());
+        assert_eq!(msg.message_type, CCMessageType::DeleteToken);
+        assert!(msg.token_id.is_some());
+        assert!(msg.token.is_none());
+    }
+
+    #[test]
+    fn trigger_check_has_no_token_or_result() {
+        let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string());
+        assert_eq!(msg.message_type, CCMessageType::TriggerCheck);
+        assert!(msg.token.is_none());
+        assert!(msg.result.is_none());
+    }
+
+    #[test]
+    fn check_result_carries_boolean_result() {
+        let msg = CCMessage::check_result("case-4".to_string(), "c-4".to_string(), true);
+        assert_eq!(msg.message_type, CCMessageType::CheckResult);
+        assert_eq!(msg.result, Some(true));
+    }
+
+    #[test]
+    fn case_terminated_has_empty_constraint_id() {
+        let msg = CCMessage::case_terminated("case-5".to_string());
+        assert_eq!(msg.message_type, CCMessageType::CaseTerminated);
+        assert!(msg.constraint_id.is_empty());
+    }
+
+    #[test]
+    fn peer_message_convenience_constructors_set_correct_payload_variant() {
+        use crate::network::message_types::{CliTestMessage, HelloMessage, PeerMessagePayload};
+
+        let hello = PeerMessage::hello(HelloMessage {
+            listening_address: "127.0.0.1:9000".parse().unwrap(),
+        });
+        assert!(matches!(hello.payload, PeerMessagePayload::Hello(_)));
+
+        let cli = PeerMessage::cli(CliTestMessage {
+            request_id: 1,
+            message: "test".to_string(),
+            sender_addr: "127.0.0.1:9000".parse().unwrap(),
+        });
+        assert!(matches!(cli.payload, PeerMessagePayload::Cli(_)));
+    }
+}

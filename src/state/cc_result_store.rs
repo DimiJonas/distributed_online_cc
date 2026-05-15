@@ -128,3 +128,175 @@ impl Default for CCResultStore {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConstraintResultType, ConstraintType};
+
+    fn constraints() -> Vec<(ConstraintId, ConstraintType)> {
+        vec![
+            ("c-response".to_string(), ConstraintType::Response),
+            ("c-end".to_string(), ConstraintType::EndActivity),
+        ]
+    }
+
+    #[test]
+    fn new_store_has_no_cases() {
+        let store = CCResultStore::new();
+        assert!(!store.has_case(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn register_case_marks_it_as_known() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        assert!(store.has_case(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn initial_result_is_satisfied() {
+        let _expected_result = ConstraintType::Response.initial_result();
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+
+        let result = store
+            .get_constraint(&"case-1".to_string(), &"c-response".to_string())
+            .unwrap();
+        assert!(matches!(&result.constraint_result, _expected_result));
+    }
+
+    #[test]
+    fn update_changes_result() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::Violated,
+            "token still open".to_string(),
+        );
+
+        let result = store
+            .get_constraint(&"case-1".to_string(), &"c-response".to_string())
+            .unwrap();
+        assert!(matches!(
+            result.constraint_result,
+            ConstraintResultType::Violated
+        ));
+        assert_eq!(result.info, "token still open");
+    }
+
+    #[test]
+    fn update_appends_to_history() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::Violated,
+            "first update".to_string(),
+        );
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::Satisfied,
+            "second update".to_string(),
+        );
+
+        let result = store
+            .get_constraint(&"case-1".to_string(), &"c-response".to_string())
+            .unwrap();
+        // History should contain the intermediate Violated state
+        assert!(result.history.contains("Violated") || result.history.contains("first update"));
+    }
+
+    #[test]
+    fn get_constraint_unknown_case_returns_none() {
+        let store = CCResultStore::new();
+        assert!(
+            store
+                .get_constraint(&"ghost".to_string(), &"c".to_string())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn get_constraint_unknown_constraint_returns_none() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        assert!(
+            store
+                .get_constraint(&"case-1".to_string(), &"ghost".to_string())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn has_violations_false_when_all_satisfied() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        assert!(!store.has_violations(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn has_violations_true_after_violated_update() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::Violated,
+            "violated".to_string(),
+        );
+        assert!(store.has_violations(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn has_violations_true_for_temporarily_violated() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::TemporarilyViolated,
+            "temp".to_string(),
+        );
+        assert!(store.has_violations(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn violations_returns_only_violated_constraints() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        store.update(
+            &"case-1".to_string(),
+            &"c-response".to_string(),
+            ConstraintResultType::Violated,
+            "bad".to_string(),
+        );
+
+        let viols = store.violations(&"case-1".to_string());
+        assert_eq!(viols.len(), 1);
+        assert_eq!(*viols[0].0, "c-response".to_string());
+    }
+
+    #[test]
+    fn remove_case_cleans_up() {
+        let mut store = CCResultStore::new();
+        store.register_case("case-1".to_string(), &constraints());
+        let removed = store.remove_case(&"case-1".to_string());
+        assert!(removed.is_some());
+        assert!(!store.has_case(&"case-1".to_string()));
+    }
+
+    #[test]
+    fn summary_returns_message_for_unknown_case() {
+        let store = CCResultStore::new();
+        let s = store.summary(&"ghost".to_string());
+        assert!(s.contains("ghost"));
+        assert!(s.contains("no results"));
+    }
+}

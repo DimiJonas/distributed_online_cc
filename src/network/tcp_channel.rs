@@ -10,14 +10,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+async fn send_or_log(sender: &mpsc::Sender<PeerMessage>, msg: PeerMessage, context: &str) {
+    if let Err(e) = sender.send(msg).await {
+        eprintln!("channel send failed ({}): {}", context, e);
+    }
+}
+
 // convenience method to build tcp channel to another peer
 pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
-    match TcpStream::connect(&peer_address).await {
-        Ok(stream) => {
-            tokio::spawn(peer_task_initiated(peer_address, stream, state.clone()));
-        }
-        Err(e) => {
-            println!("error connecting to peer {}: {}", peer_address, e);
+    let already_connected = {
+        let peers = state.peers.lock().unwrap();
+        peers.contains(&peer_address)
+    };
+    if !already_connected {
+        match TcpStream::connect(&peer_address).await {
+            Ok(stream) => {
+                tokio::spawn(initiate_tcp_connection(peer_address, stream, state.clone()));
+            }
+            Err(e) => {
+                println!("error connecting to peer {}: {}", peer_address, e);
+            }
         }
     }
 }
@@ -31,37 +43,72 @@ pub async fn send_to_peer(peer_address: SocketAddr, msg: PeerMessage, state: App
     };
     match sender {
         Some(sender) => {
-            sender.send(msg).await.unwrap();
+            send_or_log(&sender, msg, &format!("send_to_peer {}", peer_address)).await;
             println!("sent message to {}", peer_address);
         }
         None => {
-            println!("peer {} not connected yet", peer_address);
-            println!("connecting to peer {}", peer_address);
+            eprintln!(
+                "peer {} not connected yet, attempting to connect",
+                peer_address
+            );
             connect_peer(peer_address, state.clone()).await;
+
+            // Re-check after connecting; connect_peer may have failed silently.
             let sender = {
                 let peers = state.peers.lock().unwrap();
-                peers.get_sender(&peer_address).unwrap()
+                peers.get_sender(&peer_address)
             };
-            sender.send(msg).await.unwrap();
-            println!("sent message to {}", peer_address);
+            match sender {
+                Some(sender) => {
+                    send_or_log(
+                        &sender,
+                        msg.clone(),
+                        &format!("send_to_peer retry {}", peer_address),
+                    )
+                    .await;
+                    println!(
+                        "sent message with id={} to {}",
+                        msg.message_id, peer_address
+                    );
+                }
+                None => {
+                    eprintln!(
+                        "could not obtain sender for {} after connect attempt, dropping message with id={}",
+                        peer_address, msg.message_id
+                    );
+                }
+            }
         }
     }
 }
 
 // initiate a tcp channel to another peer - send hello
-pub async fn peer_task_initiated(peer_address: SocketAddr, mut stream: TcpStream, state: AppState) {
+async fn initiate_tcp_connection(peer_address: SocketAddr, mut stream: TcpStream, state: AppState) {
     let my_address = state.config.listen_address;
+
+    // create hello message
     let hello = PeerMessage::hello(HelloMessage {
         listening_address: my_address,
     });
 
-    if stream.write_all(&encode(&hello)).await.is_err() {
+    // encode hello message
+    let encoded = match encode(&hello) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("failed to encode hello for peer {}: {}", peer_address, e);
+            return;
+        }
+    };
+
+    // send hello message
+    if stream.write_all(&encoded).await.is_err() {
         eprintln!("error sending hello to peer {}", peer_address);
         return;
     }
 
     let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
 
+    // save new peer in peer manager
     {
         let mut peers = state.peers.lock().unwrap();
         peers.insert(peer_address, PeerHandle::new(tx));
@@ -69,7 +116,8 @@ pub async fn peer_task_initiated(peer_address: SocketAddr, mut stream: TcpStream
 
     println!("tcp channel to {} initiated", peer_address);
 
-    peer_task(
+    // create tcp channel handling task
+    tcp_channel(
         peer_address,
         stream,
         rx,
@@ -80,15 +128,35 @@ pub async fn peer_task_initiated(peer_address: SocketAddr, mut stream: TcpStream
 }
 
 // accept a tcp channel from another peer - receive hello
-pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
+pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppState) {
     let mut read_buf = BytesMut::with_capacity(1024);
 
+    // receive hello message
     let peer_address = loop {
-        stream.read_buf(&mut read_buf).await.unwrap();
+        match stream.read_buf(&mut read_buf).await {
+            Ok(0) => {
+                eprintln!("peer disconnected before sending Hello");
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("read error while waiting for Hello: {}", e);
+                return;
+            }
+        }
+
         if !check_frame(&read_buf) {
             continue;
         }
-        let msg: PeerMessage = decode(&mut read_buf);
+
+        let msg = match decode(&mut read_buf) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("failed to decode Hello frame: {}", e);
+                return;
+            }
+        };
+
         match msg.payload {
             PeerMessagePayload::Hello(hello_msg) => break hello_msg.listening_address,
             _ => {
@@ -97,8 +165,10 @@ pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
             }
         }
     };
+
     println!("accepted tcp connection from peer {}", peer_address);
 
+    // check if already connected to same address
     let already_exists = {
         let peers = state.peers.lock().unwrap();
         peers.contains(&peer_address)
@@ -111,6 +181,7 @@ pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
         return;
     }
 
+    // save new connection
     let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
 
     {
@@ -118,11 +189,12 @@ pub async fn peer_task_accepted(mut stream: TcpStream, state: AppState) {
         peers.insert(peer_address, PeerHandle::new(tx));
     }
 
-    peer_task(peer_address, stream, rx, state, read_buf).await;
+    // create tcp channel handling task
+    tcp_channel(peer_address, stream, rx, state, read_buf).await;
 }
 
 // task that communicates with a certain peer
-pub async fn peer_task(
+pub async fn tcp_channel(
     peer_address: SocketAddr,
     mut stream: TcpStream,
     mut rx: mpsc::Receiver<PeerMessage>,
@@ -133,7 +205,13 @@ pub async fn peer_task(
         tokio::select! {
             // send msg
             Some(msg) = rx.recv() => {
-                let framed_msg = encode(&msg);
+                let framed_msg = match encode(&msg) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("failed to encode message for peer {}: {}", peer_address, e);
+                        continue;
+                    }
+                };
 
                 if stream.write_all(&framed_msg).await.is_err() {
                     eprintln!("error sending to peer {}", peer_address);
@@ -158,13 +236,31 @@ pub async fn peer_task(
                                 break;
                             }
 
-                            let msg: PeerMessage = decode(&mut read_buf);
-                            println!("decoded message from peer {}: {}", peer_address, serde_json::to_string_pretty(&msg).unwrap());
+                            let msg = match decode(&mut read_buf) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    eprintln!(
+                                        "failed to decode message from peer {}: {}, closing connection",
+                                        peer_address, e
+                                    );
+                                    // deserialization failure probably means the stream is
+                                    // corrupted so it should be closed
+                                    let mut peers = state.peers.lock().unwrap();
+                                    peers.remove(&peer_address);
+                                    return;
+                                }
+                            };
+
+                            println!(
+                                "decoded message from peer {}: {}",
+                                peer_address,
+                                serde_json::to_string_pretty(&msg).unwrap_or_else(|_| "<unserializable>".to_string())
+                            );
 
                             // dispatch message based on payload type of the peer message
                             match msg.payload {
                                 PeerMessagePayload::Hello(_) => {
-                                    eprintln!("unexpected Hello from peer {} as connection is already established", peer_address);
+                                    eprintln!("unexpected Hello from peer {} (connection is already established)", peer_address);
                                 },
                                 PeerMessagePayload::Cli(cli_msg) => {
                                     tokio::spawn(handle_cli_message(cli_msg, state.clone(), msg.message_id));
@@ -182,7 +278,7 @@ pub async fn peer_task(
                         }
                     }
                     Err(e) => {
-                        eprintln!("error reading from peer: {}", e);
+                        eprintln!("error reading from peer {}: {}", peer_address, e);
                         break;
                     }
                 }
@@ -190,5 +286,5 @@ pub async fn peer_task(
         }
     }
 
-    println!("Peer connection closed");
+    println!("peer connection to {} closed", peer_address);
 }
