@@ -51,18 +51,12 @@ impl ConstraintHandler for ResponseProducerHandler {
             state.config.node_id,
             None,
         );
-        let id = token.id;
         {
             let mut store = state.token_store.lock().unwrap();
-            store.produce(token);
+            store.produce(token.clone());
         }
-        println!(
-            "produced token with id={} for constraint {} of type {:?} in case {}",
-            id,
-            self.constraint_id,
-            ConstraintType::Response,
-            event.case_id
-        );
+        log::info!("produced token {}", token);
+        log::debug!("produced token {:?}", token);
     }
 
     // delete produced token
@@ -70,7 +64,8 @@ impl ConstraintHandler for ResponseProducerHandler {
         if message.message_type == CCMessageType::DeleteToken {
             let mut store = state.token_store.lock().unwrap();
             if let Some(token) = store.remove_out(&message.case_id, &self.constraint_id) {
-                println!("deleted token with id {}", token.id)
+                log::info!("deleted token {}", token);
+                log::debug!("deleted token {:?}", token);
             }
         }
     }
@@ -105,14 +100,11 @@ impl ConstraintHandler for ResponseProducerHandler {
             result_store.update(case_id, &self.constraint_id, constraint_result, info);
 
             // TODO: send result somewhere after some grace period and delete it instead of printing
-            println!(
+            log::info!(
                 "response constraint check result after termination {}",
-                serde_json::to_string_pretty(
-                    result_store
-                        .get_constraint(case_id, &self.constraint_id)
-                        .unwrap()
-                )
-                .unwrap()
+                result_store
+                    .get_constraint(case_id, &self.constraint_id)
+                    .unwrap()
             );
         }
     }
@@ -161,6 +153,6 @@ async fn send_delete_token(
     ));
 
     // send message
-    println!("sending delete token message to {}", peer_addr);
+    log::info!("sending delete token message to {}", peer_addr);
     send_to_peer(peer_addr, message, state.clone()).await;
 }

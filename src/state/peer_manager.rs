@@ -26,7 +26,10 @@ impl PeerManager {
 
     pub fn insert(&mut self, peer_address: SocketAddr, handle: PeerHandle) {
         if self.peers.contains_key(&peer_address) {
-            println!("peer with id {} already exists, overwriting", peer_address);
+            log::warn!(
+                "peer {} already exists in peer manager, overwriting",
+                peer_address
+            );
         }
         self.peers.insert(peer_address, handle);
     }

@@ -57,7 +57,19 @@ impl CCResultStore {
                 existing.constraint_result = new_result;
                 existing.info = info;
                 existing.history = history_entry;
+            } else {
+                log::warn!(
+                    "update called for unknown constraint ({}/{}), ignoring",
+                    case_id,
+                    constraint_id
+                );
             }
+        } else {
+            log::warn!(
+                "update called for unknown case ({}/{}), ignoring",
+                case_id,
+                constraint_id
+            );
         }
     }
 

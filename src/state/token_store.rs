@@ -16,13 +16,29 @@ impl TokenStore {
     }
 
     pub fn produce(&mut self, token: Token) {
-        self.token_out
-            .insert((token.case_id.clone(), token.constraint_id.clone()), token);
+        let case_id = token.case_id.clone();
+        let constraint_id = token.constraint_id.clone();
+        if self.contains_out_token(&case_id, &constraint_id) {
+            log::warn!(
+                "token for ({}, {}) already exists, overwriting",
+                case_id,
+                constraint_id
+            );
+        }
+        self.token_out.insert((case_id, constraint_id), token);
     }
 
     pub fn receive(&mut self, token: Token) {
-        self.token_in
-            .insert((token.case_id.clone(), token.constraint_id.clone()), token);
+        let case_id = token.case_id.clone();
+        let constraint_id = token.constraint_id.clone();
+        if self.contains_in_token(&case_id, &constraint_id) {
+            log::warn!(
+                "token for ({}, {}) already exists, overwriting",
+                case_id,
+                constraint_id
+            );
+        }
+        self.token_in.insert((case_id, constraint_id), token);
     }
 
     pub fn remove_out(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) -> Option<Token> {
@@ -33,6 +49,16 @@ impl TokenStore {
     pub fn remove_in(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) -> Option<Token> {
         self.token_in
             .remove(&(case_id.clone(), constraint_id.clone()))
+    }
+
+    pub fn contains_out_token(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
+        self.token_out
+            .contains_key(&(case_id.clone(), constraint_id.clone()))
+    }
+
+    pub fn contains_in_token(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
+        self.token_in
+            .contains_key(&(case_id.clone(), constraint_id.clone()))
     }
 
     // are there still open obligations e.g. are there tokens in token_out

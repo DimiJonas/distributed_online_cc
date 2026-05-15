@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{fmt::Display, net::SocketAddr};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use process_mining::core::event_data::case_centric::{Event, XESEditableAttribute};
@@ -82,6 +82,12 @@ pub struct ConstraintResult {
     pub history: String,
 }
 
+impl Display for ConstraintResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
     pub id: TokenId,
@@ -110,6 +116,16 @@ impl Token {
             created_by,
             payload,
         }
+    }
+}
+
+impl Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "token with id={} for case/constraint {}/{}",
+            self.id, self.case_id, self.constraint_id
+        )
     }
 }
 

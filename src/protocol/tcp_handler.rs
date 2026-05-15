@@ -3,16 +3,11 @@ use uuid::Uuid;
 use crate::network::message_types::{
     CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
 };
+use crate::network::tcp_channel::send_to_peer;
 use crate::state::app_state::AppState;
 
 pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uuid) {
-    println!("handling conformance message with id {}", &msg_id);
-
-    println!(
-        "received cli message id={} msg={}",
-        msg_id,
-        serde_json::to_string_pretty(&msg).unwrap()
-    );
+    log::debug!("received cli message id={} msg={}", msg_id, msg);
 
     if msg.message.starts_with("ACK") {
         // its a response
@@ -24,12 +19,12 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uu
         };
 
         if sender.is_some() {
-            println!(
+            log::info!(
                 "matched response with pending request. {} pending requests left",
                 len
             );
         } else {
-            println!(
+            log::warn!(
                 "no pending request found for response with id {}",
                 msg.request_id
             );
@@ -44,28 +39,32 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uu
             sender_addr: state.config.listen_address,
         });
 
-        let sender = {
-            let peers = state.peers.lock().unwrap();
-            peers.get_sender(&msg.sender_addr)
-        };
-        if let Some(sender) = sender {
-            sender.send(response).await.unwrap();
-        }
+        send_to_peer(msg.sender_addr, response, state.clone()).await;
     }
 }
 
 pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
-    println!("handling conformance message with id {}", &msg_id);
+    log::debug!(
+        "handling conformance message with id={} msg={}",
+        &msg_id,
+        msg
+    );
 
     if let Some(handler) = state.handlers.get_by_constraint_id(&msg.constraint_id) {
         handler.handle_message(state.clone(), msg).await;
     }
 }
 
-pub async fn handle_td_message(_msg: TerminationDetectionMessage, _state: AppState, _msg_id: Uuid) {
+pub async fn handle_td_message(msg: TerminationDetectionMessage, _state: AppState, msg_id: Uuid) {
+    log::debug!(
+        "handling termination detection message message with id={} msg={}",
+        &msg_id,
+        msg
+    );
     // TODO
 }
 
-pub async fn handle_overlay_message(_msg: OverlayMessage, _state: AppState, _msg_id: Uuid) {
+pub async fn handle_overlay_message(msg: OverlayMessage, _state: AppState, msg_id: Uuid) {
+    log::debug!("handling overlay message with id={} msg={}", &msg_id, msg);
     // TODO
 }

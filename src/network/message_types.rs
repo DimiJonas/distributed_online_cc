@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{fmt::Display, net::SocketAddr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,10 @@ impl PeerMessage {
             message_id: MessageId::new_v4(),
             payload,
         }
+    }
+
+    pub fn display_string(&self) -> String {
+        format!("{}", self)
     }
 
     // convenience constructors
@@ -39,6 +43,19 @@ impl PeerMessage {
     }
 }
 
+impl Display for PeerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let payload_type = match self.payload {
+            PeerMessagePayload::Hello(_) => "hello",
+            PeerMessagePayload::Cli(_) => "cli",
+            PeerMessagePayload::Conformance(_) => "conformance",
+            PeerMessagePayload::Overlay(_) => "overlay",
+            PeerMessagePayload::TerminationDetection(_) => "termination detection",
+        };
+        write!(f, "id={} type={}", self.message_id, payload_type)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerMessagePayload {
     Hello(HelloMessage),
@@ -53,11 +70,23 @@ pub struct HelloMessage {
     pub listening_address: SocketAddr,
 }
 
+impl Display for HelloMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliTestMessage {
     pub request_id: u64,
     pub message: String,
     pub sender_addr: SocketAddr,
+}
+
+impl Display for CliTestMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -144,14 +173,32 @@ impl CCMessage {
     // TODO: add more constructors e.g. for pulltokenrequest etc.
 }
 
+impl Display for CCMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CCMessage {}/{}", self.case_id, self.constraint_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayMessage {
     // TODO
 }
 
+impl Display for OverlayMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OverlayMessage")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminationDetectionMessage {
     // TODO
+}
+
+impl Display for TerminationDetectionMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TerminationDetectionMessage")
+    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use crate::network::message_types::PeerMessage;
 use bytes::{Buf, BufMut, BytesMut};
 
@@ -13,7 +15,7 @@ pub enum FramingError {
     Deserialize(serde_json::Error),
 }
 
-impl std::fmt::Display for FramingError {
+impl Display for FramingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             FramingError::Incomplete => write!(f, "incomplete frame in buffer"),
