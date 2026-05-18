@@ -44,6 +44,12 @@ impl ConstraintHandler for ResponseProducerHandler {
 
     // create token that event happened
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
+        log::debug!(
+            "received configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
+        );
+
         let token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
@@ -55,23 +61,42 @@ impl ConstraintHandler for ResponseProducerHandler {
             let mut store = state.token_store.lock().unwrap();
             store.produce(token.clone());
         }
+
         log::info!("produced token: {}", token);
         log::debug!("produced token: {:?}", token);
     }
 
     // delete produced token
     async fn handle_message(&self, state: AppState, message: CCMessage) {
+        log::info!(
+            "received message for constraint {}; message={}",
+            self.constraint_id,
+            message
+        );
+        log::debug!(
+            "received message for constraint {}; message={:?}",
+            self.constraint_id,
+            message
+        );
+
         if message.message_type == CCMessageType::DeleteToken {
             let mut store = state.token_store.lock().unwrap();
             if let Some(token) = store.remove_out(&message.case_id, &self.constraint_id) {
-                log::info!("deleted token {}", token);
-                log::debug!("deleted token {:?}", token);
+                log::info!("removed token {}", token);
+                log::debug!("removed token {:?}", token);
             }
         }
     }
 
     // check if token still exists and set constraint result accordingly
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        log::info!("creating constraint check result");
         // create constraint result (with info message)
         let (constraint_result, token) = {
             let mut token_store = state.token_store.lock().unwrap();
@@ -132,6 +157,14 @@ impl ConstraintHandler for ResponseConsumerHandler {
 
     // trigger token deletion on all configured response producers
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
+        log::debug!(
+            "received configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
+        );
+
+        log::info!("triggering token deletion on response producer peers");
+        log::debug!("response producer peers: {:?}", self.producer_peers);
         for &peer_addr in self.producer_peers.iter() {
             send_delete_token(
                 peer_addr,

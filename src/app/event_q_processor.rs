@@ -27,16 +27,14 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                 {
                     let mut result_store = state.cc_results.lock().unwrap();
                     if !result_store.has_case(&event.case_id) {
+                        log::info!("identified new case id={}", &event.case_id);
                         let constraints = build_constraint_list(state.config.clone());
                         result_store.register_case(event.case_id.clone(), &constraints);
                     }
                 }
 
-                log::info!("processing event: {}", &event);
-                log::debug!(
-                    "processing event: {}",
-                    serde_json::to_string_pretty(&event).unwrap()
-                );
+                log::info!("processing event: {}", event);
+                log::debug!("processing event: {:?}", event);
 
                 // dispatch relevant handlers
                 let event_id = event.name().unwrap_or("");

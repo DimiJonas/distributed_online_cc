@@ -158,7 +158,7 @@ impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Token with id={} for case/constraint {}/{}",
+            "Token with id={} for case={}/constraint={}",
             self.id, self.case_id, self.constraint_id
         )
     }

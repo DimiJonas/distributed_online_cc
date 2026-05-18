@@ -20,6 +20,7 @@ async fn main() {
 
     setup_logging(&config.log_file).expect("failed to initialize logging");
     log::info!("starting node");
+    log::debug!("configuration: {:?}", config);
 
     // create event queue
     let (event_q_tx, _event_q_rx) = mpsc::channel(config.event_queue_size);
@@ -52,11 +53,16 @@ async fn main() {
 
 async fn setup_tcp_channels(state: AppState) {
     // create tcp channels from config
+    log::info!("creating tcp channels to configured constraint check peers");
+
     let constraint_peers: Vec<SocketAddr> = state
         .handlers
         .all()
         .flat_map(|h| h.configured_peers())
         .collect();
+
+    log::debug!("configured constraint check peers: {:?}", constraint_peers);
+
     for peer_address in constraint_peers {
         connect_peer(peer_address, state.clone()).await;
     }
@@ -79,7 +85,7 @@ fn setup_logging(log_file: &str) -> Result<(), fern::InitError> {
     let level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(LevelFilter::Info);
+        .unwrap_or(LevelFilter::Debug);
 
     fern::Dispatch::new()
         .format(format)
