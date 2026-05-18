@@ -32,7 +32,8 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                     }
                 }
 
-                println!(
+                log::info!("processing event: {}", &event);
+                log::debug!(
                     "processing event: {}",
                     serde_json::to_string_pretty(&event).unwrap()
                 );

@@ -17,7 +17,7 @@ pub fn spawn_cli(state: AppState) {
             let parts = match shell_words::split(&line) {
                 Ok(parts) => parts,
                 Err(e) => {
-                    println!("error parsing command: {}", e);
+                    log::error!("error parsing command: {}", e);
                     continue;
                 }
             };
@@ -37,7 +37,7 @@ pub fn spawn_cli(state: AppState) {
                     };
                     cmd_tx.send(command).await.unwrap();
                 }
-                _ => println!("unknown command"),
+                _ => log::error!("unknown command"),
             }
         }
     });
@@ -59,8 +59,7 @@ pub fn spawn_cli(state: AppState) {
                         sender_addr: cmd_interpreter_state.config.listen_address,
                     });
 
-                    // TODO: this code does not make sense
-                    // this should use tcp_router::send_to_peer
+                    // TODO: this should use tcp_router::send_to_peer
 
                     // waiting channel for response
                     let (tx, rx) = oneshot::channel();
@@ -78,21 +77,21 @@ pub fn spawn_cli(state: AppState) {
                         };
 
                         sender.send(message).await.unwrap();
-                        println!("sent request. now {} pending requests in total", len);
+                        log::info!("sent request. now {} pending requests in total", len);
                         match rx.await {
-                            Ok(resp) => println!("got response: {:?}", resp),
-                            Err(_) => println!(
+                            Ok(resp) => log::debug!("got response: {:?}", resp),
+                            Err(_) => log::error!(
                                 "error when trying to receive response for request id {}",
                                 request_id
                             ),
                         }
                     } else {
-                        println!("peer {} not connected yet", peer_address);
+                        log::error!("peer {} not connected yet", peer_address);
                     }
                 }
                 CliCommand::Connect { peer_address } => {
                     if peer_address == state.config.listen_address {
-                        println!("cannot connect to self");
+                        log::error!("cannot connect to self");
                         continue;
                     }
                     connect_peer(peer_address, state.clone()).await;

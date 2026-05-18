@@ -48,7 +48,7 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
 
                 if event_q.send(traced_event).await.is_err() {
                     // error, shut down event handler worker task
-                    eprintln!("event input handler dropped, unable to send event");
+                    log::error!("event input handler dropped, unable to send event");
                     break;
                 }
             }

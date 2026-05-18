@@ -38,7 +38,7 @@ impl TracedEvent {
             .and_then(|a| a.value.try_as_date())
     }
 
-    pub fn timestamo_utc(&self) -> Option<DateTime<Utc>> {
+    pub fn timestamp_utc(&self) -> Option<DateTime<Utc>> {
         self.timestamp().map(|dt| dt.with_timezone(&Utc))
     }
 
@@ -48,6 +48,18 @@ impl TracedEvent {
             .get_by_key("concept:name")
             .and_then(|a| a.value.try_as_string())
             .map(|s| s.as_str())
+    }
+}
+
+impl Display for TracedEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Event: name={} case={} time={}",
+            self.name().unwrap_or_default(),
+            self.case_id,
+            self.timestamp_utc().unwrap_or(DateTime::<Utc>::MIN_UTC)
+        )
     }
 }
 

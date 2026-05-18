@@ -47,7 +47,7 @@ async fn main() {
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();
-    println!("shutting down main");
+    log::warn!("shutting down main");
 }
 
 async fn setup_tcp_channels(state: AppState) {

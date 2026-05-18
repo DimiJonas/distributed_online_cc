@@ -21,6 +21,11 @@ pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
                 log::error!("error connecting to peer {}: {}", peer_address, e);
             }
         }
+    } else {
+        log::info!(
+            "tried to establish tcp channel to {}, but that channel already exists",
+            peer_address
+        );
     }
 }
 

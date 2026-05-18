@@ -9,11 +9,11 @@ pub fn spawn_event_listener(state: AppState) {
 
     tokio::spawn(async move {
         let listener = UnixListener::bind(&socket_path).unwrap();
-        println!("event listener started on {}", socket_path);
+        log::info!("event listener started on {}", socket_path);
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-            println!("received input on event listener unix socket");
+            log::info!("received input on event listener unix socket");
 
             tokio::spawn(handle_event(stream, state.event_q.clone()));
         }
