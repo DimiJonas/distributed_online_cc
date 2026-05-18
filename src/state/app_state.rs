@@ -1,10 +1,12 @@
 use crate::config::{handler_registry::HandlerRegistry, node_config::NodeConfig};
+use crate::network::message_types::PeerMessage;
 use crate::state::cc_result_store::CCResultStore;
 use crate::state::peer_manager::PeerManager;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::request_id_container::RequestIdContainer;
 use crate::state::token_store::TokenStore;
 use crate::types::TracedEvent;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -18,10 +20,15 @@ pub struct AppState {
     pub token_store: Arc<Mutex<TokenStore>>,
     pub cc_results: Arc<Mutex<CCResultStore>>,
     pub handlers: Arc<HandlerRegistry>,
+    pub outbound_router_q: mpsc::Sender<(SocketAddr, PeerMessage)>,
 }
 
 impl AppState {
-    pub fn new(config: NodeConfig, event_q: mpsc::Sender<TracedEvent>) -> Self {
+    pub fn new(
+        config: NodeConfig,
+        event_q: mpsc::Sender<TracedEvent>,
+        outbound_router_q: mpsc::Sender<(SocketAddr, PeerMessage)>,
+    ) -> Self {
         let handlers = Arc::new(HandlerRegistry::build(&config));
         let initial_request_id = config.node_id as u64 * 1000;
         Self {
@@ -33,6 +40,7 @@ impl AppState {
             token_store: Arc::new(Mutex::new(TokenStore::new())),
             cc_results: Arc::new(Mutex::new(CCResultStore::new())),
             handlers,
+            outbound_router_q,
         }
     }
 }

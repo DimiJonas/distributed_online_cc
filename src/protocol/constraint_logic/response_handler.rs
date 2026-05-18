@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::impl_constraint_handler_fields;
-use crate::network::tcp_channel::send_to_peer;
+use crate::network::tcp_router::send_to_peer;
 /*
     a Response constraint defines that after Event/Activity A happened, Event/Activity B must also happen at some point after that
 

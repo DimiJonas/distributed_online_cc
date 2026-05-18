@@ -1,9 +1,10 @@
 use clap::Parser;
 use distributed_online_cc::config::node_config::NodeConfig;
-use distributed_online_cc::network::tcp_channel::connect_peer;
+use distributed_online_cc::network::tcp_router::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
 use log::LevelFilter;
 use std::net::SocketAddr;
+use tokio::sync::mpsc;
 
 // parse command line arguments
 #[derive(Parser)]
@@ -21,9 +22,11 @@ async fn main() {
     log::info!("starting node");
 
     // create event queue
-    let (event_q_tx, _event_q_rx) = tokio::sync::mpsc::channel(config.event_queue_size);
+    let (event_q_tx, _event_q_rx) = mpsc::channel(config.event_queue_size);
+    // create outbound router message queue
+    let (outbound_router_q_tx, outbound_router_q_rx) = mpsc::channel(1024);
 
-    let state = AppState::new(config, event_q_tx);
+    let state = AppState::new(config, event_q_tx, outbound_router_q_tx);
 
     setup_tcp_channels(state.clone()).await;
 
@@ -36,6 +39,10 @@ async fn main() {
     distributed_online_cc::app::event_q_processor::spawn_event_processor(
         state.clone(),
         _event_q_rx,
+    );
+    distributed_online_cc::app::outbound_router_q_processor::spawn_outbound_router_processor(
+        outbound_router_q_rx,
+        state.clone(),
     );
 
     // keeps main alive until i shut it down

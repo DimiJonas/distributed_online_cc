@@ -1,0 +1,8 @@
+[2026-05-18T11:12:52 INFO distributed_online_cc] starting node
+[2026-05-18T11:12:52 INFO distributed_online_cc::network::tcp_channel] tcp channel to 127.0.0.1:8001 initiated
+[2026-05-18T11:13:39 INFO distributed_online_cc::network::tcp_channel] decoded message from peer 127.0.0.1:8001: id=cbe6b010-7e8a-4936-a87f-d928f06f08d0 type=cli
+[2026-05-18T11:13:39 INFO distributed_online_cc::protocol::tcp_handler] matched response with pending request. 0 pending requests left
+[2026-05-18T11:15:36 INFO distributed_online_cc] starting node
+[2026-05-18T11:15:36 INFO distributed_online_cc::network::tcp_channel] tcp channel to 127.0.0.1:8001 initiated
+[2026-05-18T11:16:44 INFO distributed_online_cc::protocol::constraint_logic::response_handler] sending delete token message to 127.0.0.1:8001
+[2026-05-18T11:16:44 INFO distributed_online_cc::network::tcp_router] sent message id=ccc6299f-8ea3-41e2-bc47-14116ff14495 type=conformance to 127.0.0.1:8001

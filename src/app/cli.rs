@@ -1,5 +1,5 @@
 use crate::network::message_types::{CliTestMessage, PeerMessage};
-use crate::network::tcp_channel::connect_peer;
+use crate::network::tcp_router::connect_peer;
 use crate::state::app_state::AppState;
 use crate::types::CliCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -58,6 +58,10 @@ pub fn spawn_cli(state: AppState) {
                         message: msg.clone(),
                         sender_addr: cmd_interpreter_state.config.listen_address,
                     });
+
+                    // TODO: this code does not make sense
+                    // this should use tcp_router::send_to_peer
+
                     // waiting channel for response
                     let (tx, rx) = oneshot::channel();
 
