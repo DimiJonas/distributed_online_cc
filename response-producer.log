@@ -16,3 +16,26 @@
   "info": "no tokens exist",
   "history": "\nSatisfied: Response: initialized constraint"
 }
+[2026-05-18T11:44:03 INFO distributed_online_cc] starting node
+[2026-05-18T11:44:03 INFO distributed_online_cc::app::tcp_listener] listening for peer messages on 127.0.0.1:8001
+[2026-05-18T11:44:03 INFO distributed_online_cc::app::event_listener] event listener started on /tmp/event_listener1.sock
+[2026-05-18T11:44:37 ERROR distributed_online_cc::network::tcp_router] error connecting to peer 127.0.0.1:8003: Connection refused (os error 111)
+[2026-05-18T11:44:51 INFO distributed_online_cc::network::tcp_channel] accepted tcp connection from peer 127.0.0.1:8002
+[2026-05-18T11:45:08 INFO distributed_online_cc::network::tcp_router] tried to establish tcp channel to 127.0.0.1:8002, but that channel already exists
+[2026-05-18T11:45:25 INFO distributed_online_cc::app::cli] sent request. now 1 pending requests in total
+[2026-05-18T11:45:25 INFO distributed_online_cc::network::tcp_channel] decoded message from peer 127.0.0.1:8002: id=9653d075-f5ce-4ff9-b392-b8dad0b3e125 type=cli
+[2026-05-18T11:45:25 INFO distributed_online_cc::protocol::tcp_handler] matched response with pending request. 0 pending requests left
+[2026-05-18T11:45:49 INFO distributed_online_cc::app::event_listener] received input on event listener unix socket
+[2026-05-18T11:45:49 INFO distributed_online_cc::app::event_q_processor] processing event: Event: name=response_producer_event case=case-11 time=2026-05-04 10:00:00 UTC
+[2026-05-18T11:45:49 INFO distributed_online_cc::protocol::constraint_logic::response_handler] produced token token with id=e3c16bf5-3aca-4cdb-92f4-4d479c4dc8bd for case/constraint case-11/response_test
+[2026-05-18T11:47:27 INFO distributed_online_cc::network::tcp_channel] decoded message from peer 127.0.0.1:8002: id=248d2c54-1dec-4a77-9845-6eaa3543a2b9 type=conformance
+[2026-05-18T11:47:27 INFO distributed_online_cc::protocol::constraint_logic::response_handler] deleted token token with id=e3c16bf5-3aca-4cdb-92f4-4d479c4dc8bd for case/constraint case-11/response_test
+[2026-05-18T11:48:13 INFO distributed_online_cc::app::event_listener] received input on event listener unix socket
+[2026-05-18T11:48:13 INFO distributed_online_cc::app::event_q_processor] processing event: Event: name=dummy_end_activity case=case-11 time=2026-09-04 12:00:00 UTC
+[2026-05-18T11:48:13 INFO distributed_online_cc::protocol::constraint_logic::end_activity_handler] received end event for case case-11
+[2026-05-18T11:48:13 INFO distributed_online_cc::protocol::constraint_logic::response_handler] response constraint check result after termination {
+  "constraint_type": "Response",
+  "constraint_result": "Satisfied",
+  "info": "no tokens exist",
+  "history": "\nSatisfied: Response: initialized constraint"
+}

@@ -6,3 +6,15 @@
 [2026-05-18T11:15:36 INFO distributed_online_cc::network::tcp_channel] tcp channel to 127.0.0.1:8001 initiated
 [2026-05-18T11:16:44 INFO distributed_online_cc::protocol::constraint_logic::response_handler] sending delete token message to 127.0.0.1:8001
 [2026-05-18T11:16:44 INFO distributed_online_cc::network::tcp_router] sent message id=ccc6299f-8ea3-41e2-bc47-14116ff14495 type=conformance to 127.0.0.1:8001
+[2026-05-18T11:43:58 INFO distributed_online_cc::network::tcp_channel] got zero bytes. peer 127.0.0.1:8001 probably disconnected. removing peer from peer manager
+[2026-05-18T11:43:58 INFO distributed_online_cc::network::tcp_channel] peer connection to 127.0.0.1:8001 closed
+[2026-05-18T11:44:51 INFO distributed_online_cc] starting node
+[2026-05-18T11:44:51 INFO distributed_online_cc::app::tcp_listener] listening for peer messages on 127.0.0.1:8002
+[2026-05-18T11:44:51 INFO distributed_online_cc::network::tcp_channel] tcp channel to 127.0.0.1:8001 initiated
+[2026-05-18T11:44:51 INFO distributed_online_cc::app::event_listener] event listener started on /tmp/event_listener2.sock
+[2026-05-18T11:45:25 INFO distributed_online_cc::network::tcp_channel] decoded message from peer 127.0.0.1:8001: id=0e983609-b70a-46b3-86da-4b952156d815 type=cli
+[2026-05-18T11:45:25 INFO distributed_online_cc::network::tcp_router] sent message id=9653d075-f5ce-4ff9-b392-b8dad0b3e125 type=cli to 127.0.0.1:8001
+[2026-05-18T11:47:27 INFO distributed_online_cc::app::event_listener] received input on event listener unix socket
+[2026-05-18T11:47:27 INFO distributed_online_cc::app::event_q_processor] processing event: Event: name=response_consumer_event case=case-11 time=2026-05-04 11:00:00 UTC
+[2026-05-18T11:47:27 INFO distributed_online_cc::protocol::constraint_logic::response_handler] sending delete token message to 127.0.0.1:8001
+[2026-05-18T11:47:27 INFO distributed_online_cc::network::tcp_router] sent message id=248d2c54-1dec-4a77-9845-6eaa3543a2b9 type=conformance to 127.0.0.1:8001

@@ -79,11 +79,30 @@ impl ConstraintType {
     }
 }
 
+impl Display for ConstraintType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Response => write!(f, "Response"),
+            Self::EndActivity => write!(f, "EndActivity"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConstraintResultType {
     Violated,
     TemporarilyViolated,
     Satisfied,
+}
+
+impl Display for ConstraintResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Violated => write!(f, "Violated"),
+            Self::TemporarilyViolated => write!(f, "TemporarilyViolated"),
+            Self::Satisfied => write!(f, "Satisfied"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +115,11 @@ pub struct ConstraintResult {
 
 impl Display for ConstraintResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
+        write!(
+            f,
+            "ConstraintResult: type={} result={} info={}",
+            self.constraint_type, self.constraint_result, self.info
+        )
     }
 }
 
@@ -135,7 +158,7 @@ impl Display for Token {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "token with id={} for case/constraint {}/{}",
+            "Token with id={} for case/constraint {}/{}",
             self.id, self.case_id, self.constraint_id
         )
     }

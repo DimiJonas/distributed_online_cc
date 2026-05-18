@@ -55,8 +55,8 @@ impl ConstraintHandler for ResponseProducerHandler {
             let mut store = state.token_store.lock().unwrap();
             store.produce(token.clone());
         }
-        log::info!("produced token {}", token);
-        log::debug!("produced token {:?}", token);
+        log::info!("produced token: {}", token);
+        log::debug!("produced token: {:?}", token);
     }
 
     // delete produced token
@@ -106,6 +106,12 @@ impl ConstraintHandler for ResponseProducerHandler {
                     .get_constraint(case_id, &self.constraint_id)
                     .unwrap()
             );
+            log::debug!(
+                "response constraint check result after termination {:?}",
+                result_store
+                    .get_constraint(case_id, &self.constraint_id)
+                    .unwrap()
+            )
         }
     }
 }
