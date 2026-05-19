@@ -25,9 +25,8 @@ async fn main() {
     // create event queue
     let (event_q_tx, _event_q_rx) = mpsc::channel(config.event_queue_size);
     // create outbound router message queue
-    let (outbound_router_q_tx, outbound_router_q_rx) = mpsc::channel(1024);
 
-    let state = AppState::new(config, event_q_tx, outbound_router_q_tx);
+    let state = AppState::new(config, event_q_tx);
 
     setup_tcp_channels(state.clone()).await;
 
@@ -41,10 +40,6 @@ async fn main() {
         state.clone(),
         _event_q_rx,
     );
-    distributed_online_cc::app::outbound_router_q_processor::spawn_outbound_router_processor(
-        outbound_router_q_rx,
-        state.clone(),
-    );
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();
@@ -52,8 +47,7 @@ async fn main() {
 }
 
 async fn setup_tcp_channels(state: AppState) {
-    // create tcp channels from config
-    log::info!("creating tcp channels to configured constraint check peers");
+    // create tcp channels from config if there are any
 
     let constraint_peers: Vec<SocketAddr> = state
         .handlers
@@ -61,6 +55,11 @@ async fn setup_tcp_channels(state: AppState) {
         .flat_map(|h| h.configured_peers())
         .collect();
 
+    if constraint_peers.is_empty() {
+        return;
+    }
+
+    log::info!("creating tcp channels to configured constraint check peers");
     log::debug!("configured constraint check peers: {:?}", constraint_peers);
 
     for peer_address in constraint_peers {
@@ -85,7 +84,7 @@ fn setup_logging(log_file: &str) -> Result<(), fern::InitError> {
     let level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(LevelFilter::Debug);
+        .unwrap_or(LevelFilter::Info);
 
     fern::Dispatch::new()
         .format(format)

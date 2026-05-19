@@ -1,6 +1,6 @@
 pub mod app_state;
 pub mod cc_result_store;
-pub mod peer_manager;
+pub mod peer_manager_map;
 pub mod pending_requests;
 pub mod request_id_container;
 pub mod token_store;

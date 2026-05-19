@@ -6,6 +6,7 @@
 use crate::network::message_types::{
     CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
 };
+use crate::network::peer_manager_task::PeerManagerMessage;
 use crate::state::app_state::AppState;
 use uuid::Uuid;
 
@@ -44,12 +45,25 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uu
             sender_addr: state.config.listen_address,
         });
 
-        if let Err(e) = state
-            .outbound_router_q
-            .send((msg.sender_addr, response))
-            .await
-        {
-            log::error!("failed to enqueue outbound message: {}", e);
+        let manager_tx = {
+            let managers = state.peer_managers.lock().unwrap();
+            managers.get(&msg.sender_addr)
+        };
+        match manager_tx {
+            Some(tx) => {
+                if let Err(e) = tx
+                    .send(PeerManagerMessage::Outbound(Box::new(response)))
+                    .await
+                {
+                    log::error!("failed to enqueue cli response: {}", e);
+                }
+            }
+            None => {
+                log::error!(
+                    "no peer manager for {} found to send cli response to",
+                    msg.sender_addr
+                );
+            }
         }
     }
 }

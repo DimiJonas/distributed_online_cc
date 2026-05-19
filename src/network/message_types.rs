@@ -1,14 +1,21 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{fmt::Display, net::SocketAddr, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use crate::types::{CaseId, ConstraintId, MessageId, Token, TokenId};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// TODO: make this configurable
+// how long a message lives in the queue before being dropped
+pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
 pub struct PeerMessage {
     pub message_id: MessageId,
     pub payload: PeerMessagePayload,
+    // None = never expires (used for handshake)
+    pub deadline: Option<Instant>,
 }
 
 impl PeerMessage {
@@ -16,16 +23,37 @@ impl PeerMessage {
         Self {
             message_id: MessageId::new_v4(),
             payload,
+            deadline: Some(Instant::now() + DEFAULT_MESSAGE_TTL),
         }
     }
 
-    pub fn display_string(&self) -> String {
-        format!("{}", self)
+    // for handshake
+    pub fn new_no_expiry(payload: PeerMessagePayload) -> Self {
+        Self {
+            message_id: MessageId::new_v4(),
+            payload,
+            deadline: None,
+        }
+    }
+
+    pub fn new_with_ttl(payload: PeerMessagePayload, ttl: Duration) -> Self {
+        Self {
+            message_id: MessageId::new_v4(),
+            payload,
+            deadline: Some(Instant::now() + ttl),
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        match self.deadline {
+            Some(deadline) => Instant::now() > deadline,
+            None => false,
+        }
     }
 
     // convenience constructors
     pub fn hello(msg: HelloMessage) -> Self {
-        Self::new(PeerMessagePayload::Hello(msg))
+        Self::new_no_expiry(PeerMessagePayload::Hello(msg))
     }
     pub fn cli(msg: CliTestMessage) -> Self {
         Self::new(PeerMessagePayload::Cli(msg))

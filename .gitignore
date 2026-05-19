@@ -1,6 +1,6 @@
 /target
 
-*.lock
 .vscode
 *.zip
 *.log
+*.lock

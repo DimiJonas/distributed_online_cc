@@ -1,7 +1,12 @@
 use std::fmt::Display;
 
-use crate::network::message_types::PeerMessage;
+use crate::{
+    network::message_types::{DEFAULT_MESSAGE_TTL, PeerMessage, PeerMessagePayload},
+    types::MessageId,
+};
 use bytes::{Buf, BufMut, BytesMut};
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 static HEADER_LENGTH: usize = 4; // 4 bytes for the length prefix
 
@@ -27,9 +32,39 @@ impl Display for FramingError {
 
 impl std::error::Error for FramingError {}
 
+// serializable message type (PeerMessage has an Instant and that is not serializable)
+#[derive(Serialize, Deserialize)]
+struct WirePeerMessage {
+    message_id: MessageId,
+    payload: PeerMessagePayload,
+}
+
+// convert from PeerMessage to WirePeerMessage (drop deadline - its local metadata anyway)
+impl From<&PeerMessage> for WirePeerMessage {
+    fn from(msg: &PeerMessage) -> Self {
+        Self {
+            message_id: msg.message_id,
+            payload: msg.payload.clone(),
+        }
+    }
+}
+
+// convertfrom WirePeerMessage to PeerMessage (add deadline)
+impl From<WirePeerMessage> for PeerMessage {
+    fn from(wire: WirePeerMessage) -> Self {
+        // messages received from the wire get a fresh TTL from now
+        PeerMessage {
+            message_id: wire.message_id,
+            payload: wire.payload,
+            deadline: Some(Instant::now() + DEFAULT_MESSAGE_TTL),
+        }
+    }
+}
+
 /// Encode a PeerMessage for sending.
 pub fn encode(msg: &PeerMessage) -> Result<BytesMut, FramingError> {
-    let msg_bytes = serde_json::to_vec(msg).map_err(FramingError::Serialize)?;
+    let wire_msg = WirePeerMessage::from(msg);
+    let msg_bytes = serde_json::to_vec(&wire_msg).map_err(FramingError::Serialize)?;
 
     // prefix the json data with its length for raw framing
     let mut framed_msg = BytesMut::with_capacity(HEADER_LENGTH + msg_bytes.len());
@@ -50,7 +85,9 @@ pub fn decode(buf: &mut BytesMut) -> Result<PeerMessage, FramingError> {
     buf.advance(HEADER_LENGTH);
     let msg_bytes = buf.split_to(len);
 
-    serde_json::from_slice(&msg_bytes).map_err(FramingError::Deserialize)
+    let wire_msg: WirePeerMessage =
+        serde_json::from_slice(&msg_bytes).map_err(FramingError::Deserialize)?;
+    Ok(PeerMessage::from(wire_msg))
 }
 
 /// Returns true when `buf` contains a complete frame.

@@ -1,8 +1,8 @@
 use crate::network::framing::*;
 use crate::network::message_types::{HelloMessage, PeerMessage, PeerMessagePayload};
+use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
 use crate::protocol::tcp_handler::*;
 use crate::state::app_state::AppState;
-use crate::state::peer_manager::PeerHandle;
 use bytes::BytesMut;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,13 +14,13 @@ use tokio::sync::mpsc;
 pub async fn initiate_tcp_connection(
     peer_address: SocketAddr,
     mut stream: TcpStream,
+    tcp_channel_sender: mpsc::Sender<PeerMessage>,
+    tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
     state: AppState,
 ) {
-    let my_address = state.config.listen_address;
-
     // create hello message
     let hello = PeerMessage::hello(HelloMessage {
-        listening_address: my_address,
+        listening_address: state.config.listen_address,
     });
 
     // encode hello message
@@ -28,6 +28,12 @@ pub async fn initiate_tcp_connection(
         Ok(b) => b,
         Err(e) => {
             log::error!("failed to encode hello for peer {}: {}", peer_address, e);
+            notify_manager(
+                state.clone(),
+                peer_address,
+                PeerManagerMessage::ConnectionLost,
+            )
+            .await;
             return;
         }
     };
@@ -35,24 +41,28 @@ pub async fn initiate_tcp_connection(
     // send hello message
     if stream.write_all(&encoded).await.is_err() {
         log::error!("error sending hello to peer {}", peer_address);
+        notify_manager(
+            state.clone(),
+            peer_address,
+            PeerManagerMessage::ConnectionLost,
+        )
+        .await;
         return;
     }
 
-    let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
-
-    // save new peer in peer manager
-    {
-        let mut peers = state.peers.lock().unwrap();
-        peers.insert(peer_address, PeerHandle::new(tx));
-    }
-
     log::info!("tcp channel to {} initiated", peer_address);
+    notify_manager(
+        state.clone(),
+        peer_address,
+        PeerManagerMessage::ConnectionReady(tcp_channel_sender),
+    )
+    .await;
 
     // create tcp channel handling task
     tcp_channel(
         peer_address,
         stream,
-        rx,
+        tcp_channel_receiver,
         state,
         BytesMut::with_capacity(1024),
     )
@@ -101,43 +111,40 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
 
     log::info!("accepted tcp connection from peer {}", peer_address);
 
-    // check if already connected to same address
-    let already_exists = {
-        let peers = state.peers.lock().unwrap();
-        peers.contains(&peer_address)
-    };
-    if already_exists {
-        log::warn!(
-            "there already exists a tcp channel to {}, dropping connection",
-            peer_address
-        );
-        return;
-    }
-
     // save new connection
-    let (tx, rx) = mpsc::channel(state.config.tcp_channel_queue_size);
+    let (tcp_channel_sender, tcp_channel_receiver) =
+        mpsc::channel(state.config.tcp_channel_queue_size);
 
-    {
-        let mut peers = state.peers.lock().unwrap();
-        peers.insert(peer_address, PeerHandle::new(tx));
-    }
+    // manager needs to be created if this is the first time connecting with this peer
+    ensure_manager_exists(state.clone(), peer_address);
 
-    // create tcp channel handling task
-    tcp_channel(peer_address, stream, rx, state, read_buf).await;
+    notify_manager(
+        state.clone(),
+        peer_address,
+        PeerManagerMessage::ConnectionReady(tcp_channel_sender),
+    )
+    .await;
+
+    // go into tcp channel routine
+    tcp_channel(peer_address, stream, tcp_channel_receiver, state, read_buf).await;
 }
 
-// task that communicates with a certain peer
-pub async fn tcp_channel(
+// communicate with a certain peer (send/receive tcp)
+async fn tcp_channel(
     peer_address: SocketAddr,
     mut stream: TcpStream,
-    mut rx: mpsc::Receiver<PeerMessage>,
+    mut tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
     state: AppState,
     mut read_buf: BytesMut,
 ) {
     loop {
         tokio::select! {
             // send msg
-            Some(msg) = rx.recv() => {
+            Some(msg) = tcp_channel_receiver.recv() => {
+                if msg.is_expired() {
+                    log::warn!("dropping expired message {} for {}", msg.message_id, peer_address);
+                    continue;
+                }
                 let encoded = match encode(&msg) {
                     Ok(b) => b,
                     Err(e) => {
@@ -147,7 +154,7 @@ pub async fn tcp_channel(
                 };
 
                 if stream.write_all(&encoded).await.is_err() {
-                    log::error!("error sending to peer {}", peer_address);
+                    log::error!("writing to tcp stream failed to peer {}", peer_address);
                     break;
                 }
             }
@@ -156,9 +163,7 @@ pub async fn tcp_channel(
                 match result {
                     Ok(0) => {
                         // connection closed
-                        log::info!("got zero bytes. peer {} probably disconnected. removing peer from peer manager", peer_address);
-                        let mut peers = state.peers.lock().unwrap();
-                        peers.remove(&peer_address);
+                        log::info!("got zero bytes. peer {} probably disconnected", peer_address);
                         break;
                     }
                     Ok(_) => {
@@ -177,8 +182,7 @@ pub async fn tcp_channel(
                                     );
                                     // deserialization failure probably means the stream is
                                     // corrupted so it should be closed
-                                    let mut peers = state.peers.lock().unwrap();
-                                    peers.remove(&peer_address);
+                                    notify_manager(state.clone(), peer_address, PeerManagerMessage::ConnectionLost).await;
                                     return;
                                 }
                             };
@@ -219,4 +223,43 @@ pub async fn tcp_channel(
     }
 
     log::info!("peer connection to {} closed", peer_address);
+    notify_manager(
+        state.clone(),
+        peer_address,
+        PeerManagerMessage::ConnectionLost,
+    )
+    .await;
+}
+
+async fn notify_manager(state: AppState, peer_address: SocketAddr, msg: PeerManagerMessage) {
+    let manager_sender_opt = {
+        let managers = state.peer_managers.lock().unwrap();
+        managers.get(&peer_address)
+    };
+    match manager_sender_opt {
+        Some(manager_sender) => {
+            if let Err(e) = manager_sender.send(msg).await {
+                log::error!("failed notifying manager for peer {}: {}", peer_address, e);
+            }
+        }
+        None => {
+            log::warn!("no manager found for peer {}", peer_address);
+        }
+    }
+}
+
+fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
+    let mut managers = state.peer_managers.lock().unwrap();
+    if managers.has_manager(&peer_address) {
+        return;
+    }
+    // TODO: configurable channel size?
+    let (manager_sender, manager_receiver) = mpsc::channel(256);
+    managers.insert(peer_address, manager_sender);
+    tokio::spawn(peer_manager_task(
+        peer_address,
+        manager_receiver,
+        state.clone(),
+    ));
+    log::info!("created manager task for peer {}", peer_address);
 }

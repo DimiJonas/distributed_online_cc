@@ -1,5 +1,5 @@
 use crate::network::message_types::{CliTestMessage, PeerMessage};
-use crate::network::tcp_router::connect_peer;
+use crate::network::tcp_router::{connect_peer, send_to_peer};
 use crate::state::app_state::AppState;
 use crate::types::CliCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -59,34 +59,22 @@ pub fn spawn_cli(state: AppState) {
                         sender_addr: cmd_interpreter_state.config.listen_address,
                     });
 
-                    // TODO: this should use tcp_router::send_to_peer
-
-                    // waiting channel for response
+                    // oneshot waiting channel for response
                     let (tx, rx) = oneshot::channel();
 
-                    // send msg to peer_address
-                    let sender = {
-                        let peers = state.peers.lock().unwrap();
-                        peers.get_sender(&peer_address)
+                    let len = {
+                        let mut pending = cmd_interpreter_state.pending.lock().unwrap();
+                        pending.insert(request_id, tx);
+                        pending.len()
                     };
-                    if let Some(sender) = sender {
-                        let len = {
-                            let mut pending = cmd_interpreter_state.pending.lock().unwrap();
-                            pending.insert(request_id, tx);
-                            pending.len()
-                        };
-
-                        sender.send(message).await.unwrap();
-                        log::info!("sent request. now {} pending requests in total", len);
-                        match rx.await {
-                            Ok(resp) => log::debug!("got response: {:?}", resp),
-                            Err(_) => log::error!(
-                                "error when trying to receive response for request id {}",
-                                request_id
-                            ),
-                        }
-                    } else {
-                        log::error!("peer {} not connected yet", peer_address);
+                    send_to_peer(peer_address, message, state.clone()).await;
+                    log::info!("sent request. now {} pending requests in total", len);
+                    match rx.await {
+                        Ok(resp) => log::debug!("got response: {:?}", resp),
+                        Err(_) => log::error!(
+                            "error when trying to receive response for request id {}",
+                            request_id
+                        ),
                     }
                 }
                 CliCommand::Connect { peer_address } => {
