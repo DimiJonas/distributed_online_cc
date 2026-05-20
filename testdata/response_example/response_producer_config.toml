@@ -1,5 +1,5 @@
 node_id = 1
-listen_address = "127.0.0.1:8001"
+tcp_listen_address = "127.0.0.1:8001"
 unix_socket = "/tmp/event_listener1.sock"
 log_file = "response-producer.log"
 

@@ -16,6 +16,7 @@ pub struct NodeConfig {
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
     pub constraints: Vec<ConstraintConfig>,
+    #[serde(default)]
     pub tcp_channels: TcpChannelConfig,
 }
 
@@ -38,6 +39,18 @@ pub struct TcpChannelConfig {
     pub reconnect_start_delay: u64,
     #[serde(default = "default_tcp_reconnect_max_delay")]
     pub reconnect_max_delay: u64,
+}
+
+impl Default for TcpChannelConfig {
+    fn default() -> Self {
+        Self {
+            tcp_channel_mpsc_channel_size: default_tcp_channel_mpsc_channel_size(),
+            peer_manager_task_mpsc_channel_size: default_peer_manager_task_mpsc_channel_size(),
+            message_queue_size: default_tcp_message_queue_size(),
+            reconnect_start_delay: default_tcp_reconnect_start_delay(),
+            reconnect_max_delay: default_tcp_reconnect_max_delay(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
