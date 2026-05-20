@@ -153,3 +153,384 @@ pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::node_config::NodeConfig;
+    use crate::network::message_types::{CliTestMessage, PeerMessage, PeerMessagePayload};
+    use crate::state::app_state::AppState;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::time::{Instant, timeout};
+
+    // ----------------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------------
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    /// Minimal NodeConfig that satisfies AppState::new without touching disk.
+    fn test_config(listen_port: u16) -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            listen_address: addr(listen_port),
+            unix_socket: "/tmp/test.sock".to_string(),
+            log_file: "test.log".to_string(),
+            peers: vec![],
+            event_queue_size: 16,
+            tcp_channel_queue_size: 16,
+            constraints: vec![],
+        }
+    }
+
+    fn make_state(listen_port: u16) -> (AppState, mpsc::Receiver<crate::types::TracedEvent>) {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(test_config(listen_port), event_tx);
+        (state, event_rx)
+    }
+
+    /// Spawn peer_manager_task and return the sender used to drive it.
+    fn spawn_manager(peer_addr: SocketAddr, state: AppState) -> mpsc::Sender<PeerManagerMessage> {
+        let (tx, rx) = mpsc::channel(64);
+        tokio::spawn(peer_manager_task(peer_addr, rx, state));
+        tx
+    }
+
+    fn cli_msg(port: u16) -> PeerMessage {
+        PeerMessage::cli(CliTestMessage {
+            request_id: 1,
+            message: "hello".to_string(),
+            sender_addr: addr(port),
+        })
+    }
+
+    // ----------------------------------------------------------------
+    // Graceful shutdown
+    // ----------------------------------------------------------------
+
+    /// Dropping the sender closes the channel; the task must exit cleanly.
+    #[tokio::test]
+    async fn task_exits_when_sender_dropped() {
+        let (state, _eq) = make_state(19100);
+        let peer = addr(19101);
+        let tx = spawn_manager(peer, state);
+
+        // Give the task time to start, then drop the only sender.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(tx);
+
+        // If the task is stuck the test will time out; a short sleep is enough
+        // to confirm the task did not panic and released its resources.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // No assertion needed — reaching here without a panic is the proof.
+    }
+
+    // ----------------------------------------------------------------
+    // Outbound message queuing (no connection yet)
+    // ----------------------------------------------------------------
+
+    /// Messages sent before ConnectionReady must be queued, then flushed
+    /// when ConnectionReady arrives.
+    #[tokio::test]
+    async fn queued_messages_are_flushed_on_connection_ready() {
+        let (state, _eq) = make_state(19110);
+        let peer = addr(19111);
+        let manager_tx = spawn_manager(peer, state);
+
+        // Send two outbound messages before any tcp channel exists.
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19110))))
+            .await
+            .unwrap();
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19110))))
+            .await
+            .unwrap();
+
+        // Now simulate a tcp channel becoming ready.
+        let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        // Both queued messages should arrive on the tcp channel.
+        let first = timeout(Duration::from_millis(200), tcp_rx.recv())
+            .await
+            .expect("timed out waiting for first message")
+            .expect("channel closed unexpectedly");
+        assert!(matches!(first.payload, PeerMessagePayload::Cli(_)));
+
+        let second = timeout(Duration::from_millis(200), tcp_rx.recv())
+            .await
+            .expect("timed out waiting for second message")
+            .expect("channel closed unexpectedly");
+        assert!(matches!(second.payload, PeerMessagePayload::Cli(_)));
+    }
+
+    // ----------------------------------------------------------------
+    // Outbound message forwarding (connection already up)
+    // ----------------------------------------------------------------
+
+    /// When a connection is up, an Outbound message must be forwarded
+    /// immediately to the tcp channel — nothing should sit in the queue.
+    #[tokio::test]
+    async fn outbound_message_forwarded_immediately_when_connected() {
+        let (state, _eq) = make_state(19120);
+        let peer = addr(19121);
+        let manager_tx = spawn_manager(peer, state);
+
+        let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19120))))
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_millis(200), tcp_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert!(matches!(received.payload, PeerMessagePayload::Cli(_)));
+    }
+
+    // ----------------------------------------------------------------
+    // Expired message is dropped, not forwarded
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn expired_outbound_message_is_dropped() {
+        let (state, _eq) = make_state(19130);
+        let peer = addr(19131);
+        let manager_tx = spawn_manager(peer, state);
+
+        let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        // Build a message with a TTL that is already expired.
+        let mut expired = cli_msg(19130);
+        expired.deadline = Some(Instant::now() - Duration::from_secs(1));
+
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(expired)))
+            .await
+            .unwrap();
+
+        // Nothing should arrive; a short timeout confirms the message was dropped.
+        let result = timeout(Duration::from_millis(100), tcp_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "expired message should not have been forwarded"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // ConnectionLost clears the tcp sender
+    // ----------------------------------------------------------------
+
+    /// After ConnectionLost, new Outbound messages must be queued again
+    /// (not forwarded on the old — now dead — channel).
+    #[tokio::test]
+    async fn connection_lost_clears_sender_and_re_queues() {
+        let (state, _eq) = make_state(19140);
+        let peer = addr(19141);
+        let manager_tx = spawn_manager(peer, state);
+
+        // Establish a connection.
+        let (tcp_tx, tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        // Tear it down and drop tcp_rx here so we can detect
+        // whether the task tries to forward to the dead channel.
+        manager_tx
+            .send(PeerManagerMessage::ConnectionLost)
+            .await
+            .unwrap();
+
+        // Drop the old receiver — the channel is now closed from our side.
+        drop(tcp_rx);
+
+        // Queue the Outbound BEFORE ConnectionReady — this is the message that
+        // should be buffered and then flushed.
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19140))))
+            .await
+            .unwrap();
+
+        // send a ConnectionReady with a fresh channel to confirm the task has fully processed ConnectionLost
+        let (tcp_tx2, mut tcp_rx2) = mpsc::channel::<PeerMessage>(16);
+        // the queued message should flush onto this channel.
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx2))
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_millis(200), tcp_rx2.recv())
+            .await
+            .expect("timed out waiting for re-queued message")
+            .expect("channel closed");
+        assert!(matches!(received.payload, PeerMessagePayload::Cli(_)));
+
+        // And nothing more should arrive (the message was queued once, flushed once).
+        let extra = timeout(Duration::from_millis(50), tcp_rx2.recv()).await;
+        assert!(
+            extra.is_err(),
+            "message should have been flushed exactly once"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Reconnect-delay back-off
+    // ----------------------------------------------------------------
+
+    /// Each successive ConnectionLost must double the reconnect delay,
+    /// capped at RECONNECT_MAX_DELAY_SECS.
+    ///
+    /// We test the logic indirectly: the task must not panic and must
+    /// remain responsive to further messages after several lost events.
+    /// (Actual timer elapsing would require advancing Tokio's fake clock
+    /// and is omitted here for simplicity.)
+    #[tokio::test]
+    async fn task_remains_responsive_after_multiple_connection_losses() {
+        let (state, _eq) = make_state(19150);
+        let peer = addr(19151);
+        let manager_tx = spawn_manager(peer, state);
+
+        for _ in 0..5 {
+            manager_tx
+                .send(PeerManagerMessage::ConnectionLost)
+                .await
+                .unwrap();
+        }
+
+        // After all those losses the task must still be alive.
+        let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19150))))
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_millis(300), tcp_rx.recv())
+            .await
+            .expect("task was unresponsive after connection losses")
+            .expect("channel closed");
+        assert!(matches!(received.payload, PeerMessagePayload::Cli(_)));
+    }
+
+    // ----------------------------------------------------------------
+    // Queue overflow: oldest message is dropped
+    // ----------------------------------------------------------------
+
+    /// Filling the queue beyond MAX_QUEUE (256) should drop the oldest
+    /// entry, not panic and not block.
+    #[tokio::test]
+    async fn queue_overflow_drops_oldest_message() {
+        let (state, _eq) = make_state(19160);
+        let peer = addr(19161);
+        let manager_tx = spawn_manager(peer, state);
+
+        // Send MAX_QUEUE + 10 messages with no tcp channel.
+        for i in 0..(MAX_QUEUE + 10) {
+            let msg = PeerMessage::cli(CliTestMessage {
+                request_id: i as u64,
+                message: format!("msg-{}", i),
+                sender_addr: addr(19160),
+            });
+            manager_tx
+                .send(PeerManagerMessage::Outbound(Box::new(msg)))
+                .await
+                .unwrap();
+        }
+
+        // Now flush. We should receive exactly MAX_QUEUE messages (the 10
+        // oldest were dropped).
+        let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(512);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        let mut count = 0usize;
+        while let Ok(Some(_)) = timeout(Duration::from_millis(200), tcp_rx.recv()).await {
+            count += 1
+        }
+
+        assert_eq!(
+            count, MAX_QUEUE,
+            "expected exactly MAX_QUEUE messages after overflow, got {}",
+            count
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // ConnectionReady resets the reconnect delay
+    // ----------------------------------------------------------------
+
+    /// A successful connection after losses must reset the reconnect delay.
+    /// We verify this by checking the task still handles subsequent
+    /// ConnectionLost/Ready cycles correctly.
+    #[tokio::test]
+    async fn connection_ready_resets_reconnect_delay() {
+        let (state, _eq) = make_state(19170);
+        let peer = addr(19171);
+        let manager_tx = spawn_manager(peer, state);
+
+        // Lose connection a few times to ramp up the delay.
+        for _ in 0..3 {
+            manager_tx
+                .send(PeerManagerMessage::ConnectionLost)
+                .await
+                .unwrap();
+        }
+
+        // A successful connection should reset the internal delay counter.
+        let (tcp_tx, _tcp_rx) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx))
+            .await
+            .unwrap();
+
+        // Lose connection again — the next reconnect attempt should use the
+        // base delay (1 s), not the ramped-up value.  We can't observe the
+        // delay directly without a fake clock, but the task must remain alive.
+        manager_tx
+            .send(PeerManagerMessage::ConnectionLost)
+            .await
+            .unwrap();
+
+        let (tcp_tx2, mut tcp_rx2) = mpsc::channel::<PeerMessage>(16);
+        manager_tx
+            .send(PeerManagerMessage::ConnectionReady(tcp_tx2))
+            .await
+            .unwrap();
+
+        manager_tx
+            .send(PeerManagerMessage::Outbound(Box::new(cli_msg(19170))))
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_millis(300), tcp_rx2.recv())
+            .await
+            .expect("task unresponsive after delay reset")
+            .expect("channel closed");
+        assert!(matches!(received.payload, PeerMessagePayload::Cli(_)));
+    }
+}

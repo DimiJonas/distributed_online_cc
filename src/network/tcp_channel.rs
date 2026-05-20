@@ -263,3 +263,361 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
     ));
     log::info!("created manager task for peer {}", peer_address);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::node_config::NodeConfig;
+    use crate::network::message_types::{
+        CliTestMessage, HelloMessage, PeerMessage, PeerMessagePayload,
+    };
+    use crate::network::peer_manager_task::PeerManagerMessage;
+    use crate::state::app_state::AppState;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    // ----------------------------------------------------------------
+    // Helpers
+    // ----------------------------------------------------------------
+
+    fn addr(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    fn test_config(listen_port: u16) -> NodeConfig {
+        NodeConfig {
+            node_id: 1,
+            listen_address: addr(listen_port),
+            unix_socket: "/tmp/test.sock".to_string(),
+            log_file: "test.log".to_string(),
+            peers: vec![],
+            event_queue_size: 16,
+            tcp_channel_queue_size: 16,
+            constraints: vec![],
+        }
+    }
+
+    fn make_state(listen_port: u16) -> AppState {
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        AppState::new(test_config(listen_port), event_tx)
+    }
+
+    /// Register a peer manager in state and return a receiver so the test can
+    /// observe what the manager gets told.
+    fn register_manager(state: &AppState, peer: SocketAddr) -> mpsc::Receiver<PeerManagerMessage> {
+        let (tx, rx) = mpsc::channel(64);
+        state.peer_managers.lock().unwrap().insert(peer, tx);
+        rx
+    }
+
+    fn cli_msg(sender_port: u16) -> PeerMessage {
+        PeerMessage::cli(CliTestMessage {
+            request_id: 42,
+            message: "ping".to_string(),
+            sender_addr: addr(sender_port),
+        })
+    }
+
+    // ----------------------------------------------------------------
+    // initiate_tcp_connection — happy path
+    // ----------------------------------------------------------------
+
+    /// The initiating side must send a Hello and then notify its manager
+    /// with ConnectionReady.
+    #[tokio::test]
+    async fn initiate_sends_hello_and_notifies_connection_ready() {
+        // Bind a listener that will accept one raw connection.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let listen_port = 19200u16;
+        let state = make_state(listen_port);
+        let peer_addr = server_addr;
+        let mut manager_rx = register_manager(&state, peer_addr);
+
+        // Accept side: just reads one message (the Hello) from the raw stream.
+        let accept_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use crate::network::framing::{check_frame, decode};
+            use bytes::BytesMut;
+            use tokio::io::AsyncReadExt;
+            let mut buf = BytesMut::with_capacity(1024);
+            loop {
+                stream.read_buf(&mut buf).await.unwrap();
+                if check_frame(&buf) {
+                    return decode(&mut buf).unwrap();
+                }
+            }
+        });
+
+        let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let (tcp_channel_sender, tcp_channel_receiver) = mpsc::channel(16);
+        tokio::spawn(initiate_tcp_connection(
+            peer_addr,
+            stream,
+            tcp_channel_sender,
+            tcp_channel_receiver,
+            state,
+        ));
+
+        // The manager must be told ConnectionReady.
+        let msg = timeout(Duration::from_millis(500), manager_rx.recv())
+            .await
+            .expect("timed out waiting for manager notification")
+            .expect("manager channel closed");
+
+        assert!(
+            matches!(msg, PeerManagerMessage::ConnectionReady(_)),
+            "expected ConnectionReady, got something else"
+        );
+
+        // The accept side must have received a Hello.
+        let hello_msg = timeout(Duration::from_millis(500), accept_handle)
+            .await
+            .expect("timed out waiting for Hello")
+            .expect("accept task panicked");
+
+        assert!(
+            matches!(hello_msg.payload, PeerMessagePayload::Hello(_)),
+            "first message should be Hello"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // accept_incoming_tcp_connection — happy path
+    // ----------------------------------------------------------------
+
+    /// The accepting side must extract the peer address from the Hello
+    /// and notify the manager with ConnectionReady.
+    #[tokio::test]
+    async fn accept_processes_hello_and_notifies_connection_ready() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let initiator_listen_port = 19210u16;
+        let state = make_state(19211);
+
+        // The peer address the initiator claims to listen on.
+        let peer_listen_addr = addr(initiator_listen_port);
+        let mut manager_rx = register_manager(&state, peer_listen_addr);
+
+        // Accept task.
+        let accept_state = state.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_incoming_tcp_connection(stream, accept_state).await;
+        });
+
+        // Initiator side: just sends a Hello and then idles.
+        let initiator_handle = tokio::spawn(async move {
+            use crate::network::framing::encode;
+            use tokio::io::AsyncWriteExt;
+            let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+            let hello = PeerMessage::hello(HelloMessage {
+                listening_address: peer_listen_addr,
+            });
+            let encoded = encode(&hello).unwrap();
+            stream.write_all(&encoded).await.unwrap();
+            // Keep the stream open so the accept side doesn't see an EOF.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        });
+
+        // Manager should receive ConnectionReady.
+        let msg = timeout(Duration::from_millis(500), manager_rx.recv())
+            .await
+            .expect("timed out waiting for manager notification")
+            .expect("manager channel closed");
+
+        assert!(
+            matches!(msg, PeerManagerMessage::ConnectionReady(_)),
+            "expected ConnectionReady after Hello"
+        );
+
+        drop(initiator_handle);
+    }
+
+    // ----------------------------------------------------------------
+    // accept_incoming_tcp_connection — wrong first message
+    // ----------------------------------------------------------------
+
+    /// If the first message is not a Hello the connection must be dropped
+    /// silently (no panic, no manager notification).
+    #[tokio::test]
+    async fn accept_drops_connection_if_first_message_is_not_hello() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let state = make_state(19220);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_incoming_tcp_connection(stream, state).await;
+        });
+
+        tokio::spawn(async move {
+            use crate::network::framing::encode;
+            use tokio::io::AsyncWriteExt;
+            let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+            // Send a Cli message instead of Hello.
+            let non_hello = cli_msg(19220);
+            let encoded = encode(&non_hello).unwrap();
+            stream.write_all(&encoded).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        // No manager was registered for any peer; the accept task should just
+        // return quietly. Give it time and confirm no panic occurred.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // Reaching here without a panic is the assertion.
+    }
+
+    // ----------------------------------------------------------------
+    // accept — EOF before Hello
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn accept_handles_early_eof_gracefully() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let state = make_state(19230);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_incoming_tcp_connection(stream, state).await;
+        });
+
+        // Connect and immediately close.
+        let _stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        drop(_stream);
+
+        // Should not panic.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // ----------------------------------------------------------------
+    // tcp_channel: ConnectionLost notified when remote closes
+    // ----------------------------------------------------------------
+
+    /// When the remote side closes its end of the stream the local
+    /// tcp_channel loop must detect the EOF and send ConnectionLost
+    /// to the peer manager.
+    #[tokio::test]
+    async fn tcp_channel_notifies_connection_lost_on_remote_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let peer_listen_port = 19240u16;
+        let state = make_state(19241);
+        let peer_listen_addr = addr(peer_listen_port);
+        let mut manager_rx = register_manager(&state, peer_listen_addr);
+
+        // Server: accept and run accept_incoming_tcp_connection.
+        let accept_state = state.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            accept_incoming_tcp_connection(stream, accept_state).await;
+        });
+
+        // Initiator: send Hello then immediately drop the stream (EOF).
+        tokio::spawn(async move {
+            use crate::network::framing::encode;
+            use tokio::io::AsyncWriteExt;
+            let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+            let hello = PeerMessage::hello(HelloMessage {
+                listening_address: peer_listen_addr,
+            });
+            stream.write_all(&encode(&hello).unwrap()).await.unwrap();
+            // Close the stream to trigger EOF on the server side.
+            drop(stream);
+        });
+
+        // Expect: ConnectionReady first, then ConnectionLost.
+        let first = timeout(Duration::from_millis(500), manager_rx.recv())
+            .await
+            .expect("timed out waiting for ConnectionReady")
+            .unwrap();
+        assert!(matches!(first, PeerManagerMessage::ConnectionReady(_)));
+
+        let second = timeout(Duration::from_millis(500), manager_rx.recv())
+            .await
+            .expect("timed out waiting for ConnectionLost")
+            .unwrap();
+        assert!(
+            matches!(second, PeerManagerMessage::ConnectionLost),
+            "expected ConnectionLost after EOF"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // tcp_channel: message forwarding end-to-end
+    // ----------------------------------------------------------------
+
+    /// A full loopback: one side connects, handshake completes, then one
+    /// side sends a Cli message and we verify the other side receives it
+    /// (via the event_q, which tcp_handler ultimately writes to, but here
+    /// we check only up to the ConnectionReady / channel-forwarding layer).
+    ///
+    /// NOTE: full message dispatch goes through tcp_handler which is
+    /// separate; here we test that the tcp_channel loop forwards
+    /// PeerMessages sent via the tcp_channel_sender to the wire and that
+    /// they arrive on the other side.
+    #[tokio::test]
+    async fn messages_travel_between_two_tcp_channel_halves() {
+        use crate::network::framing::{check_frame, decode};
+        use bytes::BytesMut;
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        // The "server" just reads raw frames — no full accept logic.
+        let read_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(1024);
+            // Read until we have the Hello plus one more message.
+            let mut messages = Vec::new();
+            loop {
+                stream.read_buf(&mut buf).await.unwrap();
+                while check_frame(&buf) {
+                    messages.push(decode(&mut buf).unwrap());
+                }
+                if messages.len() >= 2 {
+                    break;
+                }
+            }
+            messages
+        });
+
+        let peer_addr = server_addr;
+        let listen_port = 19250u16;
+        let state = make_state(listen_port);
+        let _manager_rx = register_manager(&state, peer_addr);
+
+        let stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let (tcp_channel_tx, tcp_channel_rx) = mpsc::channel::<PeerMessage>(16);
+
+        tokio::spawn(initiate_tcp_connection(
+            peer_addr,
+            stream,
+            tcp_channel_tx.clone(),
+            tcp_channel_rx,
+            state,
+        ));
+
+        // Give the handshake time to complete, then push a message down the channel.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tcp_channel_tx.send(cli_msg(listen_port)).await.unwrap();
+
+        let messages = timeout(Duration::from_millis(500), read_handle)
+            .await
+            .expect("timed out waiting for messages")
+            .expect("reader task panicked");
+
+        assert_eq!(messages.len(), 2, "expected Hello + one Cli message");
+        assert!(matches!(messages[0].payload, PeerMessagePayload::Hello(_)));
+        assert!(matches!(messages[1].payload, PeerMessagePayload::Cli(_)));
+    }
+}
