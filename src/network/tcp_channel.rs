@@ -113,7 +113,7 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
 
     // save new connection
     let (tcp_channel_sender, tcp_channel_receiver) =
-        mpsc::channel(state.config.tcp_channel_queue_size);
+        mpsc::channel(state.config.tcp_channel_mpsc_channel_size);
 
     // manager needs to be created if this is the first time connecting with this peer
     ensure_manager_exists(state.clone(), peer_address);
@@ -254,7 +254,8 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
         return;
     }
     // TODO: configurable channel size?
-    let (manager_sender, manager_receiver) = mpsc::channel(256);
+    let (manager_sender, manager_receiver) =
+        mpsc::channel(state.config.peer_manager_task_mpsc_channel_size);
     managers.insert(peer_address, manager_sender);
     tokio::spawn(peer_manager_task(
         peer_address,
@@ -295,8 +296,12 @@ mod tests {
             log_file: "test.log".to_string(),
             peers: vec![],
             event_queue_size: 16,
-            tcp_channel_queue_size: 16,
+            tcp_channel_mpsc_channel_size: 16,
             constraints: vec![],
+            tcp_message_queue_size: 256,
+            tcp_reconnect_start_delay: 1,
+            tcp_reconnect_max_delay: 30,
+            peer_manager_task_mpsc_channel_size: 256,
         }
     }
 

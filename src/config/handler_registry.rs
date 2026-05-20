@@ -115,8 +115,12 @@ mod tests {
             log_file: "test.log".to_string(),
             peers: vec![],
             event_queue_size: 100,
-            tcp_channel_queue_size: 100,
+            tcp_channel_mpsc_channel_size: 100,
             constraints,
+            tcp_message_queue_size: 256,
+            tcp_reconnect_start_delay: 1,
+            tcp_reconnect_max_delay: 30,
+            peer_manager_task_mpsc_channel_size: 256,
         }
     }
 

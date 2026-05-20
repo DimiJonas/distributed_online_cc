@@ -71,9 +71,17 @@ pub struct NodeConfig {
     pub peers: Vec<String>,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
-    #[serde(default = "default_tcp_channel_queue_size")]
-    pub tcp_channel_queue_size: usize,
+    #[serde(default = "default_tcp_channel_mpsc_channel_size")]
+    pub tcp_channel_mpsc_channel_size: usize,
     pub constraints: Vec<ConstraintConfig>,
+    #[serde(default = "default_tcp_message_queue_size")]
+    pub tcp_message_queue_size: usize,
+    #[serde(default = "default_tcp_reconnect_start_delay")]
+    pub tcp_reconnect_start_delay: u64,
+    #[serde(default = "default_tcp_reconnect_max_delay")]
+    pub tcp_reconnect_max_delay: u64,
+    #[serde(default = "default_peer_manager_task_mpsc_channel_size")]
+    pub peer_manager_task_mpsc_channel_size: usize,
 }
 
 impl NodeConfig {
@@ -95,8 +103,24 @@ fn default_event_q_size() -> usize {
     100
 }
 
-fn default_tcp_channel_queue_size() -> usize {
+fn default_tcp_channel_mpsc_channel_size() -> usize {
     100
+}
+
+fn default_tcp_message_queue_size() -> usize {
+    256
+}
+
+fn default_tcp_reconnect_start_delay() -> u64 {
+    1
+}
+
+fn default_tcp_reconnect_max_delay() -> u64 {
+    30
+}
+
+fn default_peer_manager_task_mpsc_channel_size() -> usize {
+    256
 }
 
 #[cfg(test)]

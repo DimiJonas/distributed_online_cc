@@ -7,11 +7,6 @@ use crate::{
     state::app_state::AppState,
 };
 
-// TODO: make this configurable
-const MAX_QUEUE: usize = 256;
-const RECONNECT_BASE_DELAY_SECS: u64 = 1;
-const RECONNECT_MAX_DELAY_SECS: u64 = 30;
-
 // enum with messages to a peer manager
 //  Outbound: enqueue a message to be sent via tcp. the manager will make sure the tcp channel exists and sends it
 //  ConnectionLost: notify the manager that the tcp channel broke down
@@ -30,7 +25,7 @@ pub async fn peer_manager_task(
 ) {
     let mut queue: VecDeque<PeerMessage> = VecDeque::new();
     let mut tcp_channel_sender: Option<mpsc::Sender<PeerMessage>> = None;
-    let mut reconnect_delay = RECONNECT_BASE_DELAY_SECS;
+    let mut reconnect_delay = state.config.tcp_reconnect_start_delay;
 
     loop {
         let manager_msg = match manager_receiver.recv().await {
@@ -58,11 +53,11 @@ pub async fn peer_manager_task(
                             tcp_channel_sender = None;
                             // channel closed unexpectedly; re-queue so it isn't lost
                             // ConnectionLost will arrive shortly from tcp_channel
-                            enqueue(&mut queue, *peer_msg, peer_address);
+                            enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
                         }
                     }
                     None => {
-                        enqueue(&mut queue, *peer_msg, peer_address);
+                        enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
                     }
                 }
             }
@@ -75,7 +70,7 @@ pub async fn peer_manager_task(
                 );
                 tcp_channel_sender = None;
                 schedule_reconnect(peer_address, state.clone(), reconnect_delay);
-                reconnect_delay = (reconnect_delay * 2).min(RECONNECT_MAX_DELAY_SECS);
+                reconnect_delay = (reconnect_delay * 2).min(state.config.tcp_reconnect_max_delay);
             }
 
             PeerManagerMessage::ConnectionReady(sender) => {
@@ -86,7 +81,7 @@ pub async fn peer_manager_task(
                 );
                 tcp_channel_sender = Some(sender.clone());
                 // reset reconnect delay
-                reconnect_delay = RECONNECT_BASE_DELAY_SECS;
+                reconnect_delay = state.config.tcp_reconnect_start_delay;
 
                 // flush messages
                 while let Some(queued_msg) = queue.pop_front() {
@@ -108,8 +103,13 @@ pub async fn peer_manager_task(
     }
 }
 
-fn enqueue(queue: &mut VecDeque<PeerMessage>, msg: PeerMessage, peer_address: SocketAddr) {
-    if queue.len() >= MAX_QUEUE {
+fn enqueue(
+    state: AppState,
+    queue: &mut VecDeque<PeerMessage>,
+    msg: PeerMessage,
+    peer_address: SocketAddr,
+) {
+    if queue.len() >= state.config.tcp_message_queue_size {
         log::warn!(
             "message queue full for {}, dropping oldest message",
             peer_address
@@ -131,7 +131,7 @@ pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
     match TcpStream::connect(&peer_address).await {
         Ok(stream) => {
             let (tcp_channel_sender, tcp_channel_receiver) =
-                mpsc::channel(state.config.tcp_channel_queue_size);
+                mpsc::channel(state.config.tcp_channel_mpsc_channel_size);
             tokio::spawn(initiate_tcp_connection(
                 peer_address,
                 stream,
@@ -182,8 +182,12 @@ mod tests {
             log_file: "test.log".to_string(),
             peers: vec![],
             event_queue_size: 16,
-            tcp_channel_queue_size: 16,
+            tcp_channel_mpsc_channel_size: 16,
             constraints: vec![],
+            tcp_message_queue_size: 256,
+            tcp_reconnect_start_delay: 1,
+            tcp_reconnect_max_delay: 30,
+            peer_manager_task_mpsc_channel_size: 256,
         }
     }
 
@@ -445,10 +449,10 @@ mod tests {
     async fn queue_overflow_drops_oldest_message() {
         let (state, _eq) = make_state(19160);
         let peer = addr(19161);
-        let manager_tx = spawn_manager(peer, state);
+        let manager_tx = spawn_manager(peer, state.clone());
 
-        // Send MAX_QUEUE + 10 messages with no tcp channel.
-        for i in 0..(MAX_QUEUE + 10) {
+        // Send tcp_message_queue_size + 10 messages with no tcp channel.
+        for i in 0..(state.config.tcp_message_queue_size + 10) {
             let msg = PeerMessage::cli(CliTestMessage {
                 request_id: i as u64,
                 message: format!("msg-{}", i),
@@ -474,7 +478,7 @@ mod tests {
         }
 
         assert_eq!(
-            count, MAX_QUEUE,
+            count, state.config.tcp_message_queue_size,
             "expected exactly MAX_QUEUE messages after overflow, got {}",
             count
         );
