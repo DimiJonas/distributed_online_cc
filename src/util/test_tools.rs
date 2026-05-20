@@ -1,3 +1,5 @@
+use bytes::BytesMut;
+use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -14,6 +16,8 @@ use std::net::SocketAddr;
 pub fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
+
+// TODO: create a builder for NodeConfig
 
 /// Minimal NodeConfig that satisfies AppState::new without touching disk
 fn make_base_config() -> NodeConfig {
@@ -44,6 +48,16 @@ pub fn make_config_with_port(listen_port: u16) -> NodeConfig {
 pub fn make_config_with_constraints(constraints: Vec<ConstraintConfig>) -> NodeConfig {
     let mut config = make_base_config();
     config.constraints = constraints;
+    config
+}
+
+pub fn make_config_with_constraints_and_port(
+    constraints: Vec<ConstraintConfig>,
+    listen_port: u16,
+) -> NodeConfig {
+    let mut config = make_base_config();
+    config.constraints = constraints;
+    config.tcp_listen_address = addr(listen_port);
     config
 }
 
@@ -78,4 +92,56 @@ pub fn cli_msg(port: u16) -> PeerMessage {
         message: "hello".to_string(),
         sender_addr: addr(port),
     })
+}
+
+pub fn make_traced_event(case_id: &str, event_name: &str) -> TracedEvent {
+    let xes = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <trace>
+    <string key="concept:name" value="{case_id}"/>
+    <event>
+      <string key="concept:name" value="{event_name}"/>
+      <date key="time:timestamp" value="2024-01-01T00:00:00+00:00"/>
+    </event>
+  </trace>
+</log>"#
+    );
+    let buf = BytesMut::from(xes.as_bytes());
+    let opts = XESImportOptions {
+        sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
+        verbose: false,
+        ..XESImportOptions::default()
+    };
+    let log = import_xes_slice(&buf, false, opts).unwrap();
+    let trace = log.traces.into_iter().next().unwrap();
+
+    use process_mining::core::event_data::case_centric::XESEditableAttribute;
+    let case_id_val = trace
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let event = trace.events.into_iter().next().unwrap();
+    TracedEvent {
+        case_id: case_id_val,
+        event,
+    }
+}
+
+pub fn minimal_xes(case_id: &str, event_name: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <trace>
+    <string key="concept:name" value="{case_id}"/>
+    <event>
+      <string key="concept:name" value="{event_name}"/>
+      <date key="time:timestamp" value="2024-01-01T00:00:00+00:00"/>
+    </event>
+  </trace>
+</log>"#
+    )
 }

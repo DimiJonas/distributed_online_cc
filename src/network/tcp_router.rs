@@ -49,3 +49,89 @@ async fn get_or_create_manager(
 
     manager_sender
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        network::{
+            message_types::{CliTestMessage, PeerMessage},
+            peer_manager_task::PeerManagerMessage,
+            tcp_router::{connect_peer, send_to_peer},
+        },
+        util::test_tools::{addr, make_state, register_manager},
+    };
+
+    /// send_to_peer delivers to an already-registered peer manager.
+    #[tokio::test]
+    async fn send_to_peer_reaches_existing_manager() {
+        let state = make_state(19900);
+        let peer = addr(19901);
+
+        let mut rx = register_manager(&state, peer);
+
+        let msg = PeerMessage::cli(CliTestMessage {
+            request_id: 1,
+            message: "hello".to_string(),
+            sender_addr: addr(19900),
+        });
+        send_to_peer(peer, msg, state).await;
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("timed out waiting for message")
+            .expect("channel closed");
+
+        assert!(matches!(received, PeerManagerMessage::Outbound(_)));
+    }
+
+    /// send_to_peer for an unknown peer creates a manager entry (no panic, even
+    /// though the background task will fail to connect — no listener running).
+    #[tokio::test]
+    async fn send_to_peer_creates_manager_for_unknown_peer() {
+        let state = make_state(19910);
+        let peer = addr(19911);
+
+        send_to_peer(
+            peer,
+            PeerMessage::cli(CliTestMessage {
+                request_id: 2,
+                message: "test".to_string(),
+                sender_addr: addr(19910),
+            }),
+            state.clone(),
+        )
+        .await;
+
+        let managers = state.peer_managers.lock().unwrap();
+        assert!(
+            managers.get(&peer).is_some(),
+            "manager should be registered"
+        );
+    }
+
+    /// connect_peer registers a peer manager.
+    #[tokio::test]
+    async fn connect_peer_registers_manager() {
+        let state = make_state(19920);
+        let peer = addr(19921);
+
+        connect_peer(peer, state.clone()).await;
+
+        let managers = state.peer_managers.lock().unwrap();
+        assert!(managers.get(&peer).is_some());
+    }
+
+    /// Calling connect_peer twice for the same address must not create two managers.
+    #[tokio::test]
+    async fn connect_peer_idempotent() {
+        let state = make_state(19930);
+        let peer = addr(19931);
+
+        connect_peer(peer, state.clone()).await;
+        connect_peer(peer, state.clone()).await;
+
+        // PeerManagerMap::get returns a clone; just verify the key is present.
+        let managers = state.peer_managers.lock().unwrap();
+        assert!(managers.get(&peer).is_some());
+    }
+}

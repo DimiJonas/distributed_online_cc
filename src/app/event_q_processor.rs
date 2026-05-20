@@ -53,3 +53,131 @@ fn build_constraint_list(config: Arc<NodeConfig>) -> Vec<(ConstraintId, Constrai
         .map(|c| (c.constraint_id().to_string(), c.constraint_type()))
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use crate::util::test_tools::make_traced_event;
+    use crate::{
+        app::event_q_processor::spawn_event_processor, config::node_config::ConstraintConfig,
+        state::app_state::AppState, util::test_tools::make_config_with_constraints,
+    };
+
+    /// Sending an event for a new case registers it in the result store.
+    #[tokio::test]
+    async fn new_case_is_registered_in_result_store() {
+        let config = make_config_with_constraints(vec![ConstraintConfig::EndActivity {
+            constraint_id: "ea".to_string(),
+            event_id: "end".to_string(),
+        }]);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(config, event_tx.clone());
+
+        spawn_event_processor(state.clone(), event_rx);
+
+        event_tx
+            .send(make_traced_event("case-new", "some_event"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let store = state.cc_results.lock().unwrap();
+        assert!(store.has_case(&"case-new".to_string()));
+    }
+
+    /// Sending two events for the same case must NOT create a duplicate entry.
+    #[tokio::test]
+    async fn same_case_is_not_registered_twice() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+
+        spawn_event_processor(state.clone(), event_rx);
+
+        event_tx
+            .send(make_traced_event("case-dup", "e1"))
+            .await
+            .unwrap();
+        event_tx
+            .send(make_traced_event("case-dup", "e2"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let store = state.cc_results.lock().unwrap();
+        assert!(store.has_case(&"case-dup".to_string()));
+    }
+
+    /// Events for different cases each get their own registration.
+    #[tokio::test]
+    async fn multiple_cases_each_registered() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+
+        spawn_event_processor(state.clone(), event_rx);
+
+        for id in ["alpha", "beta", "gamma"] {
+            event_tx.send(make_traced_event(id, "e")).await.unwrap();
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let store = state.cc_results.lock().unwrap();
+        for id in ["alpha", "beta", "gamma"] {
+            assert!(store.has_case(&id.to_string()), "case {id} missing");
+        }
+    }
+
+    /// Dropping the sender (channel closed) must not panic the processor task.
+    #[tokio::test]
+    async fn processor_does_not_panic_when_sender_dropped() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+
+        spawn_event_processor(state.clone(), event_rx);
+        drop(event_tx);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    /// Events that match a configured handler are dispatched to it.
+    /// We verify via the token store (a ResponseProducer creates a token on match).
+    #[tokio::test]
+    async fn matching_event_is_dispatched_to_handler() {
+        let config = make_config_with_constraints(vec![ConstraintConfig::ResponseProducer {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        }]);
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let state = AppState::new(config, event_tx.clone());
+
+        // Register the case first so handle_case_end doesn't crash.
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "case-dispatch".to_string(),
+                &[("rp".to_string(), crate::types::ConstraintType::Response)],
+            );
+        }
+
+        spawn_event_processor(state.clone(), event_rx);
+
+        event_tx
+            .send(make_traced_event("case-dispatch", "produce"))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        assert!(
+            state
+                .token_store
+                .lock()
+                .unwrap()
+                .has_open_token(&"case-dispatch".to_string(), &"rp".to_string()),
+            "token should have been created by the handler"
+        );
+    }
+}

@@ -195,3 +195,303 @@ async fn send_delete_token(
     log::info!("sending delete token message to {}", peer_addr);
     send_to_peer(peer_addr, message, state.clone()).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        config::node_config::ConstraintConfig,
+        network::{
+            message_types::{CCMessage, PeerMessagePayload},
+            peer_manager_task::PeerManagerMessage,
+        },
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            response_handler::{ResponseConsumerHandler, ResponseProducerHandler},
+        },
+        state::app_state::AppState,
+        types::{ConstraintType, TokenId},
+        util::test_tools::{addr, make_config_with_constraints_and_port, register_manager},
+    };
+
+    use crate::util::test_tools::make_traced_event;
+
+    fn make_producer_state(port: u16) -> AppState {
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::ResponseProducer {
+                constraint_id: "rp".to_string(),
+                event_id: "produce".to_string(),
+            }],
+            port,
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        AppState::new(config, tx)
+    }
+
+    // -- ResponseProducerHandler --
+
+    /// handle_event creates a token in token_out.
+    #[tokio::test]
+    async fn producer_handle_event_creates_token() {
+        let state = make_producer_state(20000);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "c1".to_string(),
+                &[("rp".to_string(), ConstraintType::Response)],
+            );
+        }
+
+        let handler = ResponseProducerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+        handler
+            .handle_event(&make_traced_event("c1", "produce"), state.clone())
+            .await;
+
+        assert!(
+            state
+                .token_store
+                .lock()
+                .unwrap()
+                .has_open_token(&"c1".to_string(), &"rp".to_string())
+        );
+    }
+
+    /// handle_message with DeleteToken removes the token.
+    #[tokio::test]
+    async fn producer_handle_message_delete_token_removes_token() {
+        let state = make_producer_state(20010);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "c2".to_string(),
+                &[("rp".to_string(), ConstraintType::Response)],
+            );
+        }
+
+        let handler = ResponseProducerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        handler
+            .handle_event(&make_traced_event("c2", "produce"), state.clone())
+            .await;
+        assert!(
+            state
+                .token_store
+                .lock()
+                .unwrap()
+                .has_open_token(&"c2".to_string(), &"rp".to_string())
+        );
+
+        let delete_msg =
+            CCMessage::delete_token("c2".to_string(), "rp".to_string(), TokenId::nil());
+        handler.handle_message(state.clone(), delete_msg).await;
+
+        assert!(
+            !state
+                .token_store
+                .lock()
+                .unwrap()
+                .has_open_token(&"c2".to_string(), &"rp".to_string())
+        );
+    }
+
+    /// handle_case_end with an open token → result is Violated.
+    #[tokio::test]
+    async fn producer_handle_case_end_violated_when_token_exists() {
+        let state = make_producer_state(20020);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "c3".to_string(),
+                &[("rp".to_string(), ConstraintType::Response)],
+            );
+        }
+
+        let handler = ResponseProducerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        handler
+            .handle_event(&make_traced_event("c3", "produce"), state.clone())
+            .await;
+        handler
+            .handle_case_end(&"c3".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c3".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(matches!(
+            result.constraint_result,
+            crate::types::ConstraintResultType::Violated
+        ));
+    }
+
+    /// handle_case_end without a token → result is Satisfied.
+    #[tokio::test]
+    async fn producer_handle_case_end_satisfied_when_no_token() {
+        let state = make_producer_state(20030);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "c4".to_string(),
+                &[("rp".to_string(), ConstraintType::Response)],
+            );
+        }
+
+        let handler = ResponseProducerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        // No produce event → no token.
+        handler
+            .handle_case_end(&"c4".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c4".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(matches!(
+            result.constraint_result,
+            crate::types::ConstraintResultType::Satisfied
+        ));
+    }
+
+    /// A non-DeleteToken message does NOT remove the token.
+    #[tokio::test]
+    async fn producer_handle_message_non_delete_type_leaves_token() {
+        let state = make_producer_state(20040);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case(
+                "c5".to_string(),
+                &[("rp".to_string(), ConstraintType::Response)],
+            );
+        }
+
+        let handler = ResponseProducerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        handler
+            .handle_event(&make_traced_event("c5", "produce"), state.clone())
+            .await;
+
+        let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string());
+        handler.handle_message(state.clone(), trigger).await;
+
+        assert!(
+            state
+                .token_store
+                .lock()
+                .unwrap()
+                .has_open_token(&"c5".to_string(), &"rp".to_string())
+        );
+    }
+
+    // -- ResponseConsumerHandler --
+
+    /// handle_event sends a DeleteToken conformance message to each producer peer.
+    #[tokio::test]
+    async fn consumer_handle_event_sends_delete_token_to_producers() {
+        let producer_addr = addr(20051);
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::ResponseConsumer {
+                constraint_id: "rp".to_string(),
+                event_id: "consume".to_string(),
+                producer_peers: vec![producer_addr],
+            }],
+            20050,
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx);
+
+        let mut mgr_rx = register_manager(&state, producer_addr);
+
+        let handler = ResponseConsumerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "consume".to_string(),
+            producer_peers: vec![producer_addr],
+        };
+
+        handler
+            .handle_event(&make_traced_event("c6", "consume"), state)
+            .await;
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(200), mgr_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        if let PeerManagerMessage::Outbound(boxed) = received {
+            assert!(
+                matches!(boxed.payload, PeerMessagePayload::Conformance(_)),
+                "expected a Conformance payload"
+            );
+        } else {
+            panic!("expected Outbound message");
+        }
+    }
+
+    /// When multiple producer peers are configured, a message is sent to each.
+    #[tokio::test]
+    async fn consumer_sends_to_all_producer_peers() {
+        let p1 = addr(20060);
+        let p2 = addr(20061);
+
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::ResponseConsumer {
+                constraint_id: "rp".to_string(),
+                event_id: "consume".to_string(),
+                producer_peers: vec![p1, p2],
+            }],
+            20062,
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx);
+
+        let mut rx1 = register_manager(&state, p1);
+        let mut rx2 = register_manager(&state, p2);
+
+        let handler = ResponseConsumerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "consume".to_string(),
+            producer_peers: vec![p1, p2],
+        };
+
+        handler
+            .handle_event(&make_traced_event("c7", "consume"), state)
+            .await;
+
+        let timeout = std::time::Duration::from_millis(200);
+        tokio::time::timeout(timeout, rx1.recv())
+            .await
+            .expect("p1 timed out")
+            .unwrap();
+        tokio::time::timeout(timeout, rx2.recv())
+            .await
+            .expect("p2 timed out")
+            .unwrap();
+    }
+
+    /// configured_peers returns the list of producer peers.
+    #[test]
+    fn consumer_configured_peers() {
+        let peers = vec![addr(20070), addr(20071)];
+        let handler = ResponseConsumerHandler {
+            constraint_id: "rp".to_string(),
+            event_id: "consume".to_string(),
+            producer_peers: peers.clone(),
+        };
+        assert_eq!(handler.configured_peers(), peers);
+    }
+}
