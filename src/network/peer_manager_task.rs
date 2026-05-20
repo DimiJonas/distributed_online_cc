@@ -11,10 +11,12 @@ use crate::{
 //  Outbound: enqueue a message to be sent via tcp. the manager will make sure the tcp channel exists and sends it
 //  ConnectionLost: notify the manager that the tcp channel broke down
 //  ConnectionReady: notify the manager that the tcp channel was rebuilt
+//  ConnectIfNeeded: signal the manager to initiate a tcp connection if none exists yet
 pub enum PeerManagerMessage {
     Outbound(Box<PeerMessage>),
     ConnectionLost,
     ConnectionReady(mpsc::Sender<PeerMessage>),
+    ConnectIfNeeded,
 }
 
 // the peer manager task routine
@@ -100,6 +102,18 @@ pub async fn peer_manager_task(
                     }
                 }
             }
+
+            PeerManagerMessage::ConnectIfNeeded => {
+                if tcp_channel_sender.is_some() {
+                    log::debug!(
+                        "connect requested for {} but already connected, ignoring",
+                        peer_address
+                    );
+                } else {
+                    log::info!("connect requested for {}, attempting", peer_address);
+                    do_connect(peer_address, state.clone()).await;
+                }
+            }
         }
     }
 }
@@ -122,13 +136,19 @@ fn enqueue(
 }
 
 fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: u64) {
+    log::debug!(
+        "scheduling reconnect to {} in {} seconds",
+        peer_address,
+        delay_secs
+    );
     tokio::spawn(async move {
         sleep(Duration::from_secs(delay_secs)).await;
         attempt_connect(peer_address, state).await;
     });
 }
 
-pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
+async fn do_connect(peer_address: SocketAddr, state: AppState) {
+    log::debug!("connecting to peer {}", peer_address);
     match TcpStream::connect(&peer_address).await {
         Ok(stream) => {
             let (tcp_channel_sender, tcp_channel_receiver) =
@@ -152,6 +172,18 @@ pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
                 let _ = sender.send(PeerManagerMessage::ConnectionLost).await;
             }
         }
+    }
+}
+
+/// signals the peer manager task that corresponds to the peer_address to create a tcp channel if needed
+pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
+    log::debug!("attempting to connect to peer {}", peer_address);
+    let manager_sender = {
+        let managers = state.peer_managers.lock().unwrap();
+        managers.get(&peer_address)
+    };
+    if let Some(sender) = manager_sender {
+        let _ = sender.send(PeerManagerMessage::ConnectIfNeeded).await;
     }
 }
 

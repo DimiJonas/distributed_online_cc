@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use crate::network::message_types::{CliTestMessage, PeerMessage};
 use crate::network::tcp_router::{connect_peer, send_to_peer};
 use crate::state::app_state::AppState;
@@ -24,17 +26,29 @@ pub fn spawn_cli(state: AppState) {
 
             match parts.as_slice() {
                 [cmd, addr_str, msg] if cmd == "send" => {
+                    let peer_address = match addr_str.parse::<SocketAddr>() {
+                        Ok(address) => address,
+                        Err(e) => {
+                            log::error!("error parsing address {}: {}", addr_str, e);
+                            continue;
+                        }
+                    };
                     let command = CliCommand::Send {
-                        peer_address: addr_str.parse().unwrap(),
+                        peer_address,
                         msg: msg.to_string(),
                     };
                     // send message
                     cmd_tx.send(command).await.unwrap();
                 }
                 [cmd, addr_str] if cmd == "connect" => {
-                    let command = CliCommand::Connect {
-                        peer_address: addr_str.parse().unwrap(),
+                    let peer_address = match addr_str.parse::<SocketAddr>() {
+                        Ok(address) => address,
+                        Err(e) => {
+                            log::error!("error parsing address {}: {}", addr_str, e);
+                            continue;
+                        }
                     };
+                    let command = CliCommand::Connect { peer_address };
                     cmd_tx.send(command).await.unwrap();
                 }
                 _ => log::error!("unknown command"),

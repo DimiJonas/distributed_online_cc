@@ -18,6 +18,8 @@ pub async fn initiate_tcp_connection(
     tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
     state: AppState,
 ) {
+    log::debug!("starting handshake with peer {}", peer_address);
+
     // create hello message
     let hello = PeerMessage::hello(HelloMessage {
         listening_address: state.config.tcp_listen_address,
@@ -50,6 +52,7 @@ pub async fn initiate_tcp_connection(
         return;
     }
 
+    log::debug!("handshake successful");
     log::info!("tcp channel to {} initiated", peer_address);
     notify_manager(
         state.clone(),
