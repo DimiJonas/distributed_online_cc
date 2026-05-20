@@ -1,15 +1,15 @@
 node_id = 1
-tcp_listen_address = "127.0.0.1:8001"
+tcp_listen_address = "127.0.0.1:8000"
 unix_socket = "/tmp/event_listener.sock"
-event_queue_size = "100"
+event_queue_size = 100
 log_file = "app.log"
 
 [tcp_channels]
-tcp_channel_mpsc_channel_size = "100"
-peer_manager_task_mpsc_channel_size = "256"
-message_queue_size = "256"
-reconnect_start_delay = "1"
-reconnect_max_delay = "30"
+tcp_channel_mpsc_channel_size = 100
+peer_manager_task_mpsc_channel_size = 256
+message_queue_size = 256
+reconnect_start_delay = 1
+reconnect_max_delay = 30
 
 [[constraints]]
 constraint_role = "EndActivity"

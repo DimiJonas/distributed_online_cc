@@ -3,6 +3,11 @@ tcp_listen_address = "127.0.0.1:8001"
 unix_socket = "/tmp/event_listener1.sock"
 log_file = "response-producer.log"
 
+[tcp_channels]
+message_queue_size = 256
+reconnect_start_delay = 2
+reconnect_max_delay = 10
+
 [[constraints]]
 constraint_role = "ResponseProducer"
 constraint_id = "response_test"
