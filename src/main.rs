@@ -32,7 +32,7 @@ async fn main() {
 
     distributed_online_cc::app::tcp_listener::spawn_listener(
         state.clone(),
-        state.config.listen_address,
+        state.config.tcp_listen_address,
     );
     distributed_online_cc::app::cli::spawn_cli(state.clone());
     distributed_online_cc::app::event_listener::spawn_event_listener(state.clone());

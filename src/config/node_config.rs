@@ -1,25 +1,44 @@
-/*
-    config could look like this in TOML for a response constraint:
-
-        node_id = 1
-
-        [[constraints]]
-        constraint_role = "ResponseProducer"
-        constraint_id = "response_order_shipped"
-        event_id = "order_placed"
-
-        [[constraints]]
-        constraint_role = "ResponseConsumer"
-        constraint_id = "response_order_shipped"
-        event_id = "order_shipped"
-        node_a_peers = [2, 3]
-
-*/
-
 use crate::types::{ConstraintId, ConstraintType, PeerId};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeConfig {
+    pub node_id: PeerId,
+    pub tcp_listen_address: SocketAddr,
+    #[serde(default = "default_unix_socket")]
+    pub unix_socket: String,
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+    #[serde(default)]
+    pub peers: Vec<String>,
+    #[serde(default = "default_event_q_size")]
+    pub event_queue_size: usize,
+    pub constraints: Vec<ConstraintConfig>,
+    pub tcp_channels: TcpChannelConfig,
+}
+
+impl NodeConfig {
+    pub fn load_config(path: &str) -> Self {
+        let contents = fs::read_to_string(path).expect("could not read config file");
+        toml::from_str(&contents).expect("could not parse config file")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TcpChannelConfig {
+    #[serde(default = "default_tcp_channel_mpsc_channel_size")]
+    pub tcp_channel_mpsc_channel_size: usize,
+    #[serde(default = "default_peer_manager_task_mpsc_channel_size")]
+    pub peer_manager_task_mpsc_channel_size: usize,
+    #[serde(default = "default_tcp_message_queue_size")]
+    pub message_queue_size: usize,
+    #[serde(default = "default_tcp_reconnect_start_delay")]
+    pub reconnect_start_delay: u64,
+    #[serde(default = "default_tcp_reconnect_max_delay")]
+    pub reconnect_max_delay: u64,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "constraint_role")]
@@ -56,38 +75,6 @@ impl ConstraintConfig {
             ConstraintConfig::ResponseConsumer { .. } => ConstraintType::Response,
             ConstraintConfig::EndActivity { .. } => ConstraintType::EndActivity,
         }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NodeConfig {
-    pub node_id: PeerId,
-    pub listen_address: SocketAddr,
-    #[serde(default = "default_unix_socket")]
-    pub unix_socket: String,
-    #[serde(default = "default_log_file")]
-    pub log_file: String,
-    #[serde(default)]
-    pub peers: Vec<String>,
-    #[serde(default = "default_event_q_size")]
-    pub event_queue_size: usize,
-    #[serde(default = "default_tcp_channel_mpsc_channel_size")]
-    pub tcp_channel_mpsc_channel_size: usize,
-    pub constraints: Vec<ConstraintConfig>,
-    #[serde(default = "default_tcp_message_queue_size")]
-    pub tcp_message_queue_size: usize,
-    #[serde(default = "default_tcp_reconnect_start_delay")]
-    pub tcp_reconnect_start_delay: u64,
-    #[serde(default = "default_tcp_reconnect_max_delay")]
-    pub tcp_reconnect_max_delay: u64,
-    #[serde(default = "default_peer_manager_task_mpsc_channel_size")]
-    pub peer_manager_task_mpsc_channel_size: usize,
-}
-
-impl NodeConfig {
-    pub fn load_config(path: &str) -> Self {
-        let contents = fs::read_to_string(path).expect("could not read config file");
-        toml::from_str(&contents).expect("could not parse config file")
     }
 }
 

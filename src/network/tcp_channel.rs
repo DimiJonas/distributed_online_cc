@@ -20,7 +20,7 @@ pub async fn initiate_tcp_connection(
 ) {
     // create hello message
     let hello = PeerMessage::hello(HelloMessage {
-        listening_address: state.config.listen_address,
+        listening_address: state.config.tcp_listen_address,
     });
 
     // encode hello message
@@ -113,7 +113,7 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
 
     // save new connection
     let (tcp_channel_sender, tcp_channel_receiver) =
-        mpsc::channel(state.config.tcp_channel_mpsc_channel_size);
+        mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
 
     // manager needs to be created if this is the first time connecting with this peer
     ensure_manager_exists(state.clone(), peer_address);
@@ -254,8 +254,12 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
         return;
     }
     // TODO: configurable channel size?
-    let (manager_sender, manager_receiver) =
-        mpsc::channel(state.config.peer_manager_task_mpsc_channel_size);
+    let (manager_sender, manager_receiver) = mpsc::channel(
+        state
+            .config
+            .tcp_channels
+            .peer_manager_task_mpsc_channel_size,
+    );
     managers.insert(peer_address, manager_sender);
     tokio::spawn(peer_manager_task(
         peer_address,
@@ -268,63 +272,13 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::node_config::NodeConfig;
-    use crate::network::message_types::{
-        CliTestMessage, HelloMessage, PeerMessage, PeerMessagePayload,
-    };
+    use crate::network::message_types::{HelloMessage, PeerMessage, PeerMessagePayload};
     use crate::network::peer_manager_task::PeerManagerMessage;
-    use crate::state::app_state::AppState;
-    use std::net::SocketAddr;
+    use crate::util::test_tools::{addr, cli_msg, make_state, register_manager};
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
-
-    // ----------------------------------------------------------------
-    // Helpers
-    // ----------------------------------------------------------------
-
-    fn addr(port: u16) -> SocketAddr {
-        format!("127.0.0.1:{}", port).parse().unwrap()
-    }
-
-    fn test_config(listen_port: u16) -> NodeConfig {
-        NodeConfig {
-            node_id: 1,
-            listen_address: addr(listen_port),
-            unix_socket: "/tmp/test.sock".to_string(),
-            log_file: "test.log".to_string(),
-            peers: vec![],
-            event_queue_size: 16,
-            tcp_channel_mpsc_channel_size: 16,
-            constraints: vec![],
-            tcp_message_queue_size: 256,
-            tcp_reconnect_start_delay: 1,
-            tcp_reconnect_max_delay: 30,
-            peer_manager_task_mpsc_channel_size: 256,
-        }
-    }
-
-    fn make_state(listen_port: u16) -> AppState {
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        AppState::new(test_config(listen_port), event_tx)
-    }
-
-    /// Register a peer manager in state and return a receiver so the test can
-    /// observe what the manager gets told.
-    fn register_manager(state: &AppState, peer: SocketAddr) -> mpsc::Receiver<PeerManagerMessage> {
-        let (tx, rx) = mpsc::channel(64);
-        state.peer_managers.lock().unwrap().insert(peer, tx);
-        rx
-    }
-
-    fn cli_msg(sender_port: u16) -> PeerMessage {
-        PeerMessage::cli(CliTestMessage {
-            request_id: 42,
-            message: "ping".to_string(),
-            sender_addr: addr(sender_port),
-        })
-    }
 
     // ----------------------------------------------------------------
     // initiate_tcp_connection — happy path

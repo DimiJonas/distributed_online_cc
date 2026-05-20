@@ -42,7 +42,7 @@ pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uu
         let response = PeerMessage::cli(CliTestMessage {
             request_id: msg.request_id,
             message: format!("ACK '{}'", msg.message),
-            sender_addr: state.config.listen_address,
+            sender_addr: state.config.tcp_listen_address,
         });
 
         let manager_tx = {

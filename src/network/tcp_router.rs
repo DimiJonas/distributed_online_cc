@@ -28,8 +28,12 @@ fn get_or_create_manager(
     if let Some(manager_sender) = managers.get(&peer_address) {
         return manager_sender;
     }
-    let (manager_sender, manager_receiver) =
-        mpsc::channel(state.config.peer_manager_task_mpsc_channel_size);
+    let (manager_sender, manager_receiver) = mpsc::channel(
+        state
+            .config
+            .tcp_channels
+            .peer_manager_task_mpsc_channel_size,
+    );
     managers.insert(peer_address, manager_sender.clone());
     tokio::spawn(peer_manager_task(
         peer_address,

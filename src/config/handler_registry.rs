@@ -105,24 +105,8 @@ impl Default for HandlerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::node_config::{ConstraintConfig, NodeConfig};
-
-    fn make_config(constraints: Vec<ConstraintConfig>) -> NodeConfig {
-        NodeConfig {
-            node_id: 1,
-            listen_address: "127.0.0.1:9000".parse().unwrap(),
-            unix_socket: "/tmp/test.sock".to_string(),
-            log_file: "test.log".to_string(),
-            peers: vec![],
-            event_queue_size: 100,
-            tcp_channel_mpsc_channel_size: 100,
-            constraints,
-            tcp_message_queue_size: 256,
-            tcp_reconnect_start_delay: 1,
-            tcp_reconnect_max_delay: 30,
-            peer_manager_task_mpsc_channel_size: 256,
-        }
-    }
+    use crate::config::node_config::ConstraintConfig;
+    use crate::util::test_tools::make_config_with_constraints;
 
     #[test]
     fn empty_registry_returns_nothing() {
@@ -132,7 +116,7 @@ mod tests {
 
     #[test]
     fn build_registers_response_producer() {
-        let config = make_config(vec![ConstraintConfig::ResponseProducer {
+        let config = make_config_with_constraints(vec![ConstraintConfig::ResponseProducer {
             constraint_id: "rp".to_string(),
             event_id: "order_placed".to_string(),
         }]);
@@ -145,7 +129,7 @@ mod tests {
 
     #[test]
     fn get_by_constraint_id_finds_handler() {
-        let config = make_config(vec![ConstraintConfig::EndActivity {
+        let config = make_config_with_constraints(vec![ConstraintConfig::EndActivity {
             constraint_id: "ea".to_string(),
             event_id: "case_end".to_string(),
         }]);
@@ -166,7 +150,7 @@ mod tests {
 
     #[test]
     fn multiple_constraints_for_same_event_id() {
-        let config = make_config(vec![
+        let config = make_config_with_constraints(vec![
             ConstraintConfig::ResponseProducer {
                 constraint_id: "rp-1".to_string(),
                 event_id: "shared_event".to_string(),
@@ -183,7 +167,7 @@ mod tests {
 
     #[test]
     fn all_returns_all_handlers() {
-        let config = make_config(vec![
+        let config = make_config_with_constraints(vec![
             ConstraintConfig::ResponseProducer {
                 constraint_id: "rp".to_string(),
                 event_id: "e1".to_string(),

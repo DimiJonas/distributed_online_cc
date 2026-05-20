@@ -56,7 +56,7 @@ pub fn spawn_cli(state: AppState) {
                     let message = PeerMessage::cli(CliTestMessage {
                         request_id,
                         message: msg.clone(),
-                        sender_addr: cmd_interpreter_state.config.listen_address,
+                        sender_addr: cmd_interpreter_state.config.tcp_listen_address,
                     });
 
                     // oneshot waiting channel for response
@@ -78,7 +78,7 @@ pub fn spawn_cli(state: AppState) {
                     }
                 }
                 CliCommand::Connect { peer_address } => {
-                    if peer_address == state.config.listen_address {
+                    if peer_address == state.config.tcp_listen_address {
                         log::error!("cannot connect to self");
                         continue;
                     }
