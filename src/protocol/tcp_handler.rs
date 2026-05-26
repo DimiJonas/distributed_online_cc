@@ -76,7 +76,22 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
     );
 
     if let Some(handler) = state.handlers.get_by_constraint_id(&msg.constraint_id) {
+        // is it a new case? -> register it in result store
+        {
+            let mut result_store = state.cc_results.lock().unwrap();
+            if !result_store.has_case(&msg.case_id) {
+                log::info!("identified new case id={}", &msg.case_id);
+                let constraints = state.config.build_constraint_list();
+                result_store.register_case(msg.case_id.clone(), &constraints);
+            }
+        }
+        // dispatch case to handler
         handler.handle_message(state.clone(), msg).await;
+    } else {
+        log::warn!(
+            "received cc message did not match any configured constraints: message={}",
+            msg
+        );
     }
 }
 
@@ -96,6 +111,7 @@ pub async fn handle_overlay_message(msg: OverlayMessage, _state: AppState, msg_i
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use tokio::sync::oneshot;
     use uuid::Uuid;
 
@@ -226,14 +242,23 @@ mod tests {
                 "c1".to_string(),
                 "rp".to_string(),
                 ConstraintType::Response,
+                Some(Utc::now()),
                 1,
                 None,
             );
-            state.token_store.lock().unwrap().produce(token);
+            state
+                .token_store
+                .lock()
+                .unwrap()
+                .produce_with_overwrite(token);
         }
 
-        let delete_msg =
-            CCMessage::delete_token("c1".to_string(), "rp".to_string(), uuid::Uuid::nil());
+        let delete_msg = CCMessage::delete_token(
+            "c1".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            uuid::Uuid::nil(),
+        );
         handle_cc_message(delete_msg, state.clone(), Uuid::new_v4()).await;
 
         assert!(
@@ -249,7 +274,12 @@ mod tests {
     #[tokio::test]
     async fn cc_message_unknown_constraint_does_not_panic() {
         let state = make_state(21050);
-        let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), uuid::Uuid::nil());
+        let msg = CCMessage::delete_token(
+            "c".to_string(),
+            "ghost".to_string(),
+            Utc::now(),
+            uuid::Uuid::nil(),
+        );
         handle_cc_message(msg, state, Uuid::new_v4()).await;
     }
 

@@ -29,9 +29,11 @@ use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::state::app_state::AppState;
 use crate::types::{
-    CaseId, ConstraintId, ConstraintResultType, ConstraintType, Token, TokenId, TracedEvent,
+    CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, Token, TokenId,
+    TracedEvent,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 
 pub struct ResponseProducerHandler {
     pub constraint_id: ConstraintId,
@@ -54,19 +56,20 @@ impl ConstraintHandler for ResponseProducerHandler {
             event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Response,
+            event.timestamp_utc(),
             state.config.node_id,
             None,
         );
         {
             let mut store = state.token_store.lock().unwrap();
-            store.produce(token.clone());
+            store.produce_with_overwrite(token.clone());
         }
 
         log::info!("produced token: {}", token);
         log::debug!("produced token: {:?}", token);
     }
 
-    // delete produced token
+    // delete produced token of events that happened before the timestamp contained in the message
     async fn handle_message(&self, state: AppState, message: CCMessage) {
         log::info!(
             "received message for constraint {}; message={}",
@@ -80,8 +83,21 @@ impl ConstraintHandler for ResponseProducerHandler {
         );
 
         if message.message_type == CCMessageType::DeleteToken {
+            let consumer_event_time = {
+                if let Some(event_time) = message.timestamp {
+                    event_time
+                } else {
+                    log::error!(
+                        "delete token message did not contain a timestamp. not deleting any tokens. message={}",
+                        message
+                    );
+                    return;
+                }
+            };
             let mut store = state.token_store.lock().unwrap();
-            if let Some(token) = store.remove_out(&message.case_id, &self.constraint_id) {
+            if let Some(token) =
+                store.remove_out_before(&message.case_id, &self.constraint_id, consumer_event_time)
+            {
                 log::info!("removed token {}", token);
                 log::debug!("removed token {:?}", token);
             }
@@ -96,7 +112,12 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        log::info!("creating constraint check result");
+        log::info!(
+            "creating constraint check result for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
         // create constraint result (with info message)
         let (constraint_result, token) = {
             let mut token_store = state.token_store.lock().unwrap();
@@ -163,6 +184,14 @@ impl ConstraintHandler for ResponseConsumerHandler {
             event
         );
 
+        let event_timestamp = {
+            if let Some(timestamp) = event.timestamp_utc() {
+                timestamp
+            } else {
+                Utc::now()
+            }
+        };
+
         log::info!("triggering token deletion on response producer peers");
         log::debug!("response producer peers: {:?}", self.producer_peers);
         for &peer_addr in self.producer_peers.iter() {
@@ -170,6 +199,7 @@ impl ConstraintHandler for ResponseConsumerHandler {
                 peer_addr,
                 event.case_id.clone(),
                 self.constraint_id.clone(),
+                event_timestamp,
                 state.clone(),
             )
             .await;
@@ -182,12 +212,14 @@ async fn send_delete_token(
     peer_addr: SocketAddr,
     trace_id: CaseId,
     constraint_id: ConstraintId,
+    event_timestamp: EventTime,
     state: AppState,
 ) {
     // create message
     let message = PeerMessage::conformance(CCMessage::delete_token(
         trace_id,
         constraint_id,
+        event_timestamp,
         TokenId::nil(),
     ));
 
@@ -198,6 +230,8 @@ async fn send_delete_token(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use crate::{
         config::node_config::ConstraintConfig,
         network::{
@@ -286,8 +320,12 @@ mod tests {
                 .has_open_token(&"c2".to_string(), &"rp".to_string())
         );
 
-        let delete_msg =
-            CCMessage::delete_token("c2".to_string(), "rp".to_string(), TokenId::nil());
+        let delete_msg = CCMessage::delete_token(
+            "c2".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            TokenId::nil(),
+        );
         handler.handle_message(state.clone(), delete_msg).await;
 
         assert!(
@@ -386,7 +424,7 @@ mod tests {
             .handle_event(&make_traced_event("c5", "produce"), state.clone())
             .await;
 
-        let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string());
+        let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
         handler.handle_message(state.clone(), trigger).await;
 
         assert!(

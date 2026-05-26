@@ -25,6 +25,13 @@ impl NodeConfig {
         let contents = fs::read_to_string(path).expect("could not read config file");
         toml::from_str(&contents).expect("could not parse config file")
     }
+
+    pub fn build_constraint_list(&self) -> Vec<(ConstraintId, ConstraintType)> {
+        self.constraints
+            .iter()
+            .map(|c| (c.constraint_id().to_string(), c.constraint_type()))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -70,6 +77,15 @@ pub enum ConstraintConfig {
         constraint_id: ConstraintId,
         event_id: String,
     },
+    PrecedenceProducer {
+        constraint_id: ConstraintId,
+        event_id: String,
+    },
+    PrecedenceConsumer {
+        constraint_id: ConstraintId,
+        event_id: String,
+        producer_peers: Vec<SocketAddr>,
+    },
     // TODO: add more
 }
 
@@ -79,6 +95,8 @@ impl ConstraintConfig {
             ConstraintConfig::ResponseProducer { constraint_id, .. } => constraint_id,
             ConstraintConfig::ResponseConsumer { constraint_id, .. } => constraint_id,
             ConstraintConfig::EndActivity { constraint_id, .. } => constraint_id,
+            ConstraintConfig::PrecedenceProducer { constraint_id, .. } => constraint_id,
+            ConstraintConfig::PrecedenceConsumer { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -87,6 +105,8 @@ impl ConstraintConfig {
             ConstraintConfig::ResponseProducer { .. } => ConstraintType::Response,
             ConstraintConfig::ResponseConsumer { .. } => ConstraintType::Response,
             ConstraintConfig::EndActivity { .. } => ConstraintType::EndActivity,
+            ConstraintConfig::PrecedenceProducer { .. } => ConstraintType::Precedence,
+            ConstraintConfig::PrecedenceConsumer { .. } => ConstraintType::Precedence,
         }
     }
 }

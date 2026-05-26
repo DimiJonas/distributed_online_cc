@@ -11,6 +11,7 @@ pub type CaseId = String;
 pub type ConstraintId = String;
 pub type TokenId = Uuid;
 pub type MessageId = Uuid;
+pub type EventTime = DateTime<Utc>;
 
 #[derive(Debug)]
 pub enum CliCommand {
@@ -67,6 +68,7 @@ impl Display for TracedEvent {
 pub enum ConstraintType {
     Response,
     EndActivity,
+    Precedence,
 }
 
 impl ConstraintType {
@@ -75,6 +77,7 @@ impl ConstraintType {
         match self {
             ConstraintType::Response => ConstraintResultType::Satisfied,
             ConstraintType::EndActivity => ConstraintResultType::Satisfied,
+            ConstraintType::Precedence => ConstraintResultType::Satisfied,
         }
     }
 }
@@ -84,6 +87,7 @@ impl Display for ConstraintType {
         match self {
             Self::Response => write!(f, "Response"),
             Self::EndActivity => write!(f, "EndActivity"),
+            Self::Precedence => write!(f, "Precedence"),
         }
     }
 }
@@ -127,9 +131,10 @@ impl Display for ConstraintResult {
 pub struct Token {
     pub id: TokenId,
     pub case_id: CaseId,
-    pub constraint_id: ConstraintId, // maybe redundant
+    pub constraint_id: ConstraintId,
     pub constraint_type: ConstraintType,
-    pub created_at: DateTime<Utc>,
+    pub event_time: Option<EventTime>,
+    pub created_at: EventTime,
     pub created_by: PeerId,
     pub payload: Option<serde_json::Value>,
 }
@@ -139,6 +144,7 @@ impl Token {
         case_id: CaseId,
         constraint_id: ConstraintId,
         constraint_type: ConstraintType,
+        event_time: Option<EventTime>,
         created_by: PeerId,
         payload: Option<serde_json::Value>,
     ) -> Self {
@@ -147,6 +153,7 @@ impl Token {
             case_id,
             constraint_id,
             constraint_type,
+            event_time,
             created_at: Utc::now(),
             created_by,
             payload,
@@ -190,6 +197,7 @@ mod tests {
             "my-case".to_string(),
             "my-constraint".to_string(),
             ConstraintType::Response,
+            Some(Utc::now()),
             7,
             None,
         );
@@ -205,6 +213,7 @@ mod tests {
             "c".to_string(),
             "x".to_string(),
             ConstraintType::Response,
+            Some(Utc::now()),
             1,
             None,
         );
@@ -212,6 +221,7 @@ mod tests {
             "c".to_string(),
             "x".to_string(),
             ConstraintType::Response,
+            Some(Utc::now()),
             1,
             None,
         );
@@ -225,6 +235,7 @@ mod tests {
             "c".to_string(),
             "x".to_string(),
             ConstraintType::Response,
+            Some(Utc::now()),
             1,
             Some(payload.clone()),
         );

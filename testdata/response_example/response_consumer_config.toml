@@ -3,11 +3,6 @@ tcp_listen_address = "127.0.0.1:8002"
 unix_socket = "/tmp/event_listener2.sock"
 log_file = "response-consumer.log"
 
-[tcp_channels]
-tcp_channel_mpsc_channel_size = 99
-peer_manager_task_mpsc_channel_size = 255
-message_queue_size = 257
-
 [[constraints]]
 constraint_role = "ResponseConsumer"
 constraint_id = "response_test"

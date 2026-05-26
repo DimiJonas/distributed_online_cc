@@ -1,10 +1,9 @@
 use std::{fmt::Display, net::SocketAddr, time::Duration};
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::types::{CaseId, ConstraintId, MessageId, Token, TokenId};
+use crate::types::{CaseId, ConstraintId, EventTime, MessageId, Token, TokenId};
 
 // TODO: make this configurable
 // how long a message lives in the queue before being dropped
@@ -142,7 +141,7 @@ pub struct CCMessage {
     pub case_id: CaseId,
     pub constraint_id: ConstraintId,
     // no timestamp unless needed for a specific constraint
-    pub timestamp: Option<DateTime<Utc>>,
+    pub timestamp: Option<EventTime>,
     // present for: PushToken, PullTokenResponse
     pub token: Option<Token>,
     // present for: DeleteToken (identifies which token to remove)
@@ -174,14 +173,26 @@ impl CCMessage {
         msg
     }
 
-    pub fn delete_token(case_id: CaseId, constraint_id: ConstraintId, token_id: TokenId) -> Self {
+    pub fn delete_token(
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        event_timestamp: EventTime,
+        token_id: TokenId,
+    ) -> Self {
         let mut msg = Self::base(CCMessageType::DeleteToken, case_id, constraint_id);
         msg.token_id = Some(token_id);
+        msg.timestamp = Some(event_timestamp);
         msg
     }
 
-    pub fn trigger_check(case_id: CaseId, constraint_id: ConstraintId) -> Self {
-        Self::base(CCMessageType::TriggerCheck, case_id, constraint_id)
+    pub fn trigger_check(
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        event_timestamp: EventTime,
+    ) -> Self {
+        let mut msg = Self::base(CCMessageType::TriggerCheck, case_id, constraint_id);
+        msg.timestamp = Some(event_timestamp);
+        msg
     }
 
     pub fn check_result(case_id: CaseId, constraint_id: ConstraintId, satisfied: bool) -> Self {
@@ -231,6 +242,8 @@ impl Display for TerminationDetectionMessage {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
     use crate::types::{ConstraintType, Token, TokenId};
 
@@ -240,6 +253,7 @@ mod tests {
             "case-1".to_string(),
             "c-1".to_string(),
             ConstraintType::Response,
+            Some(Utc::now()),
             1,
             None,
         );
@@ -251,7 +265,12 @@ mod tests {
 
     #[test]
     fn delete_token_has_correct_type_and_token_id() {
-        let msg = CCMessage::delete_token("case-2".to_string(), "c-2".to_string(), TokenId::nil());
+        let msg = CCMessage::delete_token(
+            "case-2".to_string(),
+            "c-2".to_string(),
+            Utc::now(),
+            TokenId::nil(),
+        );
         assert_eq!(msg.message_type, CCMessageType::DeleteToken);
         assert!(msg.token_id.is_some());
         assert!(msg.token.is_none());
@@ -259,7 +278,7 @@ mod tests {
 
     #[test]
     fn trigger_check_has_no_token_or_result() {
-        let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string());
+        let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string(), Utc::now());
         assert_eq!(msg.message_type, CCMessageType::TriggerCheck);
         assert!(msg.token.is_none());
         assert!(msg.result.is_none());

@@ -1,0 +1,10 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_c.sock"
+log_file = "precedence-consumer.log"
+
+[[constraints]]
+constraint_role = "PrecedenceConsumer"
+constraint_id = "precedence_test"
+event_id = "precedence_consumer_event"
+producer_peers = ["127.0.0.1:8001"]

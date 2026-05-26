@@ -1,0 +1,9 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_p.sock"
+log_file = "precedence-producer.log"
+
+[[constraints]]
+constraint_role = "PrecedenceProducer"
+constraint_id = "precedence_test"
+event_id = "precedence_producer_event"
