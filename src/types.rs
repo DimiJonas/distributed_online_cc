@@ -3,6 +3,7 @@ use std::{fmt::Display, net::SocketAddr};
 use chrono::{DateTime, FixedOffset, Utc};
 use process_mining::core::event_data::case_centric::{Event, XESEditableAttribute};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 pub type PeerId = u8;
@@ -140,7 +141,7 @@ pub struct Token {
     pub event_time: Option<EventTime>,
     pub created_at: EventTime,
     pub created_by: PeerId,
-    pub payload: Option<serde_json::Value>,
+    pub payload: Option<Value>,
 }
 
 impl Token {
@@ -150,7 +151,7 @@ impl Token {
         constraint_type: ConstraintType,
         event_time: Option<EventTime>,
         created_by: PeerId,
-        payload: Option<serde_json::Value>,
+        payload: Option<Value>,
     ) -> Self {
         Self {
             id: TokenId::new_v4(),
@@ -162,6 +163,30 @@ impl Token {
             created_by,
             payload,
         }
+    }
+
+    fn get_payload_as_timestamp_vector(&self) -> Result<Vec<EventTime>, serde_json::Error> {
+        match &self.payload {
+            None => Ok(vec![]),
+            Some(value) => serde_json::from_value(value.clone()),
+        }
+    }
+
+    fn save_timestamp_vector_as_payload(&mut self, event_times: &[EventTime]) {
+        let payload = Some(Value::Array(
+            event_times
+                .iter()
+                .map(|et| Value::String(et.to_rfc3339()))
+                .collect(),
+        ));
+        self.payload = payload;
+    }
+
+    pub fn push_timestamp(&mut self, event_time: EventTime) -> Result<(), serde_json::Error> {
+        let mut event_times = self.get_payload_as_timestamp_vector()?;
+        event_times.push(event_time);
+        self.save_timestamp_vector_as_payload(&event_times);
+        Ok(())
     }
 }
 

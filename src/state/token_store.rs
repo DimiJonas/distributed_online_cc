@@ -19,7 +19,7 @@ impl TokenStore {
         let case_id = token.case_id.clone();
         let constraint_id = token.constraint_id.clone();
         if self.contains_out_token(&case_id, &constraint_id) {
-            log::warn!(
+            log::debug!(
                 "produce: token for ({}, {}) already exists, overwriting",
                 case_id,
                 constraint_id
@@ -136,6 +136,15 @@ impl TokenStore {
             return token_time < timestamp;
         }
         false
+    }
+
+    pub fn get_out_mut(
+        &mut self,
+        case_id: &CaseId,
+        constraint_id: &ConstraintId,
+    ) -> Option<&mut Token> {
+        self.token_out
+            .get_mut(&(case_id.clone(), constraint_id.clone()))
     }
 
     pub fn get_out_cloned(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> Option<Token> {
