@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use crate::{
-    network::message_types::{DEFAULT_MESSAGE_TTL, PeerMessage, PeerMessagePayload},
+    network::message_types::{MESSAGE_TTL, PeerMessage, PeerMessagePayload},
     types::MessageId,
 };
 use bytes::{Buf, BufMut, BytesMut};
@@ -56,7 +56,9 @@ impl From<WirePeerMessage> for PeerMessage {
         PeerMessage {
             message_id: wire.message_id,
             payload: wire.payload,
-            deadline: Some(Instant::now() + DEFAULT_MESSAGE_TTL),
+            deadline: Some(
+                Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
+            ),
         }
     }
 }

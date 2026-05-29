@@ -1,6 +1,7 @@
 use crate::config::node_config::{ConstraintConfig, NodeConfig};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
+use crate::protocol::constraint_logic::order_handler::{OrderFirstHandler, OrderSecondHandler};
 use crate::protocol::constraint_logic::precedence_handler::{
     PrecedenceConsumerHandler, PrecedenceProducerHandler,
 };
@@ -72,6 +73,22 @@ impl HandlerRegistry {
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     producer_peers: producer_peers.clone(),
+                }),
+                ConstraintConfig::OrderFirst {
+                    constraint_id,
+                    event_id,
+                } => Box::new(OrderFirstHandler {
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                }),
+                ConstraintConfig::OrderSecond {
+                    constraint_id,
+                    event_id,
+                    order_first_peers,
+                } => Box::new(OrderSecondHandler {
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    order_first_peers: order_first_peers.clone(),
                 }),
             };
             registry.register(handler);

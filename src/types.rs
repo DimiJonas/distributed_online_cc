@@ -9,6 +9,7 @@ pub type PeerId = u8;
 pub type RequestId = u64;
 pub type CaseId = String;
 pub type ConstraintId = String;
+pub type EventId = String;
 pub type TokenId = Uuid;
 pub type MessageId = Uuid;
 pub type EventTime = DateTime<Utc>;
@@ -69,6 +70,7 @@ pub enum ConstraintType {
     Response,
     EndActivity,
     Precedence,
+    Order,
 }
 
 impl ConstraintType {
@@ -78,6 +80,7 @@ impl ConstraintType {
             ConstraintType::Response => ConstraintResultType::Satisfied,
             ConstraintType::EndActivity => ConstraintResultType::Satisfied,
             ConstraintType::Precedence => ConstraintResultType::Satisfied,
+            ConstraintType::Order => ConstraintResultType::Satisfied,
         }
     }
 }
@@ -88,6 +91,7 @@ impl Display for ConstraintType {
             Self::Response => write!(f, "Response"),
             Self::EndActivity => write!(f, "EndActivity"),
             Self::Precedence => write!(f, "Precedence"),
+            Self::Order => write!(f, "Order"),
         }
     }
 }

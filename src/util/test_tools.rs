@@ -11,7 +11,7 @@ use crate::{
     state::app_state::AppState,
     types::TracedEvent,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 pub fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
@@ -26,7 +26,7 @@ fn make_base_config() -> NodeConfig {
         tcp_listen_address: "127.0.0.1:9000".parse().unwrap(),
         unix_socket: "/tmp/test.sock".to_string(),
         log_file: "test.log".to_string(),
-        peers: vec![],
+        message_ttl: Duration::from_secs(30),
         event_queue_size: 100,
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,

@@ -1,7 +1,8 @@
-use crate::types::{ConstraintId, ConstraintType, PeerId};
+use crate::types::{ConstraintId, ConstraintType, EventId, PeerId};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NodeConfig {
@@ -11,8 +12,8 @@ pub struct NodeConfig {
     pub unix_socket: String,
     #[serde(default = "default_log_file")]
     pub log_file: String,
-    #[serde(default)]
-    pub peers: Vec<String>,
+    #[serde(with = "duration_secs", default = "default_message_ttl")]
+    pub message_ttl: Duration,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
     pub constraints: Vec<ConstraintConfig>,
@@ -23,7 +24,9 @@ pub struct NodeConfig {
 impl NodeConfig {
     pub fn load_config(path: &str) -> Self {
         let contents = fs::read_to_string(path).expect("could not read config file");
-        toml::from_str(&contents).expect("could not parse config file")
+        let config: NodeConfig = toml::from_str(&contents).expect("could not parse config file");
+        crate::network::message_types::init(config.clone());
+        config
     }
 
     pub fn build_constraint_list(&self) -> Vec<(ConstraintId, ConstraintType)> {
@@ -65,28 +68,36 @@ impl Default for TcpChannelConfig {
 pub enum ConstraintConfig {
     ResponseProducer {
         constraint_id: ConstraintId,
-        event_id: String, // concept:name to watch for
+        event_id: EventId, // concept:name to watch for
     },
     ResponseConsumer {
         constraint_id: ConstraintId,
-        event_id: String,
+        event_id: EventId,
         // nodes holding the produced response token
         producer_peers: Vec<SocketAddr>,
     },
     EndActivity {
         constraint_id: ConstraintId,
-        event_id: String,
+        event_id: EventId,
     },
     PrecedenceProducer {
         constraint_id: ConstraintId,
-        event_id: String,
+        event_id: EventId,
     },
     PrecedenceConsumer {
         constraint_id: ConstraintId,
-        event_id: String,
+        event_id: EventId,
         producer_peers: Vec<SocketAddr>,
     },
-    // TODO: add more
+    OrderFirst {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+    },
+    OrderSecond {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        order_first_peers: Vec<SocketAddr>,
+    }, // TODO: add more
 }
 
 impl ConstraintConfig {
@@ -97,6 +108,8 @@ impl ConstraintConfig {
             ConstraintConfig::EndActivity { constraint_id, .. } => constraint_id,
             ConstraintConfig::PrecedenceProducer { constraint_id, .. } => constraint_id,
             ConstraintConfig::PrecedenceConsumer { constraint_id, .. } => constraint_id,
+            ConstraintConfig::OrderFirst { constraint_id, .. } => constraint_id,
+            ConstraintConfig::OrderSecond { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -107,6 +120,8 @@ impl ConstraintConfig {
             ConstraintConfig::EndActivity { .. } => ConstraintType::EndActivity,
             ConstraintConfig::PrecedenceProducer { .. } => ConstraintType::Precedence,
             ConstraintConfig::PrecedenceConsumer { .. } => ConstraintType::Precedence,
+            ConstraintConfig::OrderFirst { .. } => ConstraintType::Order,
+            ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
         }
     }
 }
@@ -117,6 +132,10 @@ fn default_unix_socket() -> String {
 
 fn default_log_file() -> String {
     "app.log".to_string()
+}
+
+fn default_message_ttl() -> Duration {
+    Duration::from_secs(30)
 }
 
 fn default_event_q_size() -> usize {
@@ -141,6 +160,21 @@ fn default_tcp_reconnect_max_delay() -> u64 {
 
 fn default_peer_manager_task_mpsc_channel_size() -> usize {
     256
+}
+
+// module used to (de-)serialize a duration value in seconds with serde
+mod duration_secs {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(d.as_secs())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
+        let secs = u64::deserialize(d)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 #[cfg(test)]

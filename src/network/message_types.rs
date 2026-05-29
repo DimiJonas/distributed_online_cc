@@ -1,13 +1,24 @@
-use std::{fmt::Display, net::SocketAddr, time::Duration};
+use std::{fmt::Display, net::SocketAddr, sync::OnceLock, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-use crate::types::{CaseId, ConstraintId, EventTime, MessageId, Token, TokenId};
+use crate::{
+    config::node_config::NodeConfig,
+    types::{CaseId, ConstraintId, EventTime, MessageId, Token, TokenId},
+};
 
-// TODO: make this configurable
-// how long a message lives in the queue before being dropped
-pub const DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30);
+// !gets set once at startup
+// !consider switching to a message factory that lives in the appstate if more values have to be configured
+// controls how long a message lives in the queue before being dropped
+pub static MESSAGE_TTL: OnceLock<Duration> = OnceLock::new();
+// static DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30);
+
+pub fn init(config: NodeConfig) {
+    MESSAGE_TTL
+        .set(config.message_ttl)
+        .expect("message TTL already initialized");
+}
 
 #[derive(Debug, Clone)]
 pub struct PeerMessage {
@@ -22,7 +33,9 @@ impl PeerMessage {
         Self {
             message_id: MessageId::new_v4(),
             payload,
-            deadline: Some(Instant::now() + DEFAULT_MESSAGE_TTL),
+            deadline: Some(
+                Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
+            ),
         }
     }
 
