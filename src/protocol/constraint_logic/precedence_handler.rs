@@ -124,13 +124,13 @@ impl ConstraintHandler for PrecedenceProducerHandler {
 
                 // TODO: send result somewhere after some grace period and delete it instead of printing
                 log::info!(
-                    "response constraint check result after termination {}",
+                    "precedence constraint check result after termination {}",
                     result_store
                         .get_constraint(&message.case_id, &self.constraint_id)
                         .unwrap()
                 );
                 log::debug!(
-                    "response constraint check result after termination {:?}",
+                    "precedence constraint check result after termination {:?}",
                     result_store
                         .get_constraint(&message.case_id, &self.constraint_id)
                         .unwrap()
@@ -149,6 +149,10 @@ pub struct PrecedenceConsumerHandler {
 #[async_trait]
 impl ConstraintHandler for PrecedenceConsumerHandler {
     impl_constraint_handler_fields!(PrecedenceConsumerHandler);
+
+    fn configured_peers(&self) -> Vec<SocketAddr> {
+        self.producer_peers.clone()
+    }
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::debug!(

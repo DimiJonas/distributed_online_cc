@@ -12,7 +12,7 @@ impl CCResultStore {
         }
     }
 
-    // register a new case by initializing a constraint result map with according to the constraint configuration
+    // register a new case by initializing a constraint result map according to the constraint configuration
     pub fn register_case(
         &mut self,
         case_id: CaseId,

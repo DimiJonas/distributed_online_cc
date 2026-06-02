@@ -156,6 +156,7 @@ pub struct CCMessage {
     // no timestamp unless needed for a specific constraint
     pub timestamp: Option<EventTime>,
     // present for: PushToken, PullTokenResponse
+    // TODO: check if this can be removed - pushtoken just uses the timestamp for the order constraint
     pub token: Option<Token>,
     // present for: DeleteToken (identifies which token to remove)
     pub token_id: Option<TokenId>,
@@ -182,6 +183,7 @@ impl CCMessage {
             token.case_id.clone(),
             token.constraint_id.clone(),
         );
+        msg.timestamp = token.event_time.clone();
         msg.token = Some(token);
         msg
     }

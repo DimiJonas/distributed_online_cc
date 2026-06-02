@@ -1,0 +1,15 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_s.sock"
+log_file = "order-second.log"
+
+[[constraints]]
+constraint_role = "OrderSecond"
+constraint_id = "order_test"
+event_id = "order_second_event"
+order_first_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "EndActivity"
+constraint_id = "end_activity"
+event_id = "dummy_end_activity"

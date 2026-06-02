@@ -153,6 +153,15 @@ impl TokenStore {
             .cloned()
     }
 
+    pub fn get_in_mut(
+        &mut self,
+        case_id: &CaseId,
+        constraint_id: &ConstraintId,
+    ) -> Option<&mut Token> {
+        self.token_in
+            .get_mut(&(case_id.clone(), constraint_id.clone()))
+    }
+
     pub fn get_in_cloned(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> Option<Token> {
         self.token_in
             .get(&(case_id.clone(), constraint_id.clone()))

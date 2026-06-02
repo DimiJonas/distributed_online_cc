@@ -45,6 +45,14 @@ impl TracedEvent {
         self.timestamp().map(|dt| dt.with_timezone(&Utc))
     }
 
+    pub fn timestamp_utc_as_str(&self) -> String {
+        if let Some(timestamp) = self.timestamp_utc() {
+            timestamp.clone().to_string()
+        } else {
+            "None".to_string()
+        }
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.event
             .attributes
@@ -61,7 +69,7 @@ impl Display for TracedEvent {
             "Event: name={} case={} time={}",
             self.name().unwrap_or_default(),
             self.case_id,
-            self.timestamp_utc().unwrap_or(DateTime::<Utc>::MIN_UTC)
+            self.timestamp_utc_as_str(),
         )
     }
 }
@@ -165,7 +173,7 @@ impl Token {
         }
     }
 
-    fn get_payload_as_timestamp_vector(&self) -> Result<Vec<EventTime>, serde_json::Error> {
+    pub fn get_payload_as_timestamp_vector(&self) -> Result<Vec<EventTime>, serde_json::Error> {
         match &self.payload {
             None => Ok(vec![]),
             Some(value) => serde_json::from_value(value.clone()),
