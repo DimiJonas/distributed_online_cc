@@ -196,24 +196,7 @@ async fn tcp_channel(
                                 msg
                             );
 
-                            // dispatch message based on payload type of the peer message
-                            match msg.payload {
-                                PeerMessagePayload::Hello(_) => {
-                                    log::warn!("unexpected Hello from peer {} (connection is already established)", peer_address);
-                                },
-                                PeerMessagePayload::Cli(cli_msg) => {
-                                    tokio::spawn(handle_cli_message(cli_msg, state.clone(), msg.message_id));
-                                },
-                                PeerMessagePayload::Conformance(cc_msg) => {
-                                    tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
-                                },
-                                PeerMessagePayload::Overlay(overlay_msg) => {
-                                    tokio::spawn(handle_overlay_message(overlay_msg, state.clone(), msg.message_id));
-                                }
-                                PeerMessagePayload::TerminationDetection(td_msg) => {
-                                    tokio::spawn(handle_td_message(td_msg, state.clone(), msg.message_id));
-                                }
-                            }
+                           dispatch_message(msg, peer_address, state.clone()).await;
                         }
                     }
                     Err(e) => {
@@ -270,6 +253,34 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
         state.clone(),
     ));
     log::info!("created manager task for peer {}", peer_address);
+}
+
+pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
+    // dispatch message based on payload type of the peer message
+    match msg.payload {
+        PeerMessagePayload::Hello(_) => {
+            log::warn!(
+                "unexpected Hello from peer {} (connection is already established)",
+                peer_address
+            );
+        }
+        PeerMessagePayload::Cli(cli_msg) => {
+            tokio::spawn(handle_cli_message(cli_msg, state.clone(), msg.message_id));
+        }
+        PeerMessagePayload::Conformance(cc_msg) => {
+            tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
+        }
+        PeerMessagePayload::Overlay(overlay_msg) => {
+            tokio::spawn(handle_overlay_message(
+                overlay_msg,
+                state.clone(),
+                msg.message_id,
+            ));
+        }
+        PeerMessagePayload::TerminationDetection(td_msg) => {
+            tokio::spawn(handle_td_message(td_msg, state.clone(), msg.message_id));
+        }
+    }
 }
 
 #[cfg(test)]

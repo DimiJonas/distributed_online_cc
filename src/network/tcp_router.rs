@@ -1,4 +1,5 @@
 use crate::network::peer_manager_task::{PeerManagerMessage, attempt_connect, peer_manager_task};
+use crate::network::tcp_channel::dispatch_message;
 use crate::{network::message_types::PeerMessage, state::app_state::AppState};
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -8,15 +9,29 @@ use tokio::sync::mpsc;
 
 // build a tcp channel to another peer
 pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
+    if peer_address == state.config.tcp_listen_address {
+        log::info!("connect_peer: skipping self-connect to {}", peer_address);
+        return;
+    }
     get_or_create_manager(peer_address, state.clone()).await;
 }
 
 // send to another peer via tcp
 pub async fn send_to_peer(peer_address: SocketAddr, msg: PeerMessage, state: AppState) {
-    let tx = get_or_create_manager(peer_address, state.clone()).await;
-    if let Err(e) = tx.send(PeerManagerMessage::Outbound(Box::new(msg))).await {
-        log::error!("peer manager for {} got lost: {}", peer_address, e);
+    if peer_address == state.config.tcp_listen_address {
+        log::debug!("send_to_peer: short-circuiting self-addressed message");
+        deliver_to_self(msg, state).await;
+    } else {
+        let tx = get_or_create_manager(peer_address, state.clone()).await;
+        if let Err(e) = tx.send(PeerManagerMessage::Outbound(Box::new(msg))).await {
+            log::error!("peer manager for {} got lost: {}", peer_address, e);
+        }
     }
+}
+
+// short circuits message directly to self without tcp overhead
+async fn deliver_to_self(msg: PeerMessage, state: AppState) {
+    dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
 }
 
 async fn get_or_create_manager(

@@ -75,23 +75,26 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
         msg
     );
 
-    if let Some(handler) = state.handlers.get_by_constraint_id(&msg.constraint_id) {
-        // is it a new case? -> register it in result store
-        {
-            let mut result_store = state.cc_results.lock().unwrap();
-            if !result_store.has_case(&msg.case_id) {
-                log::info!("identified new case id={}", &msg.case_id);
-                let constraints = state.config.build_constraint_list();
-                result_store.register_case(msg.case_id.clone(), &constraints);
-            }
+    // is it a new case? -> register it in result store
+    {
+        let mut result_store = state.cc_results.lock().unwrap();
+        if !result_store.has_case(&msg.case_id) {
+            log::info!("identified new case id={}", &msg.case_id);
+            let constraints = state.config.build_constraint_list();
+            result_store.register_case(msg.case_id.clone(), &constraints);
         }
-        // dispatch case to handler
-        handler.handle_message(state.clone(), msg).await;
-    } else {
+    }
+    let constraint_handler = state.handlers.get_by_constraint_id(&msg.constraint_id);
+    if constraint_handler.is_empty() {
         log::warn!(
             "received cc message did not match any configured constraints: message={}",
             msg
         );
+    } else {
+        // dispatch case to the handlers
+        for handler in constraint_handler {
+            handler.handle_message(state.clone(), msg.clone()).await;
+        }
     }
 }
 

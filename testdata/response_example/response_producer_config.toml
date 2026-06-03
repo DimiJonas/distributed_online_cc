@@ -1,6 +1,6 @@
 node_id = 1
 tcp_listen_address = "127.0.0.1:8001"
-unix_socket = "/tmp/event_listener1.sock"
+unix_socket = "/tmp/event_listener_p.sock"
 log_file = "response-producer.log"
 
 [[constraints]]
