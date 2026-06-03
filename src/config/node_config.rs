@@ -1,4 +1,6 @@
-use crate::types::{ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode};
+use crate::types::{
+    ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode, TimeConstraintMode,
+};
 use serde::{Deserialize, Serialize, de};
 use std::fs;
 use std::net::SocketAddr;
@@ -106,6 +108,13 @@ pub enum ConstraintConfig {
         value: f64,
         mode: SensorConstraintMode,
     },
+    Time {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        duration: Duration,
+        mode: TimeConstraintMode,
+    },
     // TODO: add more
 }
 
@@ -120,6 +129,7 @@ impl ConstraintConfig {
             ConstraintConfig::OrderFirst { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderSecond { constraint_id, .. } => constraint_id,
             ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
+            ConstraintConfig::Time { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -133,6 +143,7 @@ impl ConstraintConfig {
             ConstraintConfig::OrderFirst { .. } => ConstraintType::Order,
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
             ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
+            ConstraintConfig::Time { .. } => ConstraintType::Time,
         }
     }
 }
@@ -201,6 +212,13 @@ fn deserialize_f64<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<f64
         IntOrFloat::Int(i) => Ok(i as f64),
         IntOrFloat::Float(f) => Ok(f),
     }
+}
+
+fn deserialize_humantime_duration<'de, D: de::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Duration, D::Error> {
+    let s = String::deserialize(deserializer)?;
+    humantime::parse_duration(&s).map_err(de::Error::custom)
 }
 
 #[cfg(test)]

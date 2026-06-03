@@ -1,14 +1,17 @@
 use crate::config::node_config::{ConstraintConfig, NodeConfig};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
-use crate::protocol::constraint_logic::order_handler::{OrderFirstHandler, OrderSecondHandler};
-use crate::protocol::constraint_logic::precedence_handler::{
+use crate::protocol::constraint_logic::order_constraint_handler::{
+    OrderFirstHandler, OrderSecondHandler,
+};
+use crate::protocol::constraint_logic::precedence_constraint_handler::{
     PrecedenceConsumerHandler, PrecedenceProducerHandler,
 };
-use crate::protocol::constraint_logic::response_handler::{
+use crate::protocol::constraint_logic::response_constraint_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };
-use crate::protocol::constraint_logic::sensor_handler::SensorHandler;
+use crate::protocol::constraint_logic::sensor_constraint_handler::SensorConstraintHandler;
+use crate::protocol::constraint_logic::time_constraint_handler::TimeConstraintHandler;
 use crate::types::ConstraintId;
 use std::collections::HashMap;
 
@@ -97,11 +100,22 @@ impl HandlerRegistry {
                     attribute_key,
                     value,
                     mode,
-                } => Box::new(SensorHandler {
+                } => Box::new(SensorConstraintHandler {
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     attribute_key: attribute_key.clone(),
-                    value: value.clone(),
+                    value: *value,
+                    mode: mode.clone(),
+                }),
+                ConstraintConfig::Time {
+                    constraint_id,
+                    event_id,
+                    duration,
+                    mode,
+                } => Box::new(TimeConstraintHandler {
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    duration: *duration,
                     mode: mode.clone(),
                 }),
             };

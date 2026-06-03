@@ -8,7 +8,7 @@ use crate::{
     types::{ConstraintId, ConstraintResultType, EventId, SensorConstraintMode, TracedEvent},
 };
 
-pub struct SensorHandler {
+pub struct SensorConstraintHandler {
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub attribute_key: String,
@@ -17,7 +17,7 @@ pub struct SensorHandler {
 }
 
 #[async_trait]
-impl ConstraintHandler for SensorHandler {
+impl ConstraintHandler for SensorConstraintHandler {
     impl_constraint_handler_fields!(SensorHandler);
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {

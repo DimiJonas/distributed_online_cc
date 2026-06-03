@@ -146,6 +146,7 @@ impl ConstraintHandler for ResponseProducerHandler {
             result_store.update(case_id, &self.constraint_id, constraint_result, info);
 
             // TODO: send result somewhere after some grace period and delete it instead of printing
+            // TODO: delete result from store and possibly corresponding tokens after constraint result is finalized
             log::info!(
                 "response constraint check result after termination {}",
                 result_store
@@ -240,7 +241,7 @@ mod tests {
         },
         protocol::constraint_logic::{
             constraint_handler_trait::ConstraintHandler,
-            response_handler::{ResponseConsumerHandler, ResponseProducerHandler},
+            response_constraint_handler::{ResponseConsumerHandler, ResponseProducerHandler},
         },
         state::app_state::AppState,
         types::{ConstraintType, TokenId},

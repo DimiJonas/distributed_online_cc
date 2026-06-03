@@ -41,3 +41,6 @@ async-trait = "0.1.89"
 # logging
 log = "0.4.29"
 fern = { version = "0.7.1", features = ["colored"] }
+
+# duration format in config file
+humantime = "2.3.0"
