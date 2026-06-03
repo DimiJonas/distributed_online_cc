@@ -66,7 +66,7 @@ impl ConstraintHandler for OrderFirstHandler {
                 );
             }
 
-            // TODO: replace with sending the result somewhere
+            // TODO: replace with sending the result somewhere and delete result afterwards
             log::info!(
                 "order constraint check result {}",
                 result_store

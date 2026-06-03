@@ -21,7 +21,7 @@ pub fn addr(port: u16) -> SocketAddr {
 
 /// Minimal NodeConfig that satisfies AppState::new without touching disk
 fn make_base_config() -> NodeConfig {
-    NodeConfig {
+    let config = NodeConfig {
         node_id: 1,
         tcp_listen_address: "127.0.0.1:9000".parse().unwrap(),
         unix_socket: "/tmp/test.sock".to_string(),
@@ -36,7 +36,9 @@ fn make_base_config() -> NodeConfig {
             reconnect_max_delay: 30,
         },
         constraints: vec![],
-    }
+    };
+    crate::network::message_types::init(config.clone());
+    config
 }
 
 pub fn make_config_with_port(listen_port: u16) -> NodeConfig {

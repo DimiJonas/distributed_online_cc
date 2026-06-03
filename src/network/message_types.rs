@@ -15,9 +15,12 @@ pub static MESSAGE_TTL: OnceLock<Duration> = OnceLock::new();
 // static DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30);
 
 pub fn init(config: NodeConfig) {
-    MESSAGE_TTL
-        .set(config.message_ttl)
-        .expect("message TTL already initialized");
+    match MESSAGE_TTL.set(config.message_ttl) {
+        Ok(()) => {}
+        Err(_) => {
+            log::warn!("message TTL already initialized");
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

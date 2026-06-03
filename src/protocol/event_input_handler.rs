@@ -26,6 +26,11 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
                 "sensor_id",
                 "median_vout",
                 "some:count",
+                "lt_value",
+                "gt_value",
+                "lte_value",
+                "gte_value",
+                "eq_value",
             ])),
             // auto-sort events within each trace by timestamp
             sort_events_with_timestamp_key: Some("time:timestamp".to_string()),

@@ -1,8 +1,8 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{fmt::Display, net::SocketAddr, str::FromStr};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use process_mining::core::event_data::case_centric::{Event, XESEditableAttribute};
-use serde::{Deserialize, Serialize};
+use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
+use serde::{Deserialize, Serialize, de};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -53,6 +53,13 @@ impl TracedEvent {
         }
     }
 
+    pub fn get_attribute_by_key(&self, key: &str) -> Option<AttributeValue> {
+        self.event
+            .attributes
+            .get_by_key(key)
+            .map(|a| a.value.clone())
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.event
             .attributes
@@ -80,6 +87,7 @@ pub enum ConstraintType {
     EndActivity,
     Precedence,
     Order,
+    Sensor,
 }
 
 impl ConstraintType {
@@ -90,6 +98,7 @@ impl ConstraintType {
             ConstraintType::EndActivity => ConstraintResultType::Satisfied,
             ConstraintType::Precedence => ConstraintResultType::Satisfied,
             ConstraintType::Order => ConstraintResultType::Satisfied,
+            ConstraintType::Sensor => ConstraintResultType::Satisfied,
         }
     }
 }
@@ -101,6 +110,7 @@ impl Display for ConstraintType {
             Self::EndActivity => write!(f, "EndActivity"),
             Self::Precedence => write!(f, "Precedence"),
             Self::Order => write!(f, "Order"),
+            Self::Sensor => write!(f, "Sensor"),
         }
     }
 }
@@ -205,6 +215,64 @@ impl Display for Token {
             "Token with id={} for case={}/constraint={}",
             self.id, self.case_id, self.constraint_id
         )
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Clone)]
+pub enum SensorConstraintMode {
+    Lt,
+    Gt,
+    Lte,
+    Gte,
+    Eq,
+}
+
+impl SensorConstraintMode {
+    pub fn evaluate(&self, a: f64, b: f64) -> bool {
+        match self {
+            Self::Lt => a < b,
+            Self::Gt => a > b,
+            Self::Lte => a <= b,
+            Self::Gte => a >= b,
+            Self::Eq => a == b,
+        }
+    }
+}
+
+impl FromStr for SensorConstraintMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "<=" => Ok(Self::Lte),
+            "=<" => Ok(Self::Lte),
+            ">=" => Ok(Self::Gte),
+            "=>" => Ok(Self::Gte),
+            "<" => Ok(Self::Lt),
+            ">" => Ok(Self::Gt),
+            "=" => Ok(Self::Eq),
+            "==" => Ok(Self::Eq),
+            other => Err(format!("Unknown operator: {other:?}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SensorConstraintMode {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(de::Error::custom)
+    }
+}
+
+impl Display for SensorConstraintMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lt => write!(f, "<"),
+            Self::Gt => write!(f, ">"),
+            Self::Lte => write!(f, "<="),
+            Self::Gte => write!(f, ">="),
+            Self::Eq => write!(f, "=="),
+        }
     }
 }
 

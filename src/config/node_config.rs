@@ -1,5 +1,5 @@
-use crate::types::{ConstraintId, ConstraintType, EventId, PeerId};
-use serde::{Deserialize, Serialize};
+use crate::types::{ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode};
+use serde::{Deserialize, Serialize, de};
 use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -97,7 +97,16 @@ pub enum ConstraintConfig {
         constraint_id: ConstraintId,
         event_id: EventId,
         order_first_peers: Vec<SocketAddr>,
-    }, // TODO: add more
+    },
+    Sensor {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        attribute_key: String,
+        #[serde(deserialize_with = "deserialize_f64")]
+        value: f64,
+        mode: SensorConstraintMode,
+    },
+    // TODO: add more
 }
 
 impl ConstraintConfig {
@@ -110,6 +119,7 @@ impl ConstraintConfig {
             ConstraintConfig::PrecedenceConsumer { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderFirst { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderSecond { constraint_id, .. } => constraint_id,
+            ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -122,6 +132,7 @@ impl ConstraintConfig {
             ConstraintConfig::PrecedenceConsumer { .. } => ConstraintType::Precedence,
             ConstraintConfig::OrderFirst { .. } => ConstraintType::Order,
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
+            ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
         }
     }
 }
@@ -174,6 +185,21 @@ mod duration_secs {
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
         let secs = u64::deserialize(d)?;
         Ok(Duration::from_secs(secs))
+    }
+}
+
+// deserialize a value that can be int or float
+fn deserialize_f64<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrFloat {
+        Int(i64),
+        Float(f64),
+    }
+
+    match IntOrFloat::deserialize(deserializer)? {
+        IntOrFloat::Int(i) => Ok(i as f64),
+        IntOrFloat::Float(f) => Ok(f),
     }
 }
 

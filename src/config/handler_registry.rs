@@ -8,6 +8,7 @@ use crate::protocol::constraint_logic::precedence_handler::{
 use crate::protocol::constraint_logic::response_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };
+use crate::protocol::constraint_logic::sensor_handler::SensorHandler;
 use crate::types::ConstraintId;
 use std::collections::HashMap;
 
@@ -89,6 +90,19 @@ impl HandlerRegistry {
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     order_first_peers: order_first_peers.clone(),
+                }),
+                ConstraintConfig::Sensor {
+                    constraint_id,
+                    event_id,
+                    attribute_key,
+                    value,
+                    mode,
+                } => Box::new(SensorHandler {
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    attribute_key: attribute_key.clone(),
+                    value: value.clone(),
+                    mode: mode.clone(),
                 }),
             };
             registry.register(handler);
