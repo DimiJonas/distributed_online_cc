@@ -68,7 +68,7 @@ pub async fn peer_manager_task(
                 log::warn!(
                     "connection to {} lost, reconnecting in {}s",
                     peer_address,
-                    reconnect_delay
+                    humantime::format_duration(reconnect_delay)
                 );
                 tcp_channel_sender = None;
                 schedule_reconnect(peer_address, state.clone(), reconnect_delay);
@@ -135,14 +135,14 @@ fn enqueue(
     log::debug!("{} messages queued for {}", queue.len(), peer_address);
 }
 
-fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: u64) {
+fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: Duration) {
     log::debug!(
         "scheduling reconnect to {} in {} seconds",
         peer_address,
-        delay_secs
+        humantime::format_duration(delay_secs)
     );
     tokio::spawn(async move {
-        sleep(Duration::from_secs(delay_secs)).await;
+        sleep(delay_secs).await;
         attempt_connect(peer_address, state).await;
     });
 }

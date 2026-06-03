@@ -88,7 +88,9 @@ pub enum ConstraintType {
     Precedence,
     Order,
     Sensor,
-    Time,
+    TimerMax,
+    TimerMin,
+    TimerStop,
 }
 
 impl ConstraintType {
@@ -100,7 +102,9 @@ impl ConstraintType {
             ConstraintType::Precedence => ConstraintResultType::Satisfied,
             ConstraintType::Order => ConstraintResultType::Satisfied,
             ConstraintType::Sensor => ConstraintResultType::Satisfied,
-            ConstraintType::Time => ConstraintResultType::Satisfied,
+            ConstraintType::TimerMax => ConstraintResultType::Satisfied,
+            ConstraintType::TimerMin => ConstraintResultType::TemporarilyViolated,
+            ConstraintType::TimerStop => ConstraintResultType::Satisfied,
         }
     }
 }
@@ -113,7 +117,9 @@ impl Display for ConstraintType {
             Self::Precedence => write!(f, "Precedence"),
             Self::Order => write!(f, "Order"),
             Self::Sensor => write!(f, "Sensor"),
-            Self::Time => write!(f, "Time"),
+            Self::TimerMax => write!(f, "Time"),
+            Self::TimerMin => write!(f, "Time"),
+            Self::TimerStop => write!(f, "Time"),
         }
     }
 }

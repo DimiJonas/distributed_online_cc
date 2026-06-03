@@ -32,8 +32,8 @@ fn make_base_config() -> NodeConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_task_mpsc_channel_size: 256,
             message_queue_size: 256,
-            reconnect_start_delay: 1,
-            reconnect_max_delay: 30,
+            reconnect_start_delay: Duration::from_secs(1),
+            reconnect_max_delay: Duration::from_secs(30),
         },
         constraints: vec![],
     };

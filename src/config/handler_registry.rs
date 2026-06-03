@@ -11,7 +11,9 @@ use crate::protocol::constraint_logic::response_constraint_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };
 use crate::protocol::constraint_logic::sensor_constraint_handler::SensorConstraintHandler;
-use crate::protocol::constraint_logic::time_constraint_handler::TimeConstraintHandler;
+use crate::protocol::constraint_logic::time_constraint_handler::{
+    TimeStartHandler, TimeStopHandler,
+};
 use crate::types::{ConstraintId, EventId};
 use std::collections::HashMap;
 
@@ -107,16 +109,25 @@ impl HandlerRegistry {
                     value: *value,
                     mode: mode.clone(),
                 }),
-                ConstraintConfig::Time {
+                ConstraintConfig::TimeStart {
                     constraint_id,
                     event_id,
                     duration,
                     mode,
-                } => Box::new(TimeConstraintHandler {
+                } => Box::new(TimeStartHandler {
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     duration: *duration,
                     mode: mode.clone(),
+                }),
+                ConstraintConfig::TimeStop {
+                    constraint_id,
+                    event_id,
+                    time_start_peers,
+                } => Box::new(TimeStopHandler {
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    time_start_peers: time_start_peers.clone(),
                 }),
             };
             registry.register(handler);

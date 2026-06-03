@@ -14,7 +14,10 @@ pub struct NodeConfig {
     pub unix_socket: String,
     #[serde(default = "default_log_file")]
     pub log_file: String,
-    #[serde(with = "duration_secs", default = "default_message_ttl")]
+    #[serde(
+        deserialize_with = "deserialize_humantime_duration",
+        default = "default_message_ttl"
+    )]
     pub message_ttl: Duration,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
@@ -47,10 +50,16 @@ pub struct TcpChannelConfig {
     pub peer_manager_task_mpsc_channel_size: usize,
     #[serde(default = "default_tcp_message_queue_size")]
     pub message_queue_size: usize,
-    #[serde(default = "default_tcp_reconnect_start_delay")]
-    pub reconnect_start_delay: u64,
-    #[serde(default = "default_tcp_reconnect_max_delay")]
-    pub reconnect_max_delay: u64,
+    #[serde(
+        default = "default_tcp_reconnect_start_delay",
+        deserialize_with = "deserialize_humantime_duration"
+    )]
+    pub reconnect_start_delay: Duration,
+    #[serde(
+        default = "default_tcp_reconnect_max_delay",
+        deserialize_with = "deserialize_humantime_duration"
+    )]
+    pub reconnect_max_delay: Duration,
 }
 
 impl Default for TcpChannelConfig {
@@ -108,12 +117,17 @@ pub enum ConstraintConfig {
         value: f64,
         mode: SensorConstraintMode,
     },
-    Time {
+    TimeStart {
         constraint_id: ConstraintId,
         event_id: EventId,
         #[serde(deserialize_with = "deserialize_humantime_duration")]
         duration: Duration,
         mode: TimeConstraintMode,
+    },
+    TimeStop {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        time_start_peers: Vec<SocketAddr>,
     },
     // TODO: add more
 }
@@ -129,7 +143,8 @@ impl ConstraintConfig {
             ConstraintConfig::OrderFirst { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderSecond { constraint_id, .. } => constraint_id,
             ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
-            ConstraintConfig::Time { constraint_id, .. } => constraint_id,
+            ConstraintConfig::TimeStart { constraint_id, .. } => constraint_id,
+            ConstraintConfig::TimeStop { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -143,7 +158,11 @@ impl ConstraintConfig {
             ConstraintConfig::OrderFirst { .. } => ConstraintType::Order,
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
             ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
-            ConstraintConfig::Time { .. } => ConstraintType::Time,
+            ConstraintConfig::TimeStart { mode, .. } => match mode {
+                TimeConstraintMode::Max => ConstraintType::TimerMax,
+                TimeConstraintMode::Min => ConstraintType::TimerMin,
+            },
+            ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
         }
     }
 }
@@ -172,31 +191,16 @@ fn default_tcp_message_queue_size() -> usize {
     256
 }
 
-fn default_tcp_reconnect_start_delay() -> u64 {
-    1
+fn default_tcp_reconnect_start_delay() -> Duration {
+    Duration::from_secs(1)
 }
 
-fn default_tcp_reconnect_max_delay() -> u64 {
-    30
+fn default_tcp_reconnect_max_delay() -> Duration {
+    Duration::from_secs(30)
 }
 
 fn default_peer_manager_task_mpsc_channel_size() -> usize {
     256
-}
-
-// module used to (de-)serialize a duration value in seconds with serde
-mod duration_secs {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
-
-    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u64(d.as_secs())
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-        let secs = u64::deserialize(d)?;
-        Ok(Duration::from_secs(secs))
-    }
 }
 
 // deserialize a value that can be int or float
@@ -214,6 +218,7 @@ fn deserialize_f64<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<f64
     }
 }
 
+// deserialize durations in format 1h30m or 30s using humantime crate
 fn deserialize_humantime_duration<'de, D: de::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Duration, D::Error> {
