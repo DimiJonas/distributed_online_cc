@@ -30,7 +30,7 @@ pub async fn watchdog_task(
             // remove the timer token
             {
                 let mut store = state.token_store.lock().unwrap();
-                store.remove_timer_token(&token_id);
+                store.fire_timer_token(&token_id);
             }
 
             // evaluate timeout

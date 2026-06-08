@@ -14,7 +14,7 @@ use crate::{
         result_emitter::{emit_result, emit_result_immediate},
         watchdog_task::watchdog_task,
     },
-    state::{app_state::AppState, token_store::TimerStopOutcome},
+    state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventId, EventTime,
         TimeConstraintMode, Token, TracedEvent,
@@ -128,56 +128,61 @@ impl ConstraintHandler for TimeStartHandler {
             cancel_tokens.cancel_constraint(&message.case_id, &self.constraint_id);
         }
 
-        // determine if tokens exist
-        let outcome = {
+        // evaluate timer data
+        let timer_data = {
             let mut store = state.token_store.lock().unwrap();
-            store.take_timer_tokens_with_outcome(&message.case_id, &self.constraint_id)
+            store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
         };
 
-        match outcome {
-            TimerStopOutcome::NeverStarted => {
-                log::info!(
-                    "time start handler: stop event arrived for ({}/{}) but no start event was ever recorded - satisfied immediately",
-                    message.case_id,
-                    self.constraint_id
-                );
-                emit_result_immediate(
-                    &message.case_id,
-                    &self.constraint_id,
-                    ConstraintResultType::Satisfied,
-                    "TimerStop: no start event was ever observed (vacuously satisfied)".to_string(),
-                    state.clone(),
-                );
-            }
-            TimerStopOutcome::AllTimersFired => {
-                log::info!(
-                    "time start handler: stop event arrived for ({}/{}) but all timers already fired - checking for late arrival correction",
-                    message.case_id,
-                    self.constraint_id
-                );
-                self.maybe_correct_late_arrival(&message.case_id, stop_time, state.clone())
-                    .await;
-            }
-            TimerStopOutcome::LiveTokensFound(tokens) => {
-                log::info!(
-                    "time start handler: evaluating {} live tokens for ({}/{})",
-                    tokens.len(),
-                    message.case_id,
-                    self.constraint_id
-                );
-                for token in &tokens {
-                    let (result, info) = self.evaluate_token(token, stop_time);
-                    log::info!("time start: token {} → {:?}: {}", token.id, result, info);
-                    emit_result(
-                        &message.case_id,
-                        &self.constraint_id,
-                        result,
-                        info,
-                        state.clone(),
-                    )
-                    .await;
-                }
-            }
+        // satisfied if no time start event happened
+        if !timer_data.start_ever_seen && !timer_data.has_tokens() {
+            log::info!(
+                "time start handler: stop event arrived for ({}/{}) but no start event was ever recorded - satisfied immediately",
+                message.case_id,
+                self.constraint_id
+            );
+            emit_result_immediate(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintResultType::Satisfied,
+                "TimerStop: no start event was ever observed".to_string(),
+                state.clone(),
+            );
+            return;
+        }
+
+        log::info!(
+            "time start handler: evaluating {} live and {} fired tokens for ({}/{})",
+            timer_data.live_tokens.len(),
+            timer_data.fired_tokens.len(),
+            message.case_id,
+            self.constraint_id
+        );
+
+        // evaluate for each token (live and fired - which allows for corrections) separately
+        // if violated or satisfied depending on event times and time constraint mode (min/max)
+        for token in timer_data
+            .live_tokens
+            .iter()
+            .chain(timer_data.fired_tokens.iter())
+        {
+            let was_fired = timer_data.live_tokens.iter().all(|t| t.id != token.id);
+            let (result, info) = self.evaluate_token(token, stop_time);
+            log::info!(
+                "time start: token {} ({}) -> {:?}: {}",
+                token.id,
+                if was_fired { "late-correction" } else { "live" },
+                result,
+                info
+            );
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                result,
+                info,
+                state.clone(),
+            )
+            .await;
         }
     }
 }
@@ -241,77 +246,6 @@ impl TimeStartHandler {
                         ),
                     )
                 }
-            }
-        }
-    }
-
-    /// Called in the `AllTimersFired` case. The original tokens are gone (the
-    /// watchdogs removed them), so exact elapsed times aren't available here.
-    /// Best-effort correction: for Max, if the current result is Violated and a
-    /// stop event has now arrived, overwrite with Satisfied. For Min, a fired
-    /// timer already means the minimum elapsed, so it stays Satisfied.
-    async fn maybe_correct_late_arrival(
-        &self,
-        case_id: &CaseId,
-        stop_time: EventTime,
-        state: AppState,
-    ) {
-        let current = {
-            let results = state.cc_results.lock().unwrap();
-            results
-                .get_constraint(case_id, &self.constraint_id)
-                .cloned()
-        };
-
-        let Some(current) = current else {
-            log::warn!(
-                "time start: late-arrival correction: no result found for ({}/{})",
-                case_id,
-                self.constraint_id
-            );
-            return;
-        };
-
-        match self.mode {
-            TimeConstraintMode::Max => {
-                if matches!(current.constraint_result, ConstraintResultType::Violated) {
-                    log::info!(
-                        "time start: late-arrival correction for MAX ({}/{}) — \
-                         stop_time={} arrived after timeout; overwriting Violated -> Satisfied",
-                        case_id,
-                        self.constraint_id,
-                        stop_time
-                    );
-                    emit_result(
-                        case_id,
-                        &self.constraint_id,
-                        ConstraintResultType::Satisfied,
-                        format!(
-                            "TimerMax: late stop event correction — stop arrived at {} \
-                             after timer fired; result updated to Satisfied (start times \
-                             no longer available for exact elapsed)",
-                            stop_time
-                        ),
-                        state.clone(),
-                    )
-                    .await;
-                } else {
-                    log::debug!(
-                        "time start: no correction needed for ({}/{}) — already {:?}",
-                        case_id,
-                        self.constraint_id,
-                        current.constraint_result
-                    );
-                }
-            }
-            TimeConstraintMode::Min => {
-                log::debug!(
-                    "time start: MIN late arrival for ({}/{}) — timer already fired as \
-                     Satisfied; stop_time={} noted, no correction needed",
-                    case_id,
-                    self.constraint_id,
-                    stop_time
-                );
             }
         }
     }
