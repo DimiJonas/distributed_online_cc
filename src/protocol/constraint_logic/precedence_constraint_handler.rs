@@ -9,7 +9,9 @@ use crate::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_peer,
     },
-    protocol::constraint_logic::constraint_handler_trait::ConstraintHandler,
+    protocol::{
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+    },
     state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, Token, TracedEvent,
@@ -90,12 +92,6 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             }
         };
 
-        log::info!(
-            "creating constraint check result for constraint {}; case={}",
-            self.constraint_id,
-            &message.case_id
-        );
-
         let (constraint_result, info) = {
             let store = state.token_store.lock().unwrap();
             match store.contains_out_token_before(
@@ -119,30 +115,14 @@ impl ConstraintHandler for PrecedenceProducerHandler {
                 ),
             }
         };
-
-        {
-            let mut result_store = state.cc_results.lock().unwrap();
-            result_store.update(
-                &message.case_id,
-                &self.constraint_id,
-                constraint_result,
-                info,
-            );
-
-            // TODO: send result somewhere after some grace period and delete it instead of printing
-            log::info!(
-                "precedence constraint check result after termination {}",
-                result_store
-                    .get_constraint(&message.case_id, &self.constraint_id)
-                    .unwrap()
-            );
-            log::debug!(
-                "precedence constraint check result after termination {:?}",
-                result_store
-                    .get_constraint(&message.case_id, &self.constraint_id)
-                    .unwrap()
-            )
-        }
+        emit_result(
+            &message.case_id,
+            &self.constraint_id,
+            constraint_result,
+            info,
+            state.clone(),
+        )
+        .await;
     }
 }
 

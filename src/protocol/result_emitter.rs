@@ -25,6 +25,18 @@ pub async fn emit_result(
     info: String,
     state: AppState,
 ) {
+    {
+        // TODO: should i remove this or move this to debug?
+        let result_store = state.cc_results.lock().unwrap();
+
+        log::info!(
+            "constraint check result produced for ({}/{}): {}",
+            constraint_id,
+            case_id,
+            result_store.get_constraint(case_id, constraint_id).unwrap()
+        );
+    }
+
     let policy = state.config.result_buffer_policy(constraint_id);
 
     match policy {
@@ -32,8 +44,10 @@ pub async fn emit_result(
             // Immediate: no buffering at all
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result, info);
+                results.update(case_id, constraint_id, result.clone(), info.clone());
             }
+            send_result_outbound(case_id, constraint_id, &result, &info, state.clone()).await;
+
             call_finalizers(case_id, constraint_id, state.clone()).await;
         }
 
@@ -160,8 +174,8 @@ async fn send_result_outbound(
     _state: AppState,
 ) {
     // TODO: serialize and send the result somewhere
-    log::debug!(
-        "send_result_outbound: ({}/{}) → {:?} (not yet implemented)",
+    log::info!(
+        "send_result_outbound: ({}/{}) -> {} (not yet implemented)",
         case_id,
         constraint_id,
         result
@@ -184,15 +198,18 @@ async fn call_finalizers(case_id: &CaseId, constraint_id: &ConstraintId, state: 
 }
 
 /// convenience method for handlers that want to finalize a result immediately, skipping the whole buffer logic
-pub fn emit_result_immediate(
+pub async fn emit_result_immediate(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
     result: ConstraintResultType,
     info: String,
     state: AppState,
 ) {
-    let mut results = state.cc_results.lock().unwrap();
-    results.update(case_id, constraint_id, result, info);
+    {
+        let mut results = state.cc_results.lock().unwrap();
+        results.update(case_id, constraint_id, result.clone(), info.clone());
+    }
+    send_result_outbound(case_id, constraint_id, &result, &info, state.clone()).await;
 }
 
 #[cfg(test)]
@@ -448,7 +465,8 @@ mod tests {
             ConstraintResultType::Satisfied,
             "vacuous".to_string(),
             state.clone(),
-        );
+        )
+        .await;
 
         assert!(matches!(
             read_result(&state, "case-1", "x"),

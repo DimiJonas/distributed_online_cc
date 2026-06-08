@@ -27,6 +27,7 @@ use crate::network::tcp_router::send_to_peer;
 */
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
+use crate::protocol::result_emitter::emit_result;
 use crate::state::app_state::AppState;
 use crate::types::{
     CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, Token, TokenId,
@@ -118,12 +119,6 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        log::info!(
-            "creating constraint check result for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
-
         // create constraint result (with info message)
         let (constraint_result, token) = {
             let mut token_store = state.token_store.lock().unwrap();
@@ -145,27 +140,14 @@ impl ConstraintHandler for ResponseProducerHandler {
             None => "no tokens exist".to_string(),
         };
 
-        // handle constraint result
-        // - right now its just saved in the result store and printed
-        {
-            let mut result_store = state.cc_results.lock().unwrap();
-            result_store.update(case_id, &self.constraint_id, constraint_result, info);
-
-            // TODO: send result somewhere after some grace period and delete it instead of printing
-            // TODO: delete result from store and possibly corresponding tokens after constraint result is finalized
-            log::info!(
-                "response constraint check result after termination {}",
-                result_store
-                    .get_constraint(case_id, &self.constraint_id)
-                    .unwrap()
-            );
-            log::debug!(
-                "response constraint check result after termination {:?}",
-                result_store
-                    .get_constraint(case_id, &self.constraint_id)
-                    .unwrap()
-            )
-        }
+        emit_result(
+            case_id,
+            &self.constraint_id,
+            constraint_result,
+            info,
+            state.clone(),
+        )
+        .await;
     }
 }
 

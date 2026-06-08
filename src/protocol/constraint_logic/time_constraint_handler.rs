@@ -10,8 +10,7 @@ use crate::{
         tcp_router::send_to_peer,
     },
     protocol::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::{emit_result, emit_result_immediate},
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
         watchdog_task::watchdog_task,
     },
     state::app_state::AppState,
@@ -141,13 +140,14 @@ impl ConstraintHandler for TimeStartHandler {
                 message.case_id,
                 self.constraint_id
             );
-            emit_result_immediate(
+            emit_result(
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintResultType::Satisfied,
                 "TimerStop: no start event was ever observed".to_string(),
                 state.clone(),
-            );
+            )
+            .await;
             return;
         }
 

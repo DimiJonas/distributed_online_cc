@@ -3,7 +3,9 @@ use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
     impl_constraint_handler_fields,
-    protocol::constraint_logic::constraint_handler_trait::ConstraintHandler,
+    protocol::{
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+    },
     state::app_state::AppState,
     types::{ConstraintId, ConstraintResultType, EventId, SensorConstraintMode, TracedEvent},
 };
@@ -50,40 +52,27 @@ impl ConstraintHandler for SensorConstraintHandler {
             }
         };
 
-        let mut result_store = state.cc_results.lock().unwrap();
-
-        if self.mode.evaluate(attribute_value, self.value) {
+        let (info, constraint_result) = if self.mode.evaluate(attribute_value, self.value) {
             // produce positive result
-            let info = format!("{} {} {} is true", attribute_value, self.mode, self.value);
-            result_store.update(
-                &event.case_id,
-                &self.constraint_id,
+            (
+                format!("{} {} {} is true", attribute_value, self.mode, self.value),
                 ConstraintResultType::Satisfied,
-                info,
-            );
+            )
         } else {
             // produce negative result
-            let info = format!("{} {} {} is false", attribute_value, self.mode, self.value);
-            result_store.update(
-                &event.case_id,
-                &self.constraint_id,
+            (
+                format!("{} {} {} is false", attribute_value, self.mode, self.value),
                 ConstraintResultType::Violated,
-                info,
-            );
-        }
+            )
+        };
 
-        // TODO: replace with sending the result somewhere and delete result afterwards
-        log::info!(
-            "order constraint check result {}",
-            result_store
-                .get_constraint(&event.case_id, &self.constraint_id)
-                .unwrap()
-        );
-        log::debug!(
-            "order constraint check result {:?}",
-            result_store
-                .get_constraint(&event.case_id, &self.constraint_id)
-                .unwrap()
+        emit_result(
+            &event.case_id,
+            &self.constraint_id,
+            constraint_result,
+            info,
+            state.clone(),
         )
+        .await;
     }
 }

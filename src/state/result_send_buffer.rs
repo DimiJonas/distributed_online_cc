@@ -7,7 +7,7 @@
 /// - Revocable means the result is sent immediately but can be overwritten by
 ///   an update within a duration. After the window the result is considered
 ///   final and can no longer be changed.
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, fmt::Display, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +26,16 @@ pub struct PendingResult {
     pub result: ConstraintResultType,
     pub info: String,
     pub cancel_token: CancellationToken,
+}
+
+impl Display for PendingResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PendingResult {{ result: {:?}, info: {} }}",
+            self.result, self.info
+        )
+    }
 }
 
 #[derive(Default)]
