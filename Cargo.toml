@@ -8,7 +8,7 @@ edition = "2024"
 clap = { version = "4.6.0", features = ["derive"] }
 
 # tokio async runtime
-tokio = { version = "1.52.1", features = ["full"] }
+tokio = { version = "1.52.1", features = ["full", "test-util"] }
 # includes a cancellation token for watchdog tasks
 tokio-util = { version = "0.7.18", features = ["rt"] }
 

@@ -11,7 +11,7 @@ use crate::{
     types::{CaseId, ConstraintId, ConstraintResultType},
 };
 
-/// Emit a constraint result, applying the configured buffering policy for the
+/// emit a constraint result, applying the configured buffering policy for the
 /// given constraint
 ///
 /// - Immediate (zero grace): writes to cc_results immediately
@@ -30,8 +30,11 @@ pub async fn emit_result(
     match policy {
         ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
             // Immediate: no buffering at all
-            let mut results = state.cc_results.lock().unwrap();
-            results.update(case_id, constraint_id, result, info);
+            {
+                let mut results = state.cc_results.lock().unwrap();
+                results.update(case_id, constraint_id, result, info);
+            }
+            call_finalizers(case_id, constraint_id, state.clone()).await;
         }
 
         ResultBufferPolicy::GracePeriod { duration } => {
@@ -41,7 +44,7 @@ pub async fn emit_result(
                 results.update(case_id, constraint_id, result.clone(), info.clone());
             }
 
-            // Buffer the *send* and (re)start the grace timer.
+            // buffer the send and (re)start the grace timer
             let cancel_token = {
                 let mut buf = state.result_send_buffer.lock().unwrap();
                 buf.insert_or_update(case_id.clone(), constraint_id.clone(), result, info)
@@ -57,7 +60,7 @@ pub async fn emit_result(
         }
 
         ResultBufferPolicy::Revocable { duration } => {
-            // Write to cc_results and send immediately; allow overwrite within window.
+            // write to cc_results and send immediately; allow overwrite within window
             {
                 let mut results = state.cc_results.lock().unwrap();
                 results.update(case_id, constraint_id, result.clone(), info.clone());
@@ -105,12 +108,12 @@ async fn grace_period_timer(
                     &pending.result, &pending.info, state.clone(),
                 ).await;
             }
-            // None => a superseding update rescheduled the timer;
-            // that update's own task will send.
+
+            call_finalizers(&case_id, &constraint_id, state.clone()).await;
         }
         _ = cancel_token.cancelled() => {
             log::debug!(
-                "grace period timer superseded for ({}/{})",
+                "grace period timer reset for ({}/{})",
                 case_id, constraint_id
             );
         }
@@ -126,12 +129,17 @@ async fn revocable_result_timer(
 ) {
     tokio::select! {
         _ = tokio::time::sleep(duration) => {
-            let mut buf = state.result_send_buffer.lock().unwrap();
-            buf.take(&case_id, &constraint_id);
+            {
+                let mut buf = state.result_send_buffer.lock().unwrap();
+                buf.take(&case_id, &constraint_id);
+            }
+
             log::info!(
                 "revocable window expired for ({}/{}): result is now final",
                 case_id, constraint_id
             );
+
+            call_finalizers(&case_id, &constraint_id, state.clone()).await;
             // TODO: optionally send a "finalised" signal via TCP.
         }
         _ = cancel_token.cancelled() => {
@@ -160,6 +168,21 @@ async fn send_result_outbound(
     );
 }
 
+/// call finalize on the corresponding constraint handlers to clean up state
+async fn call_finalizers(case_id: &CaseId, constraint_id: &ConstraintId, state: AppState) {
+    log::info!(
+        "finalizing constraint {} for case {}",
+        constraint_id,
+        case_id
+    );
+
+    let handlers = state.handlers.clone();
+    let handler_refs = handlers.get_by_constraint_id(constraint_id);
+    for handler in handler_refs {
+        handler.finalize(case_id, state.clone()).await;
+    }
+}
+
 /// convenience method for handlers that want to finalize a result immediately, skipping the whole buffer logic
 pub fn emit_result_immediate(
     case_id: &CaseId,
@@ -170,4 +193,273 @@ pub fn emit_result_immediate(
 ) {
     let mut results = state.cc_results.lock().unwrap();
     results.update(case_id, constraint_id, result, info);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::node_config::ResultBufferConfig;
+    use crate::types::ConstraintType;
+    use crate::util::test_tools::{make_config_with_buffers, make_state_from_config};
+    use std::collections::HashMap;
+
+    fn register(state: &AppState, case: &str, constraint: &str, ctype: ConstraintType) {
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string(), &[(constraint.to_string(), ctype)]);
+    }
+
+    /// Yield before and after advancing time so spawned tasks fully
+    /// register their sleeps and then run to completion.
+    async fn advance_and_settle(secs: u64) {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(std::time::Duration::from_secs(secs)).await;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn read_result(state: &AppState, case: &str, constraint: &str) -> ConstraintResultType {
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .get_constraint(&case.to_string(), &constraint.to_string())
+            .expect("constraint not registered")
+            .constraint_result
+            .clone()
+    }
+
+    // ── Immediate policy ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn immediate_writes_cc_results_synchronously() {
+        let cfg = make_config_with_buffers(vec![], HashMap::new(), ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1", "x", ConstraintType::Response);
+
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Violated,
+            "v".to_string(),
+            state.clone(),
+        )
+        .await;
+
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Violated
+        ));
+        // No buffer entry for Immediate.
+        assert!(
+            !state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+    }
+
+    // ── GracePeriod policy ───────────────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_period_writes_cc_results_immediately_and_buffers_send() {
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            "x".to_string(),
+            ResultBufferConfig::GracePeriod {
+                duration: Duration::from_secs(5),
+            },
+        );
+        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1", "x", ConstraintType::Response);
+
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Violated,
+            "v".to_string(),
+            state.clone(),
+        )
+        .await;
+
+        // cc_results is current right away
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Violated
+        ));
+
+        // Buffer holds the pending send
+        assert!(
+            state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+
+        // Advance through the grace period — the spawned task takes the entry
+        advance_and_settle(6).await;
+
+        assert!(
+            !state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn grace_period_superseding_update_replaces_buffered_value() {
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            "x".to_string(),
+            ResultBufferConfig::GracePeriod {
+                duration: Duration::from_secs(5),
+            },
+        );
+        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1", "x", ConstraintType::Response);
+
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Violated,
+            "tentative".to_string(),
+            state.clone(),
+        )
+        .await;
+
+        // Halfway through the grace window, supersede with a corrected result
+        advance_and_settle(2).await;
+
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Satisfied,
+            "corrected".to_string(),
+            state.clone(),
+        )
+        .await;
+
+        // cc_results reflects the corrected value
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Satisfied
+        ));
+
+        // The buffer still has a pending entry but it's the corrected one
+        {
+            let buf = state.result_send_buffer.lock().unwrap();
+            let pending = buf
+                .get(&"case-1".to_string(), &"x".to_string())
+                .expect("pending entry should exist");
+            assert!(matches!(pending.result, ConstraintResultType::Satisfied));
+            assert_eq!(pending.info, "corrected");
+        }
+
+        // Run past both windows; the buffer drains
+        advance_and_settle(10).await;
+        assert!(
+            !state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+    }
+
+    // ── Revocable policy ─────────────────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn revocable_writes_immediately_and_keeps_buffer_open() {
+        let mut buffers = HashMap::new();
+        buffers.insert(
+            "x".to_string(),
+            ResultBufferConfig::Revocable {
+                duration: Duration::from_secs(5),
+            },
+        );
+        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1", "x", ConstraintType::Response);
+
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Violated,
+            "v".to_string(),
+            state.clone(),
+        )
+        .await;
+
+        // cc_results updated right away (revocable sends immediately)
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Violated
+        ));
+        // and the buffer holds the entry for the revocable window
+        assert!(
+            state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+
+        // Advance past the window — buffer is taken (finalised)
+        advance_and_settle(6).await;
+        assert!(
+            !state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+    }
+
+    // ── emit_result_immediate ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn emit_immediate_writes_cc_results_and_does_not_buffer() {
+        let cfg = make_config_with_buffers(
+            vec![],
+            HashMap::new(),
+            ResultBufferConfig::GracePeriod {
+                // Even with grace-period default policy, emit_result_immediate
+                // bypasses the buffer entirely.
+                duration: Duration::from_secs(60),
+            },
+        );
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1", "x", ConstraintType::Response);
+
+        emit_result_immediate(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintResultType::Satisfied,
+            "vacuous".to_string(),
+            state.clone(),
+        );
+
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Satisfied
+        ));
+        assert!(
+            !state
+                .result_send_buffer
+                .lock()
+                .unwrap()
+                .has_pending(&"case-1".to_string(), &"x".to_string())
+        );
+    }
 }

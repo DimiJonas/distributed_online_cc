@@ -186,7 +186,7 @@ impl CCMessage {
             token.case_id.clone(),
             token.constraint_id.clone(),
         );
-        msg.timestamp = token.event_time.clone();
+        msg.timestamp = token.event_time;
         msg.token = Some(token);
         msg
     }

@@ -30,10 +30,7 @@ impl WatchdogCancelStore {
         event_instance_id: EventInstanceId,
     ) -> CancellationToken {
         let key = (case_id.clone(), constraint_id.clone());
-        let parent = self
-            .parent_tokens
-            .entry(key.clone())
-            .or_insert_with(CancellationToken::new);
+        let parent = self.parent_tokens.entry(key.clone()).or_default();
 
         let child = parent.child_token();
         // Store the constraint key alongside the child token.

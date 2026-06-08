@@ -14,9 +14,17 @@ pub trait ConstraintHandler: Send + Sync {
         vec![]
     }
 
+    /// handle the event the handler is configured to listen on
     async fn handle_event(&self, event: &TracedEvent, state: AppState);
+
+    /// handle messages addressing the constraint id of the constraint handler
     async fn handle_message(&self, _state: AppState, _message: CCMessage) {}
+
+    /// do whats needed after the case end signal came in
     async fn handle_case_end(&self, _case_id: &CaseId, _state: AppState) {}
+
+    /// clean up state after constraint check result was finalized
+    async fn finalize(&self, _case_id: &CaseId, _state: AppState) {}
 }
 
 // macro that implements the functions event_id() and constraint_id()

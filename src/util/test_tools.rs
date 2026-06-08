@@ -1,6 +1,9 @@
 use bytes::BytesMut;
 use chrono::Utc;
-use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
+use process_mining::core::event_data::case_centric::{
+    XESEditableAttribute,
+    xes::{XESImportOptions, import_xes_slice},
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -121,7 +124,6 @@ pub fn make_traced_event(case_id: &str, event_name: &str) -> TracedEvent {
     let log = import_xes_slice(&buf, false, opts).unwrap();
     let trace = log.traces.into_iter().next().unwrap();
 
-    use process_mining::core::event_data::case_centric::XESEditableAttribute;
     let case_id_val = trace
         .attributes
         .get_by_key("concept:name")
@@ -169,4 +171,62 @@ pub fn make_timer_token(case_id: &str, constraint_id: &str) -> Token {
         Some(Utc::now()),
         1,
     )
+}
+
+pub fn make_config_with_buffers(
+    constraints: Vec<ConstraintConfig>,
+    buffers: HashMap<String, ResultBufferConfig>,
+    default_buffer: ResultBufferConfig,
+) -> NodeConfig {
+    let mut config = make_base_config();
+    config.constraints = constraints;
+    config.result_buffers = buffers;
+    config.default_result_buffer = default_buffer;
+    config
+}
+
+pub fn make_state_from_config(config: NodeConfig) -> AppState {
+    let (event_tx, _event_rx) = mpsc::channel(16);
+    AppState::new(config, event_tx)
+}
+
+pub fn make_traced_event_at(case_id: &str, event_name: &str, seconds_offset: i64) -> TracedEvent {
+    use chrono::TimeZone;
+    let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let ts = base + chrono::Duration::seconds(seconds_offset);
+    let ts_str = ts.to_rfc3339();
+    let xes = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <trace>
+    <string key="concept:name" value="{case_id}"/>
+    <event>
+      <string key="concept:name" value="{event_name}"/>
+      <date key="time:timestamp" value="{ts_str}"/>
+    </event>
+  </trace>
+</log>"#
+    );
+    let buf = BytesMut::from(xes.as_bytes());
+    let opts = XESImportOptions {
+        sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
+        verbose: false,
+        ..XESImportOptions::default()
+    };
+    let log = import_xes_slice(&buf, false, opts).unwrap();
+    let trace = log.traces.into_iter().next().unwrap();
+
+    use XESEditableAttribute;
+    let case_id_val = trace
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let event = trace.events.into_iter().next().unwrap();
+    TracedEvent {
+        case_id: case_id_val,
+        event,
+    }
 }
