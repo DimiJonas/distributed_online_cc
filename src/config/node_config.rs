@@ -1,7 +1,9 @@
+use crate::state::result_send_buffer::ResultBufferPolicy;
 use crate::types::{
     ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode, TimeConstraintMode,
 };
 use serde::{Deserialize, Serialize, de};
+use std::collections::HashMap;
 use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -24,6 +26,10 @@ pub struct NodeConfig {
     pub constraints: Vec<ConstraintConfig>,
     #[serde(default)]
     pub tcp_channels: TcpChannelConfig,
+    #[serde(default)]
+    pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
+    #[serde(default)]
+    pub default_result_buffer: ResultBufferConfig,
 }
 
 impl NodeConfig {
@@ -39,6 +45,13 @@ impl NodeConfig {
             .iter()
             .map(|c| (c.constraint_id().to_string(), c.constraint_type()))
             .collect()
+    }
+
+    pub fn result_buffer_policy(&self, constraint_id: &str) -> ResultBufferPolicy {
+        self.result_buffers
+            .get(constraint_id)
+            .unwrap_or(&self.default_result_buffer)
+            .to_policy()
     }
 }
 
@@ -70,6 +83,37 @@ impl Default for TcpChannelConfig {
             message_queue_size: default_tcp_message_queue_size(),
             reconnect_start_delay: default_tcp_reconnect_start_delay(),
             reconnect_max_delay: default_tcp_reconnect_max_delay(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(tag = "policy")]
+pub enum ResultBufferConfig {
+    #[default]
+    Immediate,
+    GracePeriod {
+        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        duration: Duration,
+    },
+    Revocable {
+        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        duration: Duration,
+    },
+}
+
+impl ResultBufferConfig {
+    pub fn to_policy(&self) -> ResultBufferPolicy {
+        match self {
+            ResultBufferConfig::Immediate => ResultBufferPolicy::GracePeriod {
+                duration: Duration::from_secs(0),
+            },
+            ResultBufferConfig::GracePeriod { duration } => ResultBufferPolicy::GracePeriod {
+                duration: *duration,
+            },
+            ResultBufferConfig::Revocable { duration } => ResultBufferPolicy::Revocable {
+                duration: *duration,
+            },
         }
     }
 }

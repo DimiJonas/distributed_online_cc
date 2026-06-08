@@ -247,7 +247,6 @@ mod tests {
                 ConstraintType::Response,
                 Some(Utc::now()),
                 1,
-                None,
             );
             state
                 .token_store

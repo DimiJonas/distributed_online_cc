@@ -3,7 +3,9 @@ use crate::state::cc_result_store::CCResultStore;
 use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::request_id_container::RequestIdContainer;
+use crate::state::result_send_buffer::ConstraintResultSendBuffer;
 use crate::state::token_store::TokenStore;
+use crate::state::watchdog_cancel_store::WatchdogCancelStore;
 use crate::types::TracedEvent;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -18,6 +20,8 @@ pub struct AppState {
     pub cc_results: Arc<Mutex<CCResultStore>>,
     pub handlers: Arc<HandlerRegistry>,
     pub peer_managers: Arc<Mutex<PeerManagerMap>>,
+    pub watchdog_cancel_tokens: Arc<Mutex<WatchdogCancelStore>>,
+    pub result_send_buffer: Arc<Mutex<ConstraintResultSendBuffer>>,
 }
 
 impl AppState {
@@ -33,6 +37,8 @@ impl AppState {
             cc_results: Arc::new(Mutex::new(CCResultStore::new())),
             handlers,
             peer_managers: Arc::new(Mutex::new(PeerManagerMap::new())),
+            watchdog_cancel_tokens: Arc::new(Mutex::new(WatchdogCancelStore::new())),
+            result_send_buffer: Arc::new(Mutex::new(ConstraintResultSendBuffer::new())),
         }
     }
 }

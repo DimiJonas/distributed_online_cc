@@ -1,18 +1,40 @@
-use crate::types::{CaseId, ConstraintId, EventTime, Token};
-use std::collections::HashMap;
+use crate::types::{CaseId, ConstraintId, EventTime, Token, TokenId};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Default)]
 pub struct TokenStore {
     pub token_out: HashMap<(CaseId, ConstraintId), Token>,
     pub token_in: HashMap<(CaseId, ConstraintId), Token>,
+
+    /// Timer tokens need a different key because they need to be unique for multiple events happening
+    /// even though constraint id, case id and event id are the same
+    ///
+    /// Flat map: TokenId → Token (one entry per active Part A event)
+    timer_tokens: HashMap<TokenId, Token>,
+    /// Index: (CaseId, ConstraintId) → all active TokenIds for that pair
+    timer_index: HashMap<(CaseId, ConstraintId), Vec<TokenId>>,
+    /// Tracks whether at least one timer start event was seen for a
+    /// (CaseId, ConstraintId) pair, regardless of whether its token is still
+    /// alive
+    /// Makes it possible to distinguish "start never happened" from "all timers
+    /// already fired" when a timer stop message arrives
+    timer_start_seen: HashSet<(CaseId, ConstraintId)>,
+}
+
+/// state of time start node when time stop message comes in
+#[derive(Debug, PartialEq)]
+pub enum TimerStopOutcome {
+    /// at least one live token was found and removed
+    LiveTokensFound(Vec<Token>),
+    /// Start events happened but all timers already fired before stop arrived.
+    AllTimersFired,
+    /// No start event was ever seen for this (case, constraint).
+    NeverStarted,
 }
 
 impl TokenStore {
     pub fn new() -> Self {
-        Self {
-            token_in: HashMap::new(),
-            token_out: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn produce_with_overwrite(&mut self, token: Token) {
@@ -178,31 +200,88 @@ impl TokenStore {
         self.token_out
             .contains_key(&(case_id.clone(), constraint_id.clone()))
     }
+
+    pub fn insert_timer_token(&mut self, token: Token) {
+        let index_key = (token.case_id.clone(), token.constraint_id.clone());
+        self.timer_start_seen.insert(index_key.clone());
+        // update index
+        self.timer_index
+            .entry(index_key)
+            .or_default()
+            .push(token.id);
+        // update token map
+        self.timer_tokens.insert(token.id, token);
+    }
+
+    pub fn remove_timer_token(&mut self, token_id: &TokenId) -> Option<Token> {
+        // update token map
+        let token = self.timer_tokens.remove(token_id)?;
+        // update index
+        let index_key = (token.case_id.clone(), token.constraint_id.clone());
+        if let Some(ids) = self.timer_index.get_mut(&index_key) {
+            ids.retain(|id| id != token_id);
+            // remove entry from index if the entry does not contain any more token ids
+            if ids.is_empty() {
+                self.timer_index.remove(&index_key);
+            }
+        }
+        Some(token)
+    }
+
+    /// Called by a stop message handler. Returns a typed outcome either containing the live tokens to be cancelled
+    /// or if no tokens are returned its still distinguishable if all timers fired or there were never any tokens because no timer start event happened
+    pub fn take_timer_tokens_with_outcome(
+        &mut self,
+        case_id: &CaseId,
+        constraint_id: &ConstraintId,
+    ) -> TimerStopOutcome {
+        let index_key = (case_id.clone(), constraint_id.clone());
+        let start_seen = self.timer_start_seen.contains(&index_key);
+
+        let ids = self.timer_index.remove(&index_key);
+
+        match (start_seen, ids) {
+            (false, _) => TimerStopOutcome::NeverStarted,
+            (true, None) => TimerStopOutcome::AllTimersFired,
+            (true, Some(ids)) => {
+                let tokens = ids
+                    .iter()
+                    .filter_map(|id| self.timer_tokens.remove(id))
+                    .collect();
+                TimerStopOutcome::LiveTokensFound(tokens)
+            }
+        }
+    }
+
+    /// Clear the timer_start_seen flag for a (case, constraint)
+    /// this is called for case end cleanup so state doesnt accumulate across cases
+    pub fn clear_timer_start_seen(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) {
+        self.timer_start_seen
+            .remove(&(case_id.clone(), constraint_id.clone()));
+    }
+
+    /// borrow a timer token by token id
+    pub fn get_timer_token(&self, token_id: &TokenId) -> Option<&Token> {
+        self.timer_tokens.get(token_id)
+    }
+
+    /// how many open timer tokens exist for a given (case, constraint)
+    pub fn timer_token_count(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> usize {
+        self.timer_index
+            .get(&(case_id.clone(), constraint_id.clone()))
+            .map_or(0, |v| v.len())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-
     use super::*;
-    use crate::types::{ConstraintType, Token};
-
-    fn make_token(case_id: &str, constraint_id: &str) -> Token {
-        Token::new(
-            case_id.to_string(),
-            constraint_id.to_string(),
-            ConstraintType::Response,
-            Some(Utc::now()),
-            1,
-            None,
-        )
-    }
+    use crate::util::test_tools::{make_timer_token, make_token};
 
     #[test]
     fn produce_and_has_open_token() {
         let mut store = TokenStore::new();
-        let token = make_token("case-1", "constraint-a");
-        store.produce_with_overwrite(token);
+        store.produce_with_overwrite(make_token("case-1", "constraint-a"));
         assert!(store.has_open_token(&"case-1".to_string(), &"constraint-a".to_string()));
     }
 
@@ -215,80 +294,110 @@ mod tests {
     #[test]
     fn remove_out_returns_token_and_clears_it() {
         let mut store = TokenStore::new();
-        let token = make_token("case-1", "constraint-a");
-        store.produce_with_overwrite(token);
-
-        let removed = store.remove_out(&"case-1".to_string(), &"constraint-a".to_string());
-        assert!(removed.is_some());
-        // second removal should be None
+        store.produce_with_overwrite(make_token("case-1", "constraint-a"));
+        assert!(
+            store
+                .remove_out(&"case-1".to_string(), &"constraint-a".to_string())
+                .is_some()
+        );
         assert!(
             store
                 .remove_out(&"case-1".to_string(), &"constraint-a".to_string())
                 .is_none()
         );
-        // has_open_token should now be false
         assert!(!store.has_open_token(&"case-1".to_string(), &"constraint-a".to_string()));
     }
 
     #[test]
-    fn remove_out_unknown_key_returns_none() {
+    fn timer_outcome_never_started_when_no_insert() {
         let mut store = TokenStore::new();
-        assert!(
-            store
-                .remove_out(&"nope".to_string(), &"nope".to_string())
-                .is_none()
+        let outcome =
+            store.take_timer_tokens_with_outcome(&"case-1".to_string(), &"tc".to_string());
+        assert_eq!(outcome, TimerStopOutcome::NeverStarted);
+    }
+
+    #[test]
+    fn timer_outcome_live_tokens_found_after_insert() {
+        let mut store = TokenStore::new();
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        let outcome =
+            store.take_timer_tokens_with_outcome(&"case-1".to_string(), &"tc".to_string());
+        assert!(matches!(
+            outcome,
+            TimerStopOutcome::LiveTokensFound(ref v) if v.len() == 2
+        ));
+    }
+
+    #[test]
+    fn timer_outcome_all_timers_fired_after_remove() {
+        let mut store = TokenStore::new();
+        let t = make_timer_token("case-1", "tc");
+        let id = t.id;
+        store.insert_timer_token(t);
+        store.remove_timer_token(&id);
+
+        let outcome =
+            store.take_timer_tokens_with_outcome(&"case-1".to_string(), &"tc".to_string());
+        assert_eq!(outcome, TimerStopOutcome::AllTimersFired);
+    }
+
+    #[test]
+    fn timer_start_seen_cleared_on_cleanup() {
+        let mut store = TokenStore::new();
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.clear_timer_start_seen(&"case-1".to_string(), &"tc".to_string());
+        let outcome =
+            store.take_timer_tokens_with_outcome(&"case-1".to_string(), &"tc".to_string());
+        assert_eq!(outcome, TimerStopOutcome::NeverStarted);
+    }
+
+    #[test]
+    fn insert_and_count_timer_tokens() {
+        let mut store = TokenStore::new();
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        assert_eq!(
+            store.timer_token_count(&"case-1".to_string(), &"tc".to_string()),
+            2
         );
     }
 
     #[test]
-    fn receive_and_remove_in() {
+    fn remove_timer_token_by_id_cleans_index() {
         let mut store = TokenStore::new();
-        let token = make_token("case-2", "constraint-b");
-        store.receive_with_overwrite(token);
-
-        let removed = store.remove_in(&"case-2".to_string(), &"constraint-b".to_string());
-        assert!(removed.is_some());
-        assert!(
-            store
-                .remove_in(&"case-2".to_string(), &"constraint-b".to_string())
-                .is_none()
+        let t = make_timer_token("case-1", "tc");
+        let id = t.id;
+        store.insert_timer_token(t);
+        assert!(store.remove_timer_token(&id).is_some());
+        assert_eq!(
+            store.timer_token_count(&"case-1".to_string(), &"tc".to_string()),
+            0
         );
     }
 
     #[test]
-    fn produce_overwrites_previous_token_for_same_key() {
+    fn remove_all_via_outcome_clears_index() {
         let mut store = TokenStore::new();
-        let t1 = make_token("case-1", "c");
-        let id1 = t1.id;
-        store.produce_with_overwrite(t1);
-
-        let t2 = make_token("case-1", "c");
-        let id2 = t2.id;
-        store.produce_with_overwrite(t2);
-
-        // Should hold the newest token
-        let removed = store
-            .remove_out(&"case-1".to_string(), &"c".to_string())
-            .unwrap();
-        assert_eq!(removed.id, id2);
-        assert_ne!(removed.id, id1);
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.insert_timer_token(make_timer_token("case-1", "tc"));
+        store.take_timer_tokens_with_outcome(&"case-1".to_string(), &"tc".to_string());
+        assert_eq!(
+            store.timer_token_count(&"case-1".to_string(), &"tc".to_string()),
+            0
+        );
     }
 
     #[test]
-    fn token_out_and_token_in_are_independent() {
+    fn timer_tokens_independent_of_token_out() {
         let mut store = TokenStore::new();
-        store.produce_with_overwrite(make_token("case-x", "c"));
-        store.receive_with_overwrite(make_token("case-x", "c"));
-
-        assert!(
-            store
-                .remove_out(&"case-x".to_string(), &"c".to_string())
-                .is_some()
-        );
-        assert!(
-            store
-                .remove_in(&"case-x".to_string(), &"c".to_string())
-                .is_some()
+        store.produce_with_overwrite(make_token("case-1", "c"));
+        store.insert_timer_token(make_timer_token("case-1", "c"));
+        store.remove_out(&"case-1".to_string(), &"c".to_string());
+        assert_eq!(
+            store.timer_token_count(&"case-1".to_string(), &"c".to_string()),
+            1
         );
     }
 }

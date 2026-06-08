@@ -87,16 +87,9 @@ impl ConstraintHandler for OrderFirstHandler {
 
             match store.get_out_mut(&event.case_id, &self.constraint_id) {
                 // a token for recording the order first executions already exists
-                Some(recording_token) => {
-                    if let Err(e) = recording_token.push_timestamp(order_first_event_time) {
-                        log::error!(
-                            "tried to add event time {} to token {:?}, but an error occured while serializing payload as timestamp vector: {}",
-                            order_first_event_time,
-                            recording_token,
-                            e
-                        );
-                    }
-                }
+                Some(recording_token) => recording_token
+                    .payload
+                    .push_timestamp(order_first_event_time),
 
                 None => {
                     let mut recording_token = Token::new(
@@ -105,16 +98,10 @@ impl ConstraintHandler for OrderFirstHandler {
                         ConstraintType::Order,
                         event.timestamp_utc(),
                         state.config.node_id,
-                        None,
                     );
-                    if let Err(e) = recording_token.push_timestamp(order_first_event_time) {
-                        log::error!(
-                            "tried to add event time {} to token {:?}, but an error occured while serializing payload as timestamp vector: {}",
-                            order_first_event_time,
-                            recording_token,
-                            e
-                        );
-                    }
+                    recording_token
+                        .payload
+                        .push_timestamp(order_first_event_time);
                     store.produce_without_overwrite(recording_token);
                 }
             };
@@ -136,110 +123,110 @@ impl ConstraintHandler for OrderFirstHandler {
             message
         );
 
-        if message.message_type == CCMessageType::PushToken {
-            let order_second_event_time = match message.timestamp {
-                Some(event_time) => event_time,
-                None => {
-                    log::warn!(
-                        "No timestamp was sent in the pushtoken message {} - using current time",
-                        message
-                    );
-                    log::debug!("push token message: {:?}", message);
-                    Utc::now()
-                }
-            };
+        if message.message_type != CCMessageType::PushToken {
+            log::warn!(
+                "order first handler: unexpected message type {:?} for constraint {}, ignoring",
+                message.message_type,
+                self.constraint_id
+            );
+            return;
+        }
 
-            // check that token was contained in the message
-            let message_token = match message.token {
-                Some(token) => token,
-                None => {
-                    log::error!(
-                        "pushtoken message did not contain a token! message: {}",
-                        message
-                    );
-                    return;
-                }
-            };
-
-            // lock token store for the whole method
-            let mut token_store = state.token_store.lock().unwrap();
-
-            // check if a blocking token already exists
-            if !token_store.contains_in_token(&message.case_id, &self.constraint_id) {
-                // no token exists - create one
-                let new_blocking_token = Token::new(
-                    message.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::Order,
-                    Some(order_second_event_time),
-                    message_token.created_by,
-                    None,
+        let order_second_event_time = match message.timestamp {
+            Some(event_time) => event_time,
+            None => {
+                log::error!(
+                    "order first handler: PushToken message for constraint {} has no timestamp, cannot evaluate",
+                    self.constraint_id
                 );
-                token_store.receive_without_overwrite(new_blocking_token);
+                return;
             }
+        };
 
-            // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
-            if let Some(recording_token) =
-                token_store.get_out_cloned(&message.case_id, &self.constraint_id)
-            {
-                // do the thing with the whole recorded vector of event execution times
-                if let Ok(order_first_executions) =
-                    recording_token.get_payload_as_timestamp_vector()
-                {
-                    let mut result_store = state.cc_results.lock().unwrap();
-                    let mut violation_happened = false;
-                    for order_first_time in order_first_executions {
-                        if order_first_time >= order_second_event_time {
-                            violation_happened = true;
-                            // produce negative result
-                            let info = format!(
-                                "order first event happened at {} before order second event that happened at {}",
-                                order_first_time, order_second_event_time
-                            );
-                            result_store.update(
-                                &message.case_id,
-                                &self.constraint_id,
-                                ConstraintResultType::Violated,
-                                info,
-                            );
-                        }
-                    }
-                    if !violation_happened {
-                        // produce positive result
-                        let info = format!(
-                            "all executions of event {} happened before the first execution of the order second event for constraint {} for case {}",
-                            &self.event_id, &self.constraint_id, message.case_id
-                        );
-                        result_store.update(
-                            &message.case_id,
-                            &self.constraint_id,
-                            ConstraintResultType::Satisfied,
-                            info,
-                        );
-                    }
-                    // delete the recording token as it is now used up
-                    token_store.remove_out(&message.case_id, &self.constraint_id);
+        // check that token was contained in the message
+        let message_token = match message.token {
+            Some(token) => token,
+            None => {
+                log::error!(
+                    "pushtoken message did not contain a token! message: {}",
+                    message
+                );
+                return;
+            }
+        };
 
-                    // TODO: replace with sending the result somewhere and delete result afterwards
-                    log::info!(
-                        "order constraint check result {}",
-                        result_store
-                            .get_constraint(&message.case_id, &self.constraint_id)
-                            .unwrap()
+        // lock token store for the whole method
+        let mut token_store = state.token_store.lock().unwrap();
+
+        // check if a blocking token already exists
+        if !token_store.contains_in_token(&message.case_id, &self.constraint_id) {
+            // no token exists - create one
+            let new_blocking_token = Token::new(
+                message.case_id.clone(),
+                self.constraint_id.clone(),
+                ConstraintType::Order,
+                Some(order_second_event_time),
+                message_token.created_by,
+            );
+            token_store.receive_without_overwrite(new_blocking_token);
+        }
+
+        // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
+        if let Some(recording_token) =
+            token_store.get_out_cloned(&message.case_id, &self.constraint_id)
+        {
+            // check all recorded event times until now
+            let order_first_executions: Vec<EventTime> =
+                recording_token.payload.timestamps().to_vec();
+
+            let mut result_store = state.cc_results.lock().unwrap();
+            let mut violation_happened = false;
+
+            for order_first_time in order_first_executions {
+                if order_first_time >= order_second_event_time {
+                    violation_happened = true;
+                    // produce negative result
+                    let info = format!(
+                        "order first event happened at {} before order second event that happened at {}",
+                        order_first_time, order_second_event_time
                     );
-                    log::debug!(
-                        "order constraint check result {:?}",
-                        result_store
-                            .get_constraint(&message.case_id, &self.constraint_id)
-                            .unwrap()
-                    )
-                } else {
-                    log::error!(
-                        "error trying to serialize the timestamp vector from token {}",
-                        recording_token
+                    result_store.update(
+                        &message.case_id,
+                        &self.constraint_id,
+                        ConstraintResultType::Violated,
+                        info,
                     );
                 }
             }
+            if !violation_happened {
+                // produce positive result
+                let info = format!(
+                    "all executions of event {} happened before the first execution of the order second event for constraint {} for case {}",
+                    &self.event_id, &self.constraint_id, message.case_id
+                );
+                result_store.update(
+                    &message.case_id,
+                    &self.constraint_id,
+                    ConstraintResultType::Satisfied,
+                    info,
+                );
+            }
+            // delete the recording token as it is now used up
+            token_store.remove_out(&message.case_id, &self.constraint_id);
+
+            // TODO: replace with sending the result somewhere and delete result afterwards
+            log::info!(
+                "order constraint check result {}",
+                result_store
+                    .get_constraint(&message.case_id, &self.constraint_id)
+                    .unwrap()
+            );
+            log::debug!(
+                "order constraint check result {:?}",
+                result_store
+                    .get_constraint(&message.case_id, &self.constraint_id)
+                    .unwrap()
+            )
         }
     }
 
@@ -279,23 +266,21 @@ impl ConstraintHandler for OrderSecondHandler {
         // check if this is the first time receiving such event for the case
         // keep the token store lock for that time, but release lock before notifying order first peers
         let notify_peers = {
-            let mut notify = false;
             let mut token_store = state.token_store.lock().unwrap();
             if !token_store.contains_out_token(&event.case_id, &self.constraint_id) {
                 // its the first time - create a token
-                notify = true;
-
                 let remembering_token = Token::new(
                     event.case_id.clone(),
                     self.constraint_id.clone(),
                     ConstraintType::Order,
                     Some(order_second_event_time),
                     state.config.node_id,
-                    None,
                 );
                 token_store.produce_without_overwrite(remembering_token);
+                true
+            } else {
+                false
             }
-            notify
         };
 
         // notify order first peers
@@ -338,7 +323,6 @@ async fn send_push_token_message(
         ConstraintType::Order,
         Some(event_timestamp),
         state.config.node_id,
-        None,
     );
     // create message
     let message = PeerMessage::conformance(CCMessage::push_token(token));

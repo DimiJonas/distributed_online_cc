@@ -1,17 +1,18 @@
 use bytes::BytesMut;
+use chrono::Utc;
 use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
 use tokio::sync::mpsc;
 
 use crate::{
-    config::node_config::{ConstraintConfig, NodeConfig, TcpChannelConfig},
+    config::node_config::{ConstraintConfig, NodeConfig, ResultBufferConfig, TcpChannelConfig},
     network::{
         message_types::{CliTestMessage, PeerMessage},
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
-    types::TracedEvent,
+    types::{ConstraintType, Token, TracedEvent},
 };
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 pub fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
@@ -36,6 +37,8 @@ fn make_base_config() -> NodeConfig {
             reconnect_max_delay: Duration::from_secs(30),
         },
         constraints: vec![],
+        result_buffers: HashMap::new(),
+        default_result_buffer: ResultBufferConfig::Immediate,
     };
     crate::network::message_types::init(config.clone());
     config
@@ -145,5 +148,25 @@ pub fn minimal_xes(case_id: &str, event_name: &str) -> String {
     </event>
   </trace>
 </log>"#
+    )
+}
+
+pub fn make_token(case_id: &str, constraint_id: &str) -> Token {
+    Token::new(
+        case_id.to_string(),
+        constraint_id.to_string(),
+        ConstraintType::Response,
+        Some(Utc::now()),
+        1,
+    )
+}
+
+pub fn make_timer_token(case_id: &str, constraint_id: &str) -> Token {
+    Token::new(
+        case_id.to_string(),
+        constraint_id.to_string(),
+        ConstraintType::TimerMax,
+        Some(Utc::now()),
+        1,
     )
 }

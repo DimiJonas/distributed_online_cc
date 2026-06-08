@@ -3,7 +3,6 @@ use std::{fmt::Display, net::SocketAddr, str::FromStr};
 use chrono::{DateTime, FixedOffset, Utc};
 use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
 use serde::{Deserialize, Serialize, de};
-use serde_json::Value;
 use uuid::Uuid;
 
 pub type PeerId = u8;
@@ -12,6 +11,7 @@ pub type CaseId = String;
 pub type ConstraintId = String;
 pub type EventId = String;
 pub type TokenId = Uuid;
+pub type EventInstanceId = Uuid;
 pub type MessageId = Uuid;
 pub type EventTime = DateTime<Utc>;
 
@@ -81,7 +81,7 @@ impl Display for TracedEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ConstraintType {
     Response,
     EndActivity,
@@ -159,7 +159,33 @@ impl Display for ConstraintResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub enum TokenPayload {
+    #[default]
+    None,
+    Timestamps(Vec<EventTime>),
+    // TimerTokens,
+}
+
+impl TokenPayload {
+    pub fn push_timestamp(&mut self, t: EventTime) {
+        match self {
+            TokenPayload::Timestamps(v) => v.push(t),
+            TokenPayload::None => {
+                *self = TokenPayload::Timestamps(vec![t]);
+            }
+        }
+    }
+
+    pub fn timestamps(&self) -> &[EventTime] {
+        match self {
+            TokenPayload::Timestamps(v) => v.as_slice(),
+            TokenPayload::None => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Token {
     pub id: TokenId,
     pub case_id: CaseId,
@@ -168,7 +194,7 @@ pub struct Token {
     pub event_time: Option<EventTime>,
     pub created_at: EventTime,
     pub created_by: PeerId,
-    pub payload: Option<Value>,
+    pub payload: TokenPayload,
 }
 
 impl Token {
@@ -178,7 +204,6 @@ impl Token {
         constraint_type: ConstraintType,
         event_time: Option<EventTime>,
         created_by: PeerId,
-        payload: Option<Value>,
     ) -> Self {
         Self {
             id: TokenId::new_v4(),
@@ -188,32 +213,28 @@ impl Token {
             event_time,
             created_at: Utc::now(),
             created_by,
+            payload: TokenPayload::None,
+        }
+    }
+
+    pub fn new_with_payload(
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        constraint_type: ConstraintType,
+        event_time: Option<EventTime>,
+        created_by: PeerId,
+        payload: TokenPayload,
+    ) -> Self {
+        Self {
             payload,
+            ..Self::new(
+                case_id,
+                constraint_id,
+                constraint_type,
+                event_time,
+                created_by,
+            )
         }
-    }
-
-    pub fn get_payload_as_timestamp_vector(&self) -> Result<Vec<EventTime>, serde_json::Error> {
-        match &self.payload {
-            None => Ok(vec![]),
-            Some(value) => serde_json::from_value(value.clone()),
-        }
-    }
-
-    fn save_timestamp_vector_as_payload(&mut self, event_times: &[EventTime]) {
-        let payload = Some(Value::Array(
-            event_times
-                .iter()
-                .map(|et| Value::String(et.to_rfc3339()))
-                .collect(),
-        ));
-        self.payload = payload;
-    }
-
-    pub fn push_timestamp(&mut self, event_time: EventTime) -> Result<(), serde_json::Error> {
-        let mut event_times = self.get_payload_as_timestamp_vector()?;
-        event_times.push(event_time);
-        self.save_timestamp_vector_as_payload(&event_times);
-        Ok(())
     }
 }
 
@@ -319,12 +340,11 @@ mod tests {
             ConstraintType::Response,
             Some(Utc::now()),
             7,
-            None,
         );
         assert_eq!(token.case_id, "my-case");
         assert_eq!(token.constraint_id, "my-constraint");
         assert_eq!(token.created_by, 7);
-        assert!(token.payload.is_none());
+        assert!(matches!(token.payload, TokenPayload::None));
     }
 
     #[test]
@@ -335,7 +355,6 @@ mod tests {
             ConstraintType::Response,
             Some(Utc::now()),
             1,
-            None,
         );
         let t2 = Token::new(
             "c".to_string(),
@@ -343,22 +362,39 @@ mod tests {
             ConstraintType::Response,
             Some(Utc::now()),
             1,
-            None,
         );
         assert_ne!(t1.id, t2.id);
     }
 
     #[test]
-    fn token_with_payload() {
-        let payload = serde_json::json!({ "key": "value" });
-        let token = Token::new(
+    fn token_payload_push_timestamp_from_none() {
+        let mut p = TokenPayload::None;
+        p.push_timestamp(Utc::now());
+        assert!(matches!(p, TokenPayload::Timestamps(_)));
+        assert_eq!(p.timestamps().len(), 1);
+    }
+
+    #[test]
+    fn token_payload_push_timestamp_appends() {
+        let mut p = TokenPayload::Timestamps(vec![]);
+        let t1 = Utc::now();
+        let t2 = Utc::now();
+        p.push_timestamp(t1);
+        p.push_timestamp(t2);
+        assert_eq!(p.timestamps().len(), 2);
+    }
+
+    #[test]
+    fn token_with_timestamps_payload() {
+        let now = Utc::now();
+        let token = Token::new_with_payload(
             "c".to_string(),
             "x".to_string(),
-            ConstraintType::Response,
-            Some(Utc::now()),
+            ConstraintType::Order,
+            Some(now),
             1,
-            Some(payload.clone()),
+            TokenPayload::Timestamps(vec![now]),
         );
-        assert_eq!(token.payload.unwrap(), payload);
+        assert_eq!(token.payload.timestamps().len(), 1);
     }
 }

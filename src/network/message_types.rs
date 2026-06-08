@@ -273,7 +273,6 @@ mod tests {
             ConstraintType::Response,
             Some(Utc::now()),
             1,
-            None,
         );
         let msg = CCMessage::push_token(token.clone());
         assert_eq!(msg.message_type, CCMessageType::PushToken);

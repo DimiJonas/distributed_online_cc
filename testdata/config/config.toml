@@ -15,3 +15,16 @@ reconnect_max_delay = "30s"
 constraint_role = "EndActivity"
 constraint_id = "end_activity"
 event_id = "dummy_end_activity"
+
+# fallback for all constraints
+[default_result_buffer]
+policy = "GracePeriod"
+duration = "5s"
+
+# per-constraint overrides
+[result_buffers.time_test]
+policy = "Revocable"
+duration = "10s"
+
+[result_buffers.order_test]
+policy = "Immediate"

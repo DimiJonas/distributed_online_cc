@@ -58,7 +58,6 @@ impl ConstraintHandler for ResponseProducerHandler {
             ConstraintType::Response,
             event.timestamp_utc(),
             state.config.node_id,
-            None,
         );
         {
             let mut store = state.token_store.lock().unwrap();
@@ -82,25 +81,32 @@ impl ConstraintHandler for ResponseProducerHandler {
             message
         );
 
-        if message.message_type == CCMessageType::DeleteToken {
-            let consumer_event_time = {
-                if let Some(event_time) = message.timestamp {
-                    event_time
-                } else {
-                    log::error!(
-                        "delete token message did not contain a timestamp. not deleting any tokens. message={}",
-                        message
-                    );
-                    return;
-                }
-            };
-            let mut store = state.token_store.lock().unwrap();
-            if let Some(token) =
-                store.remove_out_before(&message.case_id, &self.constraint_id, consumer_event_time)
-            {
-                log::info!("removed token {}", token);
-                log::debug!("removed token {:?}", token);
+        if message.message_type != CCMessageType::DeleteToken {
+            log::warn!(
+                "response producer handler: unexpected message type {:?} for constraint {}, ignoring",
+                message.message_type,
+                self.constraint_id
+            );
+            return;
+        }
+
+        let consumer_event_time = {
+            if let Some(event_time) = message.timestamp {
+                event_time
+            } else {
+                log::error!(
+                    "delete token message did not contain a timestamp. not deleting any tokens. message={}",
+                    message
+                );
+                return;
             }
+        };
+        let mut store = state.token_store.lock().unwrap();
+        if let Some(token) =
+            store.remove_out_before(&message.case_id, &self.constraint_id, consumer_event_time)
+        {
+            log::info!("removed token {}", token);
+            log::debug!("removed token {:?}", token);
         }
     }
 

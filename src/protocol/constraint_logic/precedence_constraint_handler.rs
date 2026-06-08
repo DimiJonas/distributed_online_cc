@@ -39,7 +39,6 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             ConstraintType::Precedence,
             event.timestamp_utc(),
             state.config.node_id,
-            None,
         );
         let inserted = {
             let mut store = state.token_store.lock().unwrap();
@@ -70,72 +69,79 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             message
         );
 
-        if message.message_type == CCMessageType::TriggerCheck {
-            let consumer_event_time = {
-                if let Some(event_time) = message.timestamp {
-                    event_time
-                } else {
-                    log::warn!(
-                        "cc trigger message did not contain a timestamp. considering current time as consumer event time. message={}",
-                        message
-                    );
-                    Utc::now()
-                }
-            };
+        if message.message_type != CCMessageType::TriggerCheck {
+            log::warn!(
+                "precedence producer handler: unexpected message type {:?} for constraint {}, ignoring",
+                message.message_type,
+                self.constraint_id
+            );
+            return;
+        }
 
-            log::info!(
-                "creating constraint check result for constraint {}; case={}",
-                self.constraint_id,
-                &message.case_id
+        let consumer_event_time = {
+            if let Some(event_time) = message.timestamp {
+                event_time
+            } else {
+                log::warn!(
+                    "cc trigger message did not contain a timestamp. considering current time as consumer event time. message={}",
+                    message
+                );
+                Utc::now()
+            }
+        };
+
+        log::info!(
+            "creating constraint check result for constraint {}; case={}",
+            self.constraint_id,
+            &message.case_id
+        );
+
+        let (constraint_result, info) = {
+            let store = state.token_store.lock().unwrap();
+            match store.contains_out_token_before(
+                &message.case_id,
+                &self.constraint_id,
+                consumer_event_time,
+            ) {
+                true => (
+                    ConstraintResultType::Satisfied,
+                    format!(
+                        "producer token before consumer event time {} exists",
+                        consumer_event_time
+                    ),
+                ),
+                false => (
+                    ConstraintResultType::Violated,
+                    format!(
+                        "no producer token before consumer event time {} exists",
+                        consumer_event_time
+                    ),
+                ),
+            }
+        };
+
+        {
+            let mut result_store = state.cc_results.lock().unwrap();
+            result_store.update(
+                &message.case_id,
+                &self.constraint_id,
+                constraint_result,
+                info,
             );
 
-            let (constraint_result, info) = {
-                let store = state.token_store.lock().unwrap();
-                match store.contains_out_token_before(
-                    &message.case_id,
-                    &self.constraint_id,
-                    consumer_event_time,
-                ) {
-                    true => (
-                        ConstraintResultType::Satisfied,
-                        format!(
-                            "producer token before consumer event time {} exists",
-                            consumer_event_time
-                        ),
-                    ),
-                    false => (
-                        ConstraintResultType::Violated,
-                        format!(
-                            "no producer token before consumer event time {} exists",
-                            consumer_event_time
-                        ),
-                    ),
-                }
-            };
-
-            {
-                let mut result_store = state.cc_results.lock().unwrap();
-                result_store.update(
-                    &message.case_id,
-                    &self.constraint_id,
-                    constraint_result,
-                    info,
-                );
-
-                // TODO: send result somewhere after some grace period and delete it instead of printing
-                log::info!(
-                    "precedence constraint check result after termination {}",
-                    result_store
-                        .get_constraint(&message.case_id, &self.constraint_id)
-                        .unwrap()
-                );
-                log::debug!(
-                    "precedence constraint check result after termination {:?}",
-                    result_store
-                        .get_constraint(&message.case_id, &self.constraint_id)
-                        .unwrap()
-                )
-            }
+            // TODO: send result somewhere after some grace period and delete it instead of printing
+            log::info!(
+                "precedence constraint check result after termination {}",
+                result_store
+                    .get_constraint(&message.case_id, &self.constraint_id)
+                    .unwrap()
+            );
+            log::debug!(
+                "precedence constraint check result after termination {:?}",
+                result_store
+                    .get_constraint(&message.case_id, &self.constraint_id)
+                    .unwrap()
+            )
         }
     }
 }
