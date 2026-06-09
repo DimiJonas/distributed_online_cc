@@ -1,0 +1,15 @@
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener.sock"
+log_file = "precedence-hybrid.log"
+
+[[constraints]]
+constraint_role = "PrecedenceConsumer"
+constraint_id = "precedence_test"
+event_id = "precedence_consumer_event"
+producer_peers = ["127.0.0.1:8003"]
+
+[[constraints]]
+constraint_role = "PrecedenceProducer"
+constraint_id = "precedence_test"
+event_id = "precedence_producer_event"

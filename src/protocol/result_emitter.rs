@@ -25,17 +25,14 @@ pub async fn emit_result(
     info: String,
     state: AppState,
 ) {
-    {
-        // TODO: should i remove this or move this to debug?
-        let result_store = state.cc_results.lock().unwrap();
-
-        log::info!(
-            "constraint check result produced for ({}/{}): {}",
-            constraint_id,
-            case_id,
-            result_store.get_constraint(case_id, constraint_id).unwrap()
-        );
-    }
+    // TODO: should i remove this or move this to debug?
+    log::info!(
+        "constraint check result produced for ({}/{}): {}: {}",
+        constraint_id,
+        case_id,
+        result,
+        info,
+    );
 
     let policy = state.config.result_buffer_policy(constraint_id);
 
@@ -181,7 +178,7 @@ async fn send_result_outbound(
 ) {
     // TODO: serialize and send the result somewhere
     log::info!(
-        "send_result_outbound: ({}/{}) -> {} (not yet implemented)",
+        "send_result_outbound: ({}/{}) -> {} (sending not yet implemented)",
         case_id,
         constraint_id,
         result

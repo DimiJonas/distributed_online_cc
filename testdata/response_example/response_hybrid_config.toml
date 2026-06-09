@@ -1,7 +1,7 @@
-node_id = 1
-tcp_listen_address = "127.0.0.1:8001"
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
 unix_socket = "/tmp/event_listener.sock"
-log_file = "response-consumer.log"
+log_file = "response-hybrid.log"
 
 [[constraints]]
 constraint_role = "ResponseProducer"

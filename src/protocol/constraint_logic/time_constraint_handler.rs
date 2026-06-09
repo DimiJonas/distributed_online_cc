@@ -273,6 +273,10 @@ pub struct TimeStopHandler {
 impl ConstraintHandler for TimeStopHandler {
     impl_constraint_handler_fields!(TimeStopHandler);
 
+    fn configured_peers(&self) -> Vec<SocketAddr> {
+        self.time_start_peers.clone()
+    }
+
     // notify all handlers that this case has ended
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(

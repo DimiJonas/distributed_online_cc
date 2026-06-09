@@ -1,0 +1,15 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_start.sock"
+log_file = "time-start.log"
+
+[[constraints]]
+constraint_role = "TimeStart"
+constraint_id = "time_test"
+event_id = "time_start_event"
+duration = "10s"
+mode = "min"
+
+[default_result_buffer]
+policy = "Revocable"
+duration = "10s"

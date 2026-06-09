@@ -62,8 +62,7 @@ pub async fn watchdog_task(
                         &constraint_id,
                         ConstraintResultType::Satisfied,
                         format!(
-                            "TimerMin: timer ran out after {:?}; stop event never arrived \
-                             (vacuously satisfied, token {})",
+                            "TimerMin: timer ran out after {:?}; stop event never arrived (token {})",
                             duration, token_id
                         ),
                         state.clone(),
@@ -75,7 +74,7 @@ pub async fn watchdog_task(
 
         _ = cancel_token.cancelled() => {
             // handle_message cancelled watchdog because timer stop event arrived
-            log::debug!(
+            log::info!(
                 "time watchdog: cancelled for token {} ({}/{})",
                 token_id, constraint_id, case_id
             );

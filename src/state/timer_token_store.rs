@@ -78,11 +78,11 @@ impl TimerTokenStore {
         Some(token)
     }
 
-    /// Called by a stop-message handler. Atomically takes *both* the live and
-    /// the fired tokens for a (case, constraint), plus whether a start was ever
-    /// seen. Clears them from the store (the index for live, the fired vec for
-    /// fired). The `timer_start_seen` flag is left intact for diagnostics; it's
-    /// cleared by `clear_timer_state` at case end.
+    /// called when the time stop message is received
+    /// takes the live and the fired tokens for a (case, constraint), plus whether a start was ever
+    /// seen
+    /// clears the tokens from the store
+    /// timer_start_seen flag is left intact for diagnostics - its supposed to be cleared by clear_timer_state() at case end
     pub fn take_timer_tokens_for_evaluation(
         &mut self,
         case_id: &CaseId,

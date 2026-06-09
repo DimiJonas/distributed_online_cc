@@ -1,0 +1,10 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_stop.sock"
+log_file = "time-stop.log"
+
+[[constraints]]
+constraint_role = "TimeStop"
+constraint_id = "time_test"
+event_id = "time_stop_event"
+time_start_peers = ["127.0.0.1:8001"]

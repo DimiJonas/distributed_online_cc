@@ -1,0 +1,21 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener.sock"
+log_file = "time-hybrid.log"
+
+[[constraints]]
+constraint_role = "TimeStart"
+constraint_id = "time_test"
+event_id = "time_start_event"
+duration = "10s"
+mode = "min"
+
+[[constraints]]
+constraint_role = "TimeStop"
+constraint_id = "time_test"
+event_id = "time_stop_event"
+time_start_peers = ["127.0.0.1:8003"]
+
+[default_result_buffer]
+policy = "GracePeriod"
+duration = "10s"

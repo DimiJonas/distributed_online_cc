@@ -1,0 +1,20 @@
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener.sock"
+log_file = "order-hybrid.log"
+
+[[constraints]]
+constraint_role = "OrderFirst"
+constraint_id = "order_test"
+event_id = "order_first_event"
+
+[[constraints]]
+constraint_role = "EndActivity"
+constraint_id = "end_activity"
+event_id = "dummy_end_activity"
+
+[[constraints]]
+constraint_role = "OrderSecond"
+constraint_id = "order_test"
+event_id = "order_second_event"
+order_first_peers = ["127.0.0.1:8003"]

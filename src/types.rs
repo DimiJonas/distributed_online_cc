@@ -321,6 +321,7 @@ impl Display for SensorConstraintMode {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")] // makes serialization case insensitive
 pub enum TimeConstraintMode {
     Min,
     Max,
