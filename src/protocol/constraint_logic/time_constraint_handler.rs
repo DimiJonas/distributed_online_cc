@@ -56,8 +56,8 @@ impl ConstraintHandler for TimeStartHandler {
         let token_id = token.id;
 
         {
-            let mut store = state.token_store.lock().unwrap();
-            store.insert_timer_token(token);
+            let mut timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.insert_timer_token(token);
         }
 
         log::info!(
@@ -130,8 +130,8 @@ impl ConstraintHandler for TimeStartHandler {
 
         // evaluate timer data
         let timer_data = {
-            let mut store = state.token_store.lock().unwrap();
-            store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
+            let mut timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
         };
 
         // satisfied if no time start event happened
@@ -193,8 +193,8 @@ impl ConstraintHandler for TimeStartHandler {
             case_id,
             self.constraint_id
         );
-        let mut store = state.token_store.lock().unwrap();
-        store.clear_timer_state(case_id, &self.constraint_id);
+        let mut timer_store = state.timer_token_store.lock().unwrap();
+        timer_store.clear_timer_state(case_id, &self.constraint_id);
     }
 }
 
@@ -394,7 +394,7 @@ mod tests {
 
     fn live_count(state: &AppState) -> usize {
         state
-            .token_store
+            .timer_token_store
             .lock()
             .unwrap()
             .timer_token_count(&CASE.to_string(), &CID.to_string())
@@ -402,7 +402,7 @@ mod tests {
 
     fn fired_count(state: &AppState) -> usize {
         state
-            .token_store
+            .timer_token_store
             .lock()
             .unwrap()
             .fired_timer_token_count(&CASE.to_string(), &CID.to_string())

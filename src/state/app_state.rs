@@ -4,6 +4,7 @@ use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::request_id_container::RequestIdContainer;
 use crate::state::result_send_buffer::ConstraintResultSendBuffer;
+use crate::state::timer_token_store::TimerTokenStore;
 use crate::state::token_store::TokenStore;
 use crate::state::watchdog_cancel_store::WatchdogCancelStore;
 use crate::types::TracedEvent;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub peer_managers: Arc<Mutex<PeerManagerMap>>,
     pub watchdog_cancel_tokens: Arc<Mutex<WatchdogCancelStore>>,
     pub result_send_buffer: Arc<Mutex<ConstraintResultSendBuffer>>,
+    pub timer_token_store: Arc<Mutex<TimerTokenStore>>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             peer_managers: Arc::new(Mutex::new(PeerManagerMap::new())),
             watchdog_cancel_tokens: Arc::new(Mutex::new(WatchdogCancelStore::new())),
             result_send_buffer: Arc::new(Mutex::new(ConstraintResultSendBuffer::new())),
+            timer_token_store: Arc::new(Mutex::new(TimerTokenStore::new())),
         }
     }
 }
