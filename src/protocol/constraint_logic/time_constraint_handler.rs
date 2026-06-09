@@ -15,12 +15,13 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventId, EventTime,
-        TimeConstraintMode, Token, TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
+        EventTime, TimeConstraintMode, Token, TracedEvent,
     },
 };
 
 pub struct TimeStartHandler {
+    pub handler_id: ConstraintHandlerId,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub duration: Duration,
@@ -46,8 +47,8 @@ impl ConstraintHandler for TimeStartHandler {
             event.case_id.clone(),
             self.constraint_id.clone(),
             match self.mode {
-                TimeConstraintMode::Max => ConstraintType::TimerMax,
-                TimeConstraintMode::Min => ConstraintType::TimerMin,
+                TimeConstraintMode::Max => ConstraintType::TimerStartMax,
+                TimeConstraintMode::Min => ConstraintType::TimerStartMin,
             },
             Some(start_time),
             state.config.node_id,
@@ -262,6 +263,7 @@ impl TimeStartHandler {
 }
 
 pub struct TimeStopHandler {
+    pub handler_id: ConstraintHandlerId,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub time_start_peers: Vec<SocketAddr>,
@@ -341,6 +343,7 @@ mod tests {
 
     fn make_handler(duration_secs: u64, mode: TimeConstraintMode) -> TimeStartHandler {
         TimeStartHandler {
+            handler_id: ConstraintHandlerId::TimeStart,
             constraint_id: CID.into(),
             event_id: "start".into(),
             duration: Duration::from_secs(duration_secs),
@@ -356,8 +359,8 @@ mod tests {
         buffer: ResultBufferConfig,
     ) -> AppState {
         let constraint_type = match &mode {
-            TimeConstraintMode::Max => ConstraintType::TimerMax,
-            TimeConstraintMode::Min => ConstraintType::TimerMin,
+            TimeConstraintMode::Max => ConstraintType::TimerStartMax,
+            TimeConstraintMode::Min => ConstraintType::TimerStartMin,
         };
         let mut buffers = HashMap::new();
         buffers.insert(CID.to_string(), buffer);
@@ -650,6 +653,7 @@ mod tests {
     async fn default_trait_finalize_does_nothing() {
         // The TimeStopHandler doesn't override finalize, so it should be a no-op.
         let stop = TimeStopHandler {
+            handler_id: ConstraintHandlerId::TimeStop,
             constraint_id: CID.into(),
             event_id: "stop".into(),
             time_start_peers: vec![],

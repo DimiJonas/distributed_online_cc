@@ -14,11 +14,13 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, Token, TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
+        Token, TracedEvent,
     },
 };
 
 pub struct PrecedenceProducerHandler {
+    pub handler_id: ConstraintHandlerId,
     pub constraint_id: ConstraintId,
     pub event_id: String,
 }
@@ -44,7 +46,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         );
         let inserted = {
             let mut store = state.token_store.lock().unwrap();
-            store.produce_without_overwrite(token.clone())
+            store.produce_without_overwrite(token.clone(), self.handler_id)
         };
 
         if inserted {
@@ -97,6 +99,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             match store.contains_out_token_before(
                 &message.case_id,
                 &self.constraint_id,
+                self.handler_id,
                 consumer_event_time,
             ) {
                 true => (
@@ -127,6 +130,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
 }
 
 pub struct PrecedenceConsumerHandler {
+    pub handler_id: ConstraintHandlerId,
     pub constraint_id: ConstraintId,
     pub event_id: String,
     pub producer_peers: Vec<SocketAddr>,

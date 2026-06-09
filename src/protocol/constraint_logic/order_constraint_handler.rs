@@ -14,11 +14,13 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, Token, TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
+        Token, TracedEvent,
     },
 };
 
 pub struct OrderFirstHandler {
+    pub handler_id: ConstraintHandlerId,
     pub event_id: String,
     pub constraint_id: String,
 }
@@ -33,12 +35,21 @@ impl ConstraintHandler for OrderFirstHandler {
         let order_first_event_time = event.timestamp_utc().unwrap_or(Utc::now());
         if let Some(sperr_token) = {
             let store = state.token_store.lock().unwrap();
-            store.get_in_cloned(&event.case_id, &self.constraint_id)
+            store.get_in_cloned(&event.case_id, &self.constraint_id, self.handler_id)
         } {
             log::info!("blocking token exists - order second event has already happened");
             let order_second_event_time = match sperr_token.event_time {
                 Some(event_time) => event_time,
-                None => sperr_token.created_at,
+                None => {
+                    log::error!(
+                        "order first handler: blocking token exists but it does not have the stop event time recorded - cannot evaluate - removing blocking token"
+                    );
+                    {
+                        let mut store = state.token_store.lock().unwrap();
+                        store.remove_in(&event.case_id, &self.constraint_id, self.handler_id);
+                    }
+                    return;
+                }
             };
 
             if order_first_event_time >= order_second_event_time {
@@ -76,7 +87,7 @@ impl ConstraintHandler for OrderFirstHandler {
 
             let mut store = state.token_store.lock().unwrap();
 
-            match store.get_out_mut(&event.case_id, &self.constraint_id) {
+            match store.get_out_mut(&event.case_id, &self.constraint_id, self.handler_id) {
                 // a token for recording the order first executions already exists
                 Some(recording_token) => recording_token
                     .payload
@@ -93,7 +104,7 @@ impl ConstraintHandler for OrderFirstHandler {
                     recording_token
                         .payload
                         .push_timestamp(order_first_event_time);
-                    store.produce_without_overwrite(recording_token);
+                    store.produce_without_overwrite(recording_token, self.handler_id);
                 }
             };
         };
@@ -150,7 +161,11 @@ impl ConstraintHandler for OrderFirstHandler {
             let mut token_store = state.token_store.lock().unwrap();
 
             // create blocking token if it doesnt exist yet
-            if !token_store.contains_in_token(&message.case_id, &self.constraint_id) {
+            if !token_store.contains_in_token(
+                &message.case_id,
+                &self.constraint_id,
+                self.handler_id,
+            ) {
                 // no token exists - create one
                 let new_blocking_token = Token::new(
                     message.case_id.clone(),
@@ -159,11 +174,11 @@ impl ConstraintHandler for OrderFirstHandler {
                     Some(order_second_event_time),
                     message_token.created_by,
                 );
-                token_store.receive_without_overwrite(new_blocking_token);
+                token_store.receive_without_overwrite(new_blocking_token, self.handler_id);
             }
 
             // retrieve the recording token
-            token_store.remove_out(&message.case_id, &self.constraint_id)
+            token_store.remove_out(&message.case_id, &self.constraint_id, self.handler_id)
         };
 
         // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
@@ -212,11 +227,12 @@ impl ConstraintHandler for OrderFirstHandler {
     // remove the blocking token
     async fn finalize(&self, case_id: &CaseId, state: AppState) {
         let mut token_store = state.token_store.lock().unwrap();
-        token_store.remove_in(case_id, &self.constraint_id);
+        token_store.remove_in(case_id, &self.constraint_id, self.handler_id);
     }
 }
 
 pub struct OrderSecondHandler {
+    pub handler_id: ConstraintHandlerId,
     pub event_id: String,
     pub constraint_id: String,
     pub order_first_peers: Vec<SocketAddr>,
@@ -245,7 +261,8 @@ impl ConstraintHandler for OrderSecondHandler {
         // keep the token store lock for that time, but release lock before notifying order first peers
         let notify_peers = {
             let mut token_store = state.token_store.lock().unwrap();
-            if !token_store.contains_out_token(&event.case_id, &self.constraint_id) {
+            if !token_store.contains_out_token(&event.case_id, &self.constraint_id, self.handler_id)
+            {
                 // its the first time - create a token
                 let remembering_token = Token::new(
                     event.case_id.clone(),
@@ -254,7 +271,7 @@ impl ConstraintHandler for OrderSecondHandler {
                     Some(order_second_event_time),
                     state.config.node_id,
                 );
-                token_store.produce_without_overwrite(remembering_token);
+                token_store.produce_without_overwrite(remembering_token, self.handler_id);
                 true
             } else {
                 false
@@ -282,7 +299,7 @@ impl ConstraintHandler for OrderSecondHandler {
     // remove the blocking token
     async fn finalize(&self, case_id: &CaseId, state: AppState) {
         let mut token_store = state.token_store.lock().unwrap();
-        token_store.remove_out(case_id, &self.constraint_id);
+        token_store.remove_out(case_id, &self.constraint_id, self.handler_id);
     }
 }
 

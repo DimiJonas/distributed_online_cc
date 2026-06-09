@@ -45,6 +45,7 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
 mod tests {
     use tokio::sync::mpsc;
 
+    use crate::types::ConstraintHandlerId;
     use crate::util::test_tools::make_traced_event;
     use crate::{
         app::event_q_processor::spawn_event_processor, config::node_config::ConstraintConfig,
@@ -159,11 +160,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         assert!(
-            state
-                .token_store
-                .lock()
-                .unwrap()
-                .has_open_token(&"case-dispatch".to_string(), &"rp".to_string()),
+            state.token_store.lock().unwrap().has_open_token(
+                &"case-dispatch".to_string(),
+                &"rp".to_string(),
+                ConstraintHandlerId::ResponseProducer
+            ),
             "token should have been created by the handler"
         );
     }

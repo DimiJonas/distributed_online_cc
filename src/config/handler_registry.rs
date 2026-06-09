@@ -14,7 +14,7 @@ use crate::protocol::constraint_logic::sensor_constraint_handler::SensorConstrai
 use crate::protocol::constraint_logic::time_constraint_handler::{
     TimeStartHandler, TimeStopHandler,
 };
-use crate::types::{ConstraintId, EventId};
+use crate::types::{ConstraintHandlerId, ConstraintId, EventId};
 use std::collections::HashMap;
 
 pub struct HandlerRegistry {
@@ -45,6 +45,7 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(ResponseProducerHandler {
+                    handler_id: ConstraintHandlerId::ResponseProducer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -53,6 +54,7 @@ impl HandlerRegistry {
                     event_id,
                     producer_peers,
                 } => Box::new(ResponseConsumerHandler {
+                    handler_id: ConstraintHandlerId::ResponseConsumer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     producer_peers: producer_peers.clone(),
@@ -61,6 +63,7 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(EndActivityHandler {
+                    handler_id: ConstraintHandlerId::EndActivity,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -68,6 +71,7 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(PrecedenceProducerHandler {
+                    handler_id: ConstraintHandlerId::PrecedenceProducer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -76,6 +80,7 @@ impl HandlerRegistry {
                     event_id,
                     producer_peers,
                 } => Box::new(PrecedenceConsumerHandler {
+                    handler_id: ConstraintHandlerId::PrecedenceConsumer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     producer_peers: producer_peers.clone(),
@@ -84,6 +89,7 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(OrderFirstHandler {
+                    handler_id: ConstraintHandlerId::OrderFirst,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -92,6 +98,7 @@ impl HandlerRegistry {
                     event_id,
                     order_first_peers,
                 } => Box::new(OrderSecondHandler {
+                    handler_id: ConstraintHandlerId::OrderSecond,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     order_first_peers: order_first_peers.clone(),
@@ -103,6 +110,7 @@ impl HandlerRegistry {
                     value,
                     mode,
                 } => Box::new(SensorConstraintHandler {
+                    handler_id: ConstraintHandlerId::Sensor,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     attribute_key: attribute_key.clone(),
@@ -115,6 +123,7 @@ impl HandlerRegistry {
                     duration,
                     mode,
                 } => Box::new(TimeStartHandler {
+                    handler_id: ConstraintHandlerId::TimeStart,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     duration: *duration,
@@ -125,6 +134,7 @@ impl HandlerRegistry {
                     event_id,
                     time_start_peers,
                 } => Box::new(TimeStopHandler {
+                    handler_id: ConstraintHandlerId::TimeStop,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     time_start_peers: time_start_peers.clone(),

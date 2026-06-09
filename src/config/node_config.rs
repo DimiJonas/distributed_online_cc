@@ -203,8 +203,8 @@ impl ConstraintConfig {
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
             ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
             ConstraintConfig::TimeStart { mode, .. } => match mode {
-                TimeConstraintMode::Max => ConstraintType::TimerMax,
-                TimeConstraintMode::Min => ConstraintType::TimerMin,
+                TimeConstraintMode::Max => ConstraintType::TimerStartMax,
+                TimeConstraintMode::Min => ConstraintType::TimerStartMin,
             },
             ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
         }

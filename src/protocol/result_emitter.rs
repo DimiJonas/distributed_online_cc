@@ -41,6 +41,12 @@ pub async fn emit_result(
 
     match policy {
         ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
+            log::info!(
+                "immediate result configured for ({}/{}): result is final; sending result {:?}",
+                case_id,
+                constraint_id,
+                result
+            );
             // Immediate: no buffering at all
             {
                 let mut results = state.cc_results.lock().unwrap();
@@ -112,7 +118,7 @@ async fn grace_period_timer(
             };
             if let Some(pending) = pending {
                 log::info!(
-                    "grace period expired for ({}/{}): sending result {:?}",
+                    "grace period expired for ({}/{}): result is now final; sending result {:?}",
                     case_id, constraint_id, pending.result
                 );
                 // cc_results already holds the current value; this

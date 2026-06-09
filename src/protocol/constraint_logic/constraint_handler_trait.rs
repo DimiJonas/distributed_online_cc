@@ -2,13 +2,14 @@ use std::net::SocketAddr;
 
 use crate::network::message_types::CCMessage;
 use crate::state::app_state::AppState;
-use crate::types::{CaseId, TracedEvent};
+use crate::types::{CaseId, ConstraintHandlerId, TracedEvent};
 use async_trait::async_trait;
 
 #[async_trait]
 pub trait ConstraintHandler: Send + Sync {
     fn event_id(&self) -> &str;
     fn constraint_id(&self) -> &str;
+    fn handler_id(&self) -> ConstraintHandlerId;
     // return a list of peers that are configured to be connected to in order to coordinate the constraint check
     fn configured_peers(&self) -> Vec<SocketAddr> {
         vec![]
@@ -38,6 +39,9 @@ macro_rules! impl_constraint_handler_fields {
         }
         fn constraint_id(&self) -> &str {
             &self.constraint_id
+        }
+        fn handler_id(&self) -> $crate::types::ConstraintHandlerId {
+            self.handler_id
         }
     };
 }

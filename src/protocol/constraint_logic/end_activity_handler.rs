@@ -1,10 +1,14 @@
+use std::time::Duration;
+
 use crate::impl_constraint_handler_fields;
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::state::app_state::AppState;
-use crate::types::TracedEvent;
+use crate::types::{ConstraintHandlerId, TracedEvent};
 use async_trait::async_trait;
+use tokio::time::sleep;
 
 pub struct EndActivityHandler {
+    pub handler_id: ConstraintHandlerId,
     pub event_id: String,
     pub constraint_id: String,
 }
@@ -16,9 +20,20 @@ impl ConstraintHandler for EndActivityHandler {
     // notify all handlers that this case has ended
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!("received end event for case {}", event.case_id);
+
+        // TODO: should this also happen after the grace period?
         for handler in state.handlers.all() {
             handler.handle_case_end(&event.case_id, state.clone()).await
         }
+
+        // TODO: make grace period configurable
+        let case_end_grace_period = Duration::from_secs(10);
+        let case_id = event.case_id.clone();
+        tokio::spawn(async move {
+            sleep(case_end_grace_period).await;
+            let mut result_store = state.cc_results.lock().unwrap();
+            result_store.remove_case(&case_id);
+        });
     }
 }
 
@@ -30,7 +45,7 @@ mod tests {
             constraint_handler_trait::ConstraintHandler, end_activity_handler::EndActivityHandler,
         },
         state::app_state::AppState,
-        types::ConstraintType,
+        types::{ConstraintHandlerId, ConstraintType},
         util::test_tools::make_config_with_constraints,
     };
 
@@ -40,6 +55,7 @@ mod tests {
     #[test]
     fn handler_fields_correct() {
         let h = EndActivityHandler {
+            handler_id: ConstraintHandlerId::EndActivity,
             event_id: "end_event".to_string(),
             constraint_id: "ea-1".to_string(),
         };
@@ -77,6 +93,7 @@ mod tests {
         }
 
         let handler = EndActivityHandler {
+            handler_id: ConstraintHandlerId::EndActivity,
             event_id: "end".to_string(),
             constraint_id: "ea".to_string(),
         };
@@ -111,6 +128,7 @@ mod tests {
         }
 
         let handler = EndActivityHandler {
+            handler_id: ConstraintHandlerId::EndActivity,
             event_id: "end".to_string(),
             constraint_id: "ea".to_string(),
         };

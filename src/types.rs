@@ -88,8 +88,8 @@ pub enum ConstraintType {
     Precedence,
     Order,
     Sensor,
-    TimerMax,
-    TimerMin,
+    TimerStartMax,
+    TimerStartMin,
     TimerStop,
 }
 
@@ -102,8 +102,8 @@ impl ConstraintType {
             ConstraintType::Precedence => ConstraintResultType::Satisfied,
             ConstraintType::Order => ConstraintResultType::Satisfied,
             ConstraintType::Sensor => ConstraintResultType::Satisfied,
-            ConstraintType::TimerMax => ConstraintResultType::Satisfied,
-            ConstraintType::TimerMin => ConstraintResultType::TemporarilyViolated,
+            ConstraintType::TimerStartMax => ConstraintResultType::Satisfied,
+            ConstraintType::TimerStartMin => ConstraintResultType::TemporarilyViolated,
             ConstraintType::TimerStop => ConstraintResultType::Satisfied,
         }
     }
@@ -117,11 +117,25 @@ impl Display for ConstraintType {
             Self::Precedence => write!(f, "Precedence"),
             Self::Order => write!(f, "Order"),
             Self::Sensor => write!(f, "Sensor"),
-            Self::TimerMax => write!(f, "Time"),
-            Self::TimerMin => write!(f, "Time"),
+            Self::TimerStartMax => write!(f, "Time"),
+            Self::TimerStartMin => write!(f, "Time"),
             Self::TimerStop => write!(f, "Time"),
         }
     }
+}
+
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+pub enum ConstraintHandlerId {
+    EndActivity,
+    ResponseConsumer,
+    ResponseProducer,
+    PrecedenceProducer,
+    PrecedenceConsumer,
+    OrderFirst,
+    OrderSecond,
+    TimeStart,
+    TimeStop,
+    Sensor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

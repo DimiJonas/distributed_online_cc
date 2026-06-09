@@ -7,10 +7,14 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     state::app_state::AppState,
-    types::{ConstraintId, ConstraintResultType, EventId, SensorConstraintMode, TracedEvent},
+    types::{
+        ConstraintHandlerId, ConstraintId, ConstraintResultType, EventId, SensorConstraintMode,
+        TracedEvent,
+    },
 };
 
 pub struct SensorConstraintHandler {
+    pub handler_id: ConstraintHandlerId,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub attribute_key: String,

@@ -131,7 +131,7 @@ mod tests {
             handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
         },
         state::app_state::AppState,
-        types::ConstraintType,
+        types::{ConstraintHandlerId, ConstraintType},
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state, register_manager,
         },
@@ -252,7 +252,7 @@ mod tests {
                 .token_store
                 .lock()
                 .unwrap()
-                .produce_with_overwrite(token);
+                .produce_with_overwrite(token, ConstraintHandlerId::ResponseProducer);
         }
 
         let delete_msg = CCMessage::delete_token(
@@ -263,13 +263,11 @@ mod tests {
         );
         handle_cc_message(delete_msg, state.clone(), Uuid::new_v4()).await;
 
-        assert!(
-            !state
-                .token_store
-                .lock()
-                .unwrap()
-                .has_open_token(&"c1".to_string(), &"rp".to_string())
-        );
+        assert!(!state.token_store.lock().unwrap().has_open_token(
+            &"c1".to_string(),
+            &"rp".to_string(),
+            ConstraintHandlerId::ResponseProducer
+        ));
     }
 
     /// A CCMessage for an unknown constraint_id is silently ignored.
