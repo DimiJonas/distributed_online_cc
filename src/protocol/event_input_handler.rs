@@ -1,13 +1,20 @@
-use crate::types::{CaseId, TracedEvent};
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::types::{CaseId, EventId, TracedEvent};
 use bytes::BytesMut;
-use process_mining::core::event_data::case_centric::xes::build_ignore_attributes;
 use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
 use process_mining::core::event_data::case_centric::{Trace, XESEditableAttribute};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEvent>) {
+pub async fn handle_event(
+    mut stream: UnixStream,
+    event_q: mpsc::Sender<TracedEvent>,
+    configured_attributes: Arc<HashSet<String>>,
+    configured_events: Arc<HashSet<EventId>>,
+) {
     let mut read_buf = BytesMut::with_capacity(8 * 1024);
 
     loop {
@@ -18,20 +25,8 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
         }
 
         let import_options: XESImportOptions = XESImportOptions {
-            // TODO:
-            // only parse the attributes actually needed
-            ignore_event_attributes_except: Some(build_ignore_attributes(vec![
-                "concept:name",
-                "time:timestamp",
-                "sensor_id",
-                "median_vout",
-                "some:count",
-                "lt_value",
-                "gt_value",
-                "lte_value",
-                "gte_value",
-                "eq_value",
-            ])),
+            // list contains event name, timestamp and the sensor constraint attributes
+            ignore_event_attributes_except: Some((*configured_attributes).clone()),
             // auto-sort events within each trace by timestamp
             sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
             // silence parse warnings in production
@@ -49,12 +44,28 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
                     event,
                 };
 
-                // TODO: filter events to only put events that are configured to be checked (are part of a constraint for this node) into the queue
-
-                if event_q.send(traced_event).await.is_err() {
-                    // error, shut down event handler worker task
-                    log::error!("event input handler dropped, unable to send event");
-                    break;
+                if let Some(event_id) = traced_event.name() {
+                    if configured_events.contains(event_id) {
+                        match event_q.send(traced_event).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                // error, shut down event handler worker task
+                                log::error!(
+                                    "event input handler dropped, unable to send event: {}",
+                                    e
+                                );
+                                // TODO: trigger respawn of event input handler
+                                break;
+                            }
+                        }
+                    } else {
+                        log::warn!(
+                            "event {} received on event listener socket, but no constraint was configured for it",
+                            event_id
+                        );
+                    }
+                } else {
+                    log::warn!("event does not contain an event_id (concept:name). ignoring");
                 }
             }
         }
@@ -62,7 +73,6 @@ pub async fn handle_event(mut stream: UnixStream, event_q: mpsc::Sender<TracedEv
 }
 
 fn get_trace_id(trace: &Trace) -> String {
-    // TODO: handle events from Isa if the case id is an event attribute named 'case:concept:name'
     trace
         .attributes
         .get_by_key("concept:name")
@@ -73,10 +83,29 @@ fn get_trace_id(trace: &Trace) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use tokio::{io::AsyncWriteExt, net::UnixListener, sync::mpsc};
 
     use crate::protocol::event_input_handler::handle_event;
+    use crate::types::EventId;
     use crate::util::test_tools::minimal_xes;
+
+    fn no_filters() -> (Arc<HashSet<String>>, Arc<HashSet<EventId>>) {
+        (Arc::new(HashSet::new()), Arc::new(HashSet::new()))
+    }
+
+    fn with_event_filter(events: &[&str]) -> (Arc<HashSet<String>>, Arc<HashSet<EventId>>) {
+        let event_set = events.iter().map(|s| s.to_string()).collect();
+        (default_attributes(), Arc::new(event_set))
+    }
+
+    fn default_attributes() -> Arc<HashSet<String>> {
+        Arc::new(HashSet::from([
+            "concept:name".to_string(),
+            "time:timestamp".to_string(),
+        ]))
+    }
 
     /// A valid XES document produces a TracedEvent on the queue.
     #[tokio::test]
@@ -86,10 +115,11 @@ mod tests {
 
         let listener = UnixListener::bind(socket_path).unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (filter_attributes, filter_events) = with_event_filter(&["event-a"]);
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events).await;
         });
 
         let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
@@ -118,10 +148,11 @@ mod tests {
 
         let listener = UnixListener::bind(socket_path).unwrap();
         let (event_tx, _rx) = mpsc::channel(16);
+        let (filter_attributes, filter_events) = no_filters();
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events).await;
         });
 
         let client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
@@ -139,10 +170,11 @@ mod tests {
 
         let listener = UnixListener::bind(socket_path).unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (filter_attributes, filter_events) = with_event_filter(&["e1", "e2"]);
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events).await;
         });
 
         let xes = r#"<?xml version="1.0" encoding="UTF-8" ?>
@@ -191,13 +223,13 @@ mod tests {
 
         let listener = UnixListener::bind(socket_path).unwrap();
         let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (filter_attributes, filter_events) = with_event_filter(&["first", "second"]);
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events).await;
         });
 
-        // Two events in reverse timestamp order.
         let xes = r#"<?xml version="1.0" encoding="UTF-8" ?>
 <log>
   <trace>
@@ -230,6 +262,37 @@ mod tests {
         assert_eq!(first.name().unwrap_or(""), "first");
         assert_eq!(second.name().unwrap_or(""), "second");
 
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    /// Events not in the filter are not enqueued.
+    #[tokio::test]
+    async fn filtered_out_events_are_not_enqueued() {
+        let socket_path = "/tmp/test_eih_filter.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        // only "allowed-event" passes the filter
+        let (filter_attributes, filter_events) = with_event_filter(&["allowed-event"]);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+        });
+
+        let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        client
+            .write_all(minimal_xes("case-xes", "blocked-event").as_bytes())
+            .await
+            .unwrap();
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(200), event_rx.recv()).await;
+
+        assert!(result.is_err(), "expected timeout but got an event");
+
+        drop(client);
         let _ = std::fs::remove_file(socket_path);
     }
 }

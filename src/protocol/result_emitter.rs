@@ -196,7 +196,7 @@ async fn call_finalizers(case_id: &CaseId, constraint_id: &ConstraintId, state: 
     let handlers = state.handlers.clone();
     let handler_refs = handlers.get_by_constraint_id(constraint_id);
     for handler in handler_refs {
-        handler.finalize(case_id, state.clone()).await;
+        handler.clean_up_state(case_id, state.clone()).await;
     }
 }
 

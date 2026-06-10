@@ -225,7 +225,7 @@ impl ConstraintHandler for OrderFirstHandler {
     }
 
     // remove the blocking token
-    async fn finalize(&self, case_id: &CaseId, state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         let mut token_store = state.token_store.lock().unwrap();
         token_store.remove_in(case_id, &self.constraint_id, self.handler_id);
     }
@@ -297,7 +297,7 @@ impl ConstraintHandler for OrderSecondHandler {
     }
 
     // remove the blocking token
-    async fn finalize(&self, case_id: &CaseId, state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         let mut token_store = state.token_store.lock().unwrap();
         token_store.remove_out(case_id, &self.constraint_id, self.handler_id);
     }

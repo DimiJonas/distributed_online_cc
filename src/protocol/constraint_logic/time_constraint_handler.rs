@@ -187,7 +187,7 @@ impl ConstraintHandler for TimeStartHandler {
         }
     }
 
-    async fn finalize(&self, case_id: &CaseId, state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::debug!(
             "time start handler: finalize ({}/{}) - clearing timer state",
             case_id,
@@ -646,7 +646,9 @@ mod tests {
         handler.handle_event(&event, state.clone()).await;
         assert_eq!(live_count(&state), 1);
 
-        handler.finalize(&CASE.to_string(), state.clone()).await;
+        handler
+            .clean_up_state(&CASE.to_string(), state.clone())
+            .await;
         assert_eq!(live_count(&state), 0);
         assert_eq!(fired_count(&state), 0);
     }
@@ -664,6 +666,6 @@ mod tests {
         };
         let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
         // Should not panic, should not touch token_store
-        stop.finalize(&CASE.to_string(), state.clone()).await;
+        stop.clean_up_state(&CASE.to_string(), state.clone()).await;
     }
 }

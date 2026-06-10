@@ -25,7 +25,7 @@ pub trait ConstraintHandler: Send + Sync {
     async fn handle_case_end(&self, _case_id: &CaseId, _state: AppState) {}
 
     /// clean up state after constraint check result was finalized
-    async fn finalize(&self, _case_id: &CaseId, _state: AppState) {}
+    async fn clean_up_state(&self, _case_id: &CaseId, _state: AppState) {}
 }
 
 // macro that implements the functions event_id() and constraint_id()

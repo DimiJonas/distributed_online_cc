@@ -26,13 +26,19 @@ impl ConstraintHandler for EndActivityHandler {
             handler.handle_case_end(&event.case_id, state.clone()).await
         }
 
+        // TODO: what if no end activity is configured/received on a node?
+        //  -> need some kind of end signal handling
+        //      -> should be propagated through the overlay
         // TODO: make grace period configurable
         let case_end_grace_period = Duration::from_secs(10);
         let case_id = event.case_id.clone();
         tokio::spawn(async move {
             sleep(case_end_grace_period).await;
+            log::info!("closing case after case end grace period - removing results from store");
             let mut result_store = state.cc_results.lock().unwrap();
             result_store.remove_case(&case_id);
+
+            // TODO: remember case id for some time so a super late event for that case does not open the case again
         });
     }
 }

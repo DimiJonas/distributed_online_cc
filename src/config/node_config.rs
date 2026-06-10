@@ -3,7 +3,7 @@ use crate::types::{
     ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode, TimeConstraintMode,
 };
 use serde::{Deserialize, Serialize, de};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -52,6 +52,26 @@ impl NodeConfig {
             .get(constraint_id)
             .unwrap_or(&self.default_result_buffer)
             .to_policy()
+    }
+
+    pub fn build_event_attribute_list(&self) -> HashSet<String> {
+        let mut attributes =
+            HashSet::from(["concept:name".to_string(), "time:timestamp".to_string()]);
+        attributes.extend(self.constraints.iter().filter_map(|c| {
+            if let ConstraintConfig::Sensor { attribute_key, .. } = c {
+                Some(attribute_key.clone())
+            } else {
+                None
+            }
+        }));
+        attributes
+    }
+
+    pub fn build_event_list(&self) -> HashSet<EventId> {
+        self.constraints
+            .iter()
+            .map(|c| c.event_id().to_string())
+            .collect()
     }
 }
 
@@ -207,6 +227,21 @@ impl ConstraintConfig {
                 TimeConstraintMode::Min => ConstraintType::TimerStartMin,
             },
             ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
+        }
+    }
+
+    pub fn event_id(&self) -> &str {
+        match self {
+            ConstraintConfig::ResponseProducer { event_id, .. } => event_id,
+            ConstraintConfig::ResponseConsumer { event_id, .. } => event_id,
+            ConstraintConfig::EndActivity { event_id, .. } => event_id,
+            ConstraintConfig::PrecedenceProducer { event_id, .. } => event_id,
+            ConstraintConfig::PrecedenceConsumer { event_id, .. } => event_id,
+            ConstraintConfig::OrderFirst { event_id, .. } => event_id,
+            ConstraintConfig::OrderSecond { event_id, .. } => event_id,
+            ConstraintConfig::Sensor { event_id, .. } => event_id,
+            ConstraintConfig::TimeStart { event_id, .. } => event_id,
+            ConstraintConfig::TimeStop { event_id, .. } => event_id,
         }
     }
 }
