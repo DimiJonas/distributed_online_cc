@@ -31,8 +31,8 @@ impl ConstraintHandler for PrecedenceProducerHandler {
 
     // produce non overwriting token
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::debug!(
-            "received configured event for constraint {}; event={}",
+        log::info!(
+            "precedence producer handler: received configured event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -45,16 +45,16 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             state.config.node_id,
         );
         let inserted = {
-            let mut store = state.token_store.lock().unwrap();
-            store.produce_without_overwrite(token.clone(), self.handler_id)
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.produce_without_overwrite(token.clone(), self.handler_id)
         };
 
         if inserted {
-            log::info!("produced token: {}", token);
-            log::debug!("produced token: {:?}", token);
+            log::info!("precedence producer handler: produced token: {}", token);
+            log::debug!("token={:?}", token);
         } else {
             log::info!(
-                "did not produce token because there already exists one for the this case ({})",
+                "precedence producer handler: did not produce token because there already exists one for the this case ({})",
                 event.case_id
             );
         }
@@ -63,15 +63,11 @@ impl ConstraintHandler for PrecedenceProducerHandler {
     // check if token for constraint exists (producer event happened before consumer event) and create constraint check result
     async fn handle_message(&self, state: AppState, message: CCMessage) {
         log::info!(
-            "received message for constraint {}; message={}",
+            "precedence producer handler: received message for constraint {}; message={}",
             self.constraint_id,
             message
         );
-        log::debug!(
-            "received message for constraint {}; message={:?}",
-            self.constraint_id,
-            message
-        );
+        log::debug!("message={:?}", message);
 
         if message.message_type != CCMessageType::TriggerCheck {
             log::warn!(
@@ -86,17 +82,17 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             if let Some(event_time) = message.timestamp {
                 event_time
             } else {
-                log::warn!(
-                    "cc trigger message did not contain a timestamp. considering current time as consumer event time. message={}",
+                log::error!(
+                    "precedence producer handler: cc trigger message did not contain a timestamp. cannot evaluate the constraint. message={}",
                     message
                 );
-                Utc::now()
+                return;
             }
         };
 
         let (constraint_result, info) = {
-            let store = state.token_store.lock().unwrap();
-            match store.contains_out_token_before(
+            let token_out = state.token_out.lock().unwrap();
+            match token_out.contains_out_token_before(
                 &message.case_id,
                 &self.constraint_id,
                 self.handler_id,
@@ -127,6 +123,22 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         )
         .await;
     }
+
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "precedence producer handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+        }
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+        }
+    }
 }
 
 pub struct PrecedenceConsumerHandler {
@@ -145,8 +157,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
     }
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::debug!(
-            "received configured event for constraint {}; event={}",
+        log::info!(
+            "precedence consumer handler: received configured event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -155,12 +167,16 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             if let Some(timestamp) = event.timestamp_utc() {
                 timestamp
             } else {
+                log::warn!(
+                    "precedence consumer handler: precedence consumer event did not contain a timestamp - using current time as event time"
+                );
                 Utc::now()
             }
         };
 
-        log::info!("notifying precedence producer peers that consumer event happened");
-        log::debug!("precedence producer peers: {:?}", self.producer_peers);
+        log::info!(
+            "precedence consumer handler: notifying precedence producer peers that consumer event happened"
+        );
         for &peer_addr in self.producer_peers.iter() {
             send_cc_trigger_message(
                 peer_addr,
@@ -188,7 +204,7 @@ async fn send_cc_trigger_message(
     ));
 
     log::info!(
-        "sending cc trigger message for constraint {} to peer {}",
+        "precedence consumer handler: sending cc trigger message for constraint {} to peer {}",
         constraint_id,
         peer_address
     );

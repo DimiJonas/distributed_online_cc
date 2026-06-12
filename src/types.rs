@@ -1,8 +1,8 @@
-use std::{fmt::Display, net::SocketAddr, str::FromStr};
+use std::{fmt::Display, net::SocketAddr};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
-use serde::{Deserialize, Serialize, de};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type PeerId = u8;
@@ -91,6 +91,13 @@ pub enum ConstraintType {
     TimerStartMax,
     TimerStartMin,
     TimerStop,
+    NotCoexistence,
+    AppearanceMin,
+    AppearanceMax,
+    AppearanceTrigger,
+    DistributedAppearanceCounter,
+    DistributedAppearanceTriggerMin,
+    DistributedAppearanceTriggerMax,
 }
 
 impl ConstraintType {
@@ -105,6 +112,15 @@ impl ConstraintType {
             ConstraintType::TimerStartMax => ConstraintResultType::Satisfied,
             ConstraintType::TimerStartMin => ConstraintResultType::TemporarilyViolated,
             ConstraintType::TimerStop => ConstraintResultType::Satisfied,
+            ConstraintType::NotCoexistence => ConstraintResultType::Satisfied,
+            ConstraintType::AppearanceMax => ConstraintResultType::Satisfied,
+            ConstraintType::AppearanceMin => ConstraintResultType::TemporarilyViolated,
+            ConstraintType::AppearanceTrigger => ConstraintResultType::Satisfied,
+            ConstraintType::DistributedAppearanceCounter => ConstraintResultType::Satisfied,
+            ConstraintType::DistributedAppearanceTriggerMin => {
+                ConstraintResultType::TemporarilyViolated
+            }
+            ConstraintType::DistributedAppearanceTriggerMax => ConstraintResultType::Satisfied,
         }
     }
 }
@@ -120,6 +136,13 @@ impl Display for ConstraintType {
             Self::TimerStartMax => write!(f, "Time"),
             Self::TimerStartMin => write!(f, "Time"),
             Self::TimerStop => write!(f, "Time"),
+            Self::NotCoexistence => write!(f, "NotCoexistence"),
+            Self::AppearanceMax => write!(f, "Appearance"),
+            Self::AppearanceMin => write!(f, "Appearance"),
+            Self::AppearanceTrigger => write!(f, "Appearance"),
+            Self::DistributedAppearanceCounter => write!(f, "DistributedAppearance"),
+            Self::DistributedAppearanceTriggerMin => write!(f, "DistributedAppearance"),
+            Self::DistributedAppearanceTriggerMax => write!(f, "DistributedAppearance"),
         }
     }
 }
@@ -136,6 +159,11 @@ pub enum ConstraintHandlerId {
     TimeStart,
     TimeStop,
     Sensor,
+    NotCoexistence,
+    AppearanceCounter,
+    AppearanceTrigger,
+    DistributedAppearanceCounter,
+    DistributedAppearanceTrigger,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +206,7 @@ pub enum TokenPayload {
     #[default]
     None,
     Timestamps(Vec<EventTime>),
-    // TimerTokens,
+    ExecutionPermission(bool),
 }
 
 impl TokenPayload {
@@ -188,13 +216,41 @@ impl TokenPayload {
             TokenPayload::None => {
                 *self = TokenPayload::Timestamps(vec![t]);
             }
+            TokenPayload::ExecutionPermission { .. } => {}
         }
     }
 
     pub fn timestamps(&self) -> &[EventTime] {
         match self {
             TokenPayload::Timestamps(v) => v.as_slice(),
-            TokenPayload::None => &[],
+            _ => &[],
+        }
+    }
+
+    pub fn grant_execution_permission(&mut self) {
+        match self {
+            TokenPayload::ExecutionPermission(b) => *b = true,
+            TokenPayload::None => {
+                *self = TokenPayload::ExecutionPermission(true);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn deny_execution_permission(&mut self) {
+        match self {
+            TokenPayload::ExecutionPermission(b) => *b = false,
+            TokenPayload::None => {
+                *self = TokenPayload::ExecutionPermission(false);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn execution_is_allowed(&self) -> bool {
+        match self {
+            TokenPayload::ExecutionPermission(b) => *b,
+            _ => false,
         }
     }
 }
@@ -260,71 +316,6 @@ impl Display for Token {
             self.id, self.case_id, self.constraint_id
         )
     }
-}
-
-#[derive(Debug, PartialEq, Serialize, Clone)]
-pub enum SensorConstraintMode {
-    Lt,
-    Gt,
-    Lte,
-    Gte,
-    Eq,
-}
-
-impl SensorConstraintMode {
-    pub fn evaluate(&self, a: f64, b: f64) -> bool {
-        match self {
-            Self::Lt => a < b,
-            Self::Gt => a > b,
-            Self::Lte => a <= b,
-            Self::Gte => a >= b,
-            Self::Eq => a == b,
-        }
-    }
-}
-
-impl FromStr for SensorConstraintMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "<=" => Ok(Self::Lte),
-            "=<" => Ok(Self::Lte),
-            ">=" => Ok(Self::Gte),
-            "=>" => Ok(Self::Gte),
-            "<" => Ok(Self::Lt),
-            ">" => Ok(Self::Gt),
-            "=" => Ok(Self::Eq),
-            "==" => Ok(Self::Eq),
-            other => Err(format!("Unknown operator: {other:?}")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for SensorConstraintMode {
-    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(de::Error::custom)
-    }
-}
-
-impl Display for SensorConstraintMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Lt => write!(f, "<"),
-            Self::Gt => write!(f, ">"),
-            Self::Lte => write!(f, "<="),
-            Self::Gte => write!(f, ">="),
-            Self::Eq => write!(f, "=="),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")] // makes serialization case insensitive
-pub enum TimeConstraintMode {
-    Min,
-    Max,
 }
 
 #[cfg(test)]

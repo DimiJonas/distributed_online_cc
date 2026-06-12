@@ -48,8 +48,8 @@ impl ConstraintHandler for ResponseProducerHandler {
 
     // create token that event happened
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::debug!(
-            "received configured event for constraint {}; event={}",
+        log::info!(
+            "response producer handler: received configured event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -62,26 +62,22 @@ impl ConstraintHandler for ResponseProducerHandler {
             state.config.node_id,
         );
         {
-            let mut store = state.token_store.lock().unwrap();
-            store.produce_with_overwrite(token.clone(), self.handler_id);
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.produce_with_overwrite(token.clone(), self.handler_id);
         }
 
-        log::info!("produced token: {}", token);
-        log::debug!("produced token: {:?}", token);
+        log::info!("response producer handler: produced token: {}", token);
+        log::debug!("token={:?}", token);
     }
 
     // delete produced token of events that happened before the timestamp contained in the message
     async fn handle_message(&self, state: AppState, message: CCMessage) {
         log::info!(
-            "received message for constraint {}; message={}",
+            "response producer handler: received message for constraint {}; message={}",
             self.constraint_id,
             message
         );
-        log::debug!(
-            "received message for constraint {}; message={:?}",
-            self.constraint_id,
-            message
-        );
+        log::debug!("message={:?}", message);
 
         if message.message_type != CCMessageType::DeleteToken {
             log::warn!(
@@ -97,43 +93,43 @@ impl ConstraintHandler for ResponseProducerHandler {
                 event_time
             } else {
                 log::error!(
-                    "delete token message did not contain a timestamp. not deleting any tokens. message={}",
+                    "response producer handler: delete token message did not contain a timestamp. not deleting any tokens. message={}",
                     message
                 );
                 return;
             }
         };
-        let mut store = state.token_store.lock().unwrap();
-        if let Some(token) = store.remove_out_before(
+        let mut token_out = state.token_out.lock().unwrap();
+        if let Some(token) = token_out.remove_out_before(
             &message.case_id,
             &self.constraint_id,
             self.handler_id,
             consumer_event_time,
         ) {
-            log::info!("removed token {}", token);
-            log::debug!("removed token {:?}", token);
+            log::info!("response producer handler: removed token {}", token);
+            log::debug!("token={:?}", token);
         }
     }
 
     // check if token still exists and set constraint result accordingly
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
         log::info!(
-            "received case end signal for constraint {}; case={}",
+            "response producer handler: received case end signal for constraint {}; case={}",
             self.constraint_id,
             case_id
         );
 
         // create constraint result (with info message)
         let (constraint_result, token) = {
-            let mut token_store = state.token_store.lock().unwrap();
+            let mut token_out = state.token_out.lock().unwrap();
             let constraint_result: ConstraintResultType =
-                match token_store.has_open_token(case_id, &self.constraint_id, self.handler_id) {
+                match token_out.has_open_token(case_id, &self.constraint_id, self.handler_id) {
                     true => ConstraintResultType::Violated,
                     false => ConstraintResultType::Satisfied,
                 };
             (
                 constraint_result,
-                token_store.remove_out(case_id, &self.constraint_id, self.handler_id),
+                token_out.remove_out(case_id, &self.constraint_id, self.handler_id),
             )
         };
         let info = match token {
@@ -152,6 +148,22 @@ impl ConstraintHandler for ResponseProducerHandler {
             state.clone(),
         )
         .await;
+    }
+
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "response producer handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+        }
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -172,8 +184,8 @@ impl ConstraintHandler for ResponseConsumerHandler {
 
     // trigger token deletion on all configured response producers
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::debug!(
-            "received configured event for constraint {}; event={}",
+        log::info!(
+            "response consumer handler: received configured event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -182,12 +194,16 @@ impl ConstraintHandler for ResponseConsumerHandler {
             if let Some(timestamp) = event.timestamp_utc() {
                 timestamp
             } else {
+                log::warn!(
+                    "response consumer handler: response consumer event did not contain a timestamp - using current time as event time"
+                );
                 Utc::now()
             }
         };
 
-        log::info!("triggering token deletion on response producer peers");
-        log::debug!("response producer peers: {:?}", self.producer_peers);
+        log::info!(
+            "response consumer handler: triggering token deletion on response producer peers"
+        );
         for &peer_addr in self.producer_peers.iter() {
             send_delete_token(
                 peer_addr,
@@ -218,7 +234,10 @@ async fn send_delete_token(
     ));
 
     // send message
-    log::info!("sending delete token message to {}", peer_addr);
+    log::info!(
+        "response consumer handler: sending delete token message to {}",
+        peer_addr
+    );
     send_to_peer(peer_addr, message, state.clone()).await;
 }
 
@@ -278,7 +297,7 @@ mod tests {
             .handle_event(&make_traced_event("c1", "produce"), state.clone())
             .await;
 
-        assert!(state.token_store.lock().unwrap().has_open_token(
+        assert!(state.token_out.lock().unwrap().has_open_token(
             &"c1".to_string(),
             &"rp".to_string(),
             handler.handler_id()
@@ -306,7 +325,7 @@ mod tests {
         handler
             .handle_event(&make_traced_event("c2", "produce"), state.clone())
             .await;
-        assert!(state.token_store.lock().unwrap().has_open_token(
+        assert!(state.token_out.lock().unwrap().has_open_token(
             &"c2".to_string(),
             &"rp".to_string(),
             handler.handler_id()
@@ -320,7 +339,7 @@ mod tests {
         );
         handler.handle_message(state.clone(), delete_msg).await;
 
-        assert!(!state.token_store.lock().unwrap().has_open_token(
+        assert!(!state.token_out.lock().unwrap().has_open_token(
             &"c2".to_string(),
             &"rp".to_string(),
             handler.handler_id()
@@ -420,7 +439,7 @@ mod tests {
         let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
         handler.handle_message(state.clone(), trigger).await;
 
-        assert!(state.token_store.lock().unwrap().has_open_token(
+        assert!(state.token_out.lock().unwrap().has_open_token(
             &"c5".to_string(),
             &"rp".to_string(),
             handler.handler_id()

@@ -2,14 +2,12 @@ use crate::types::{CaseId, ConstraintHandlerId, ConstraintId, EventTime, Token};
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
-pub struct TokenStore {
+pub struct TokenOutStore {
     // tokens produced by the node destined to be pushed to or pulled by other nodes
     token_out: HashMap<(CaseId, ConstraintId, ConstraintHandlerId), Token>,
-    // tokens pushed to or pulled by this node from another node
-    token_in: HashMap<(CaseId, ConstraintId, ConstraintHandlerId), Token>,
 }
 
-impl TokenStore {
+impl TokenOutStore {
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,37 +54,6 @@ impl TokenStore {
         inserted
     }
 
-    /// puts the token in token_in overwriting existing tokens
-    pub fn receive_with_overwrite(&mut self, token: Token, handler_id: ConstraintHandlerId) {
-        let case_id = token.case_id.clone();
-        let constraint_id = token.constraint_id.clone();
-        if self.contains_in_token(&case_id, &constraint_id, handler_id) {
-            log::warn!(
-                "receive: token for ({}, {}) already exists, overwriting",
-                case_id,
-                constraint_id
-            );
-        }
-        self.token_in
-            .insert((case_id, constraint_id, handler_id), token);
-    }
-
-    /// puts the token in token_in NOT overwriting existing tokens
-    pub fn receive_without_overwrite(&mut self, token: Token, handler_id: ConstraintHandlerId) {
-        let case_id = token.case_id.clone();
-        let constraint_id = token.constraint_id.clone();
-        if self.contains_in_token(&case_id, &constraint_id, handler_id) {
-            log::warn!(
-                "receive: token for ({}, {}) already exists, keeping old token",
-                case_id,
-                constraint_id
-            );
-        } else {
-            self.token_in
-                .insert((case_id, constraint_id, handler_id), token);
-        }
-    }
-
     pub fn remove_out(
         &mut self,
         case_id: &CaseId,
@@ -124,16 +91,6 @@ impl TokenStore {
             }
         }
         None
-    }
-
-    pub fn remove_in(
-        &mut self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<Token> {
-        self.token_in
-            .remove(&(case_id.clone(), constraint_id.clone(), handler_id))
     }
 
     pub fn contains_out_token(
@@ -190,37 +147,6 @@ impl TokenStore {
             .cloned()
     }
 
-    pub fn get_in_mut(
-        &mut self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<&mut Token> {
-        self.token_in
-            .get_mut(&(case_id.clone(), constraint_id.clone(), handler_id))
-    }
-
-    pub fn get_in_cloned(
-        &self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<Token> {
-        self.token_in
-            .get(&(case_id.clone(), constraint_id.clone(), handler_id))
-            .cloned()
-    }
-
-    pub fn contains_in_token(
-        &self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> bool {
-        self.token_in
-            .contains_key(&(case_id.clone(), constraint_id.clone(), handler_id))
-    }
-
     // are there still open obligations e.g. are there tokens in token_out
     pub fn has_open_token(
         &self,
@@ -240,7 +166,7 @@ mod tests {
 
     #[test]
     fn produce_and_has_open_token() {
-        let mut store = TokenStore::new();
+        let mut store = TokenOutStore::new();
         store.produce_with_overwrite(
             make_token("case-1", "constraint-a"),
             ConstraintHandlerId::ResponseProducer,
@@ -254,7 +180,7 @@ mod tests {
 
     #[test]
     fn remove_out_returns_token_and_clears_it() {
-        let mut store = TokenStore::new();
+        let mut store = TokenOutStore::new();
         store.produce_with_overwrite(
             make_token("case-1", "constraint-a"),
             ConstraintHandlerId::ResponseProducer,

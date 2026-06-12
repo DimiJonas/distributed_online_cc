@@ -32,20 +32,28 @@ impl ConstraintHandler for OrderFirstHandler {
     /// record event execution (remember last execution (or all executions) of event before receiving the message from order second for later check with timestamp)
     /// check if the token from order second is existent
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
+        log::info!(
+            "order first handler: received configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
+        );
+
         let order_first_event_time = event.timestamp_utc().unwrap_or(Utc::now());
-        if let Some(sperr_token) = {
-            let store = state.token_store.lock().unwrap();
-            store.get_in_cloned(&event.case_id, &self.constraint_id, self.handler_id)
+        if let Some(blocking_token) = {
+            let token_in = state.token_in.lock().unwrap();
+            token_in.get_in_cloned(&event.case_id, &self.constraint_id, self.handler_id)
         } {
-            log::info!("blocking token exists - order second event has already happened");
-            let order_second_event_time = match sperr_token.event_time {
+            log::info!(
+                "order first handler: blocking token exists - order second event has already happened"
+            );
+            let order_second_event_time = match blocking_token.event_time {
                 Some(event_time) => event_time,
                 None => {
                     log::error!(
                         "order first handler: blocking token exists but it does not have the stop event time recorded - cannot evaluate - removing blocking token"
                     );
                     {
-                        let mut store = state.token_store.lock().unwrap();
+                        let mut store = state.token_in.lock().unwrap();
                         store.remove_in(&event.case_id, &self.constraint_id, self.handler_id);
                     }
                     return;
@@ -83,11 +91,13 @@ impl ConstraintHandler for OrderFirstHandler {
             }
         } else {
             // no order-second-token received yet - just record the event time in the recording token in token out token
-            log::info!("no blocking token exists - order second event has not happened yet");
+            log::info!(
+                "order first handler: no blocking token exists - order second event has not happened yet"
+            );
 
-            let mut store = state.token_store.lock().unwrap();
+            let mut token_out = state.token_out.lock().unwrap();
 
-            match store.get_out_mut(&event.case_id, &self.constraint_id, self.handler_id) {
+            match token_out.get_out_mut(&event.case_id, &self.constraint_id, self.handler_id) {
                 // a token for recording the order first executions already exists
                 Some(recording_token) => recording_token
                     .payload
@@ -104,7 +114,7 @@ impl ConstraintHandler for OrderFirstHandler {
                     recording_token
                         .payload
                         .push_timestamp(order_first_event_time);
-                    store.produce_without_overwrite(recording_token, self.handler_id);
+                    token_out.produce_without_overwrite(recording_token, self.handler_id);
                 }
             };
         };
@@ -115,15 +125,11 @@ impl ConstraintHandler for OrderFirstHandler {
     /// set the received (pushed) token so that all future order first events can be evaluated as a violation
     async fn handle_message(&self, state: AppState, message: CCMessage) {
         log::info!(
-            "received message for constraint {}; message={}",
+            "order first handler: received message for constraint {}; message={}",
             self.constraint_id,
             message
         );
-        log::debug!(
-            "received message for constraint {}; message={:?}",
-            self.constraint_id,
-            message
-        );
+        log::debug!("message={:?}", message);
 
         if message.message_type != CCMessageType::PushToken {
             log::warn!(
@@ -150,22 +156,18 @@ impl ConstraintHandler for OrderFirstHandler {
             Some(token) => token,
             None => {
                 log::error!(
-                    "pushtoken message did not contain a token! message: {}",
+                    "order first handler: pushtoken message did not contain a token! message: {}",
                     message
                 );
                 return;
             }
         };
 
-        let recording_token = {
-            let mut token_store = state.token_store.lock().unwrap();
-
+        {
             // create blocking token if it doesnt exist yet
-            if !token_store.contains_in_token(
-                &message.case_id,
-                &self.constraint_id,
-                self.handler_id,
-            ) {
+            let mut token_in = state.token_in.lock().unwrap();
+
+            if !token_in.contains_in_token(&message.case_id, &self.constraint_id, self.handler_id) {
                 // no token exists - create one
                 let new_blocking_token = Token::new(
                     message.case_id.clone(),
@@ -174,11 +176,13 @@ impl ConstraintHandler for OrderFirstHandler {
                     Some(order_second_event_time),
                     message_token.created_by,
                 );
-                token_store.receive_without_overwrite(new_blocking_token, self.handler_id);
+                token_in.receive_without_overwrite(new_blocking_token, self.handler_id);
             }
-
+        }
+        let recording_token = {
             // retrieve the recording token
-            token_store.remove_out(&message.case_id, &self.constraint_id, self.handler_id)
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(&message.case_id, &self.constraint_id, self.handler_id)
         };
 
         // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
@@ -226,8 +230,19 @@ impl ConstraintHandler for OrderFirstHandler {
 
     // remove the blocking token
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        let mut token_store = state.token_store.lock().unwrap();
-        token_store.remove_in(case_id, &self.constraint_id, self.handler_id);
+        log::info!(
+            "order first handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+        }
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -249,20 +264,28 @@ impl ConstraintHandler for OrderSecondHandler {
     /// create token and push it on the order first peers
     /// remember that a token was pushed on the order first peers by using a (meta) token and checking its existence
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::debug!(
-            "received configured event for constraint {}; event={}",
+        log::info!(
+            "order second handler: received configured event for constraint {}; event={}",
             self.constraint_id,
             event
         );
 
-        let order_second_event_time = event.timestamp_utc().unwrap_or(Utc::now());
+        let order_second_event_time = {
+            if let Some(timestamp) = event.timestamp_utc() {
+                timestamp
+            } else {
+                log::warn!(
+                    "order second handler: precedence consumer event did not contain a timestamp - using current time as event time"
+                );
+                Utc::now()
+            }
+        };
 
         // check if this is the first time receiving such event for the case
         // keep the token store lock for that time, but release lock before notifying order first peers
         let notify_peers = {
-            let mut token_store = state.token_store.lock().unwrap();
-            if !token_store.contains_out_token(&event.case_id, &self.constraint_id, self.handler_id)
-            {
+            let mut token_out = state.token_out.lock().unwrap();
+            if !token_out.contains_out_token(&event.case_id, &self.constraint_id, self.handler_id) {
                 // its the first time - create a token
                 let remembering_token = Token::new(
                     event.case_id.clone(),
@@ -271,7 +294,7 @@ impl ConstraintHandler for OrderSecondHandler {
                     Some(order_second_event_time),
                     state.config.node_id,
                 );
-                token_store.produce_without_overwrite(remembering_token, self.handler_id);
+                token_out.produce_without_overwrite(remembering_token, self.handler_id);
                 true
             } else {
                 false
@@ -281,8 +304,9 @@ impl ConstraintHandler for OrderSecondHandler {
         // notify order first peers
         // happens only when the order second event is executed the first time because the blocking token is only created once
         if notify_peers {
-            log::info!("notifying order first peers that order second event happened");
-            log::debug!("order first peers: {:?}", self.order_first_peers);
+            log::info!(
+                "order second handler: notifying order first peers that order second event happened"
+            );
             for &peer_addr in self.order_first_peers.iter() {
                 send_push_token_message(
                     peer_addr,
@@ -298,8 +322,19 @@ impl ConstraintHandler for OrderSecondHandler {
 
     // remove the blocking token
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        let mut token_store = state.token_store.lock().unwrap();
-        token_store.remove_out(case_id, &self.constraint_id, self.handler_id);
+        log::info!(
+            "order second handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+        }
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -322,6 +357,9 @@ async fn send_push_token_message(
     let message = PeerMessage::conformance(CCMessage::push_token(token));
 
     // send message
-    log::info!("sending push token message to {}", peer_addr);
+    log::info!(
+        "order second handler: sending push token message to {}",
+        peer_addr
+    );
     send_to_peer(peer_addr, message, state.clone()).await;
 }

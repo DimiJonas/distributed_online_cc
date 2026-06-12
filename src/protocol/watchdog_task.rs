@@ -3,9 +3,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    config::node_config::MinMaxMode,
     protocol::result_emitter::emit_result,
     state::app_state::AppState,
-    types::{CaseId, ConstraintId, ConstraintResultType, TimeConstraintMode, TokenId},
+    types::{CaseId, ConstraintId, ConstraintResultType, TokenId},
 };
 
 pub async fn watchdog_task(
@@ -14,7 +15,7 @@ pub async fn watchdog_task(
     case_id: CaseId,
     constraint_id: ConstraintId,
     duration: Duration,
-    mode: TimeConstraintMode,
+    mode: MinMaxMode,
     state: AppState,
 ) {
     tokio::select! {
@@ -35,7 +36,7 @@ pub async fn watchdog_task(
 
             // evaluate timeout
             match mode {
-                TimeConstraintMode::Max => {
+                MinMaxMode::Max => {
                     log::warn!(
                         "time watchdog: MAX constraint {}/case {} VIOLATED because token {} timed out after {:?}",
                         constraint_id, case_id, token_id, duration
@@ -52,7 +53,7 @@ pub async fn watchdog_task(
                     ).await;
 
                 }
-                TimeConstraintMode::Min => {
+                MinMaxMode::Min => {
                     log::info!(
                         "time watchdog: MIN constraint {}/case {}: token {} timed out",
                         constraint_id, case_id, token_id

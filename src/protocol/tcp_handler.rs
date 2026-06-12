@@ -249,7 +249,7 @@ mod tests {
                 1,
             );
             state
-                .token_store
+                .token_out
                 .lock()
                 .unwrap()
                 .produce_with_overwrite(token, ConstraintHandlerId::ResponseProducer);
@@ -263,7 +263,7 @@ mod tests {
         );
         handle_cc_message(delete_msg, state.clone(), Uuid::new_v4()).await;
 
-        assert!(!state.token_store.lock().unwrap().has_open_token(
+        assert!(!state.token_out.lock().unwrap().has_open_token(
             &"c1".to_string(),
             &"rp".to_string(),
             ConstraintHandlerId::ResponseProducer

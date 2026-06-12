@@ -2,15 +2,13 @@ use async_trait::async_trait;
 use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
+    config::node_config::SensorConstraintMode,
     impl_constraint_handler_fields,
     protocol::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     state::app_state::AppState,
-    types::{
-        ConstraintHandlerId, ConstraintId, ConstraintResultType, EventId, SensorConstraintMode,
-        TracedEvent,
-    },
+    types::{ConstraintHandlerId, ConstraintId, ConstraintResultType, EventId, TracedEvent},
 };
 
 pub struct SensorConstraintHandler {
@@ -28,7 +26,7 @@ impl ConstraintHandler for SensorConstraintHandler {
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "received configured sensor event for constraint {}; event={}",
+            "sensor constraint handler: received configured sensor event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -39,7 +37,7 @@ impl ConstraintHandler for SensorConstraintHandler {
                 AttributeValue::Int(i) => i as f64,
                 _ => {
                     log::error!(
-                        "cannot compare attribute {} with value {}, because it is not a numeric value",
+                        "sensor constraint handler: cannot compare attribute {} with value {}, because it is not a numeric value",
                         self.attribute_key,
                         value
                     );
@@ -47,8 +45,9 @@ impl ConstraintHandler for SensorConstraintHandler {
                 }
             },
             None => {
+                // TODO: emit a violated result
                 log::error!(
-                    "event {} does not contain a value for attribute {}",
+                    "sensor constraint handler: event {} does not contain a value for attribute {}",
                     event,
                     self.attribute_key
                 );

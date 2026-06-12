@@ -19,7 +19,7 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
         loop {
             if let Some(event) = event_q.recv().await {
                 log::info!("processing event: {}", event);
-                log::debug!("processing event: {:?}", event);
+                log::debug!("event ({:?})", event);
 
                 // is it a new case? -> register it in result store
                 {
@@ -160,7 +160,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         assert!(
-            state.token_store.lock().unwrap().has_open_token(
+            state.token_out.lock().unwrap().has_open_token(
                 &"case-dispatch".to_string(),
                 &"rp".to_string(),
                 ConstraintHandlerId::ResponseProducer

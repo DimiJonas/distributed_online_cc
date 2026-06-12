@@ -1,5 +1,8 @@
+pub mod appearance_constraint_handler;
 pub mod constraint_handler_trait;
+pub mod distributed_appearance_constraint_handler;
 pub mod end_activity_handler;
+pub mod not_coexistence_handler;
 pub mod order_constraint_handler;
 pub mod precedence_constraint_handler;
 pub mod response_constraint_handler;

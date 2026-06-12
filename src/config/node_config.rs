@@ -1,11 +1,11 @@
 use crate::state::result_send_buffer::ResultBufferPolicy;
-use crate::types::{
-    ConstraintId, ConstraintType, EventId, PeerId, SensorConstraintMode, TimeConstraintMode,
-};
+use crate::types::{ConstraintId, ConstraintType, EventId, PeerId};
 use serde::{Deserialize, Serialize, de};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::fs;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,7 +43,12 @@ impl NodeConfig {
     pub fn build_constraint_list(&self) -> Vec<(ConstraintId, ConstraintType)> {
         self.constraints
             .iter()
-            .map(|c| (c.constraint_id().to_string(), c.constraint_type()))
+            .map(|c| {
+                (
+                    c.constraint_id().to_string().to_lowercase(),
+                    c.constraint_type(),
+                )
+            })
             .collect()
     }
 
@@ -59,7 +64,7 @@ impl NodeConfig {
             HashSet::from(["concept:name".to_string(), "time:timestamp".to_string()]);
         attributes.extend(self.constraints.iter().filter_map(|c| {
             if let ConstraintConfig::Sensor { attribute_key, .. } = c {
-                Some(attribute_key.clone())
+                Some(attribute_key.clone().to_lowercase())
             } else {
                 None
             }
@@ -70,7 +75,7 @@ impl NodeConfig {
     pub fn build_event_list(&self) -> HashSet<EventId> {
         self.constraints
             .iter()
-            .map(|c| c.event_id().to_string())
+            .map(|c| c.event_id().to_string().to_lowercase())
             .collect()
     }
 }
@@ -106,9 +111,81 @@ impl Default for TcpChannelConfig {
         }
     }
 }
+#[derive(Debug, PartialEq, Serialize, Clone)]
+pub enum SensorConstraintMode {
+    Lt,
+    Gt,
+    Lte,
+    Gte,
+    Eq,
+}
+
+impl SensorConstraintMode {
+    pub fn evaluate(&self, a: f64, b: f64) -> bool {
+        match self {
+            Self::Lt => a < b,
+            Self::Gt => a > b,
+            Self::Lte => a <= b,
+            Self::Gte => a >= b,
+            Self::Eq => a == b,
+        }
+    }
+}
+
+impl FromStr for SensorConstraintMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "<=" => Ok(Self::Lte),
+            "=<" => Ok(Self::Lte),
+            ">=" => Ok(Self::Gte),
+            "=>" => Ok(Self::Gte),
+            "<" => Ok(Self::Lt),
+            ">" => Ok(Self::Gt),
+            "=" => Ok(Self::Eq),
+            "==" => Ok(Self::Eq),
+            other => Err(format!("Unknown operator: {other:?}")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SensorConstraintMode {
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(de::Error::custom)
+    }
+}
+
+impl Display for SensorConstraintMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lt => write!(f, "<"),
+            Self::Gt => write!(f, ">"),
+            Self::Lte => write!(f, "<="),
+            Self::Gte => write!(f, ">="),
+            Self::Eq => write!(f, "=="),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")] // makes serialization case insensitive
+pub enum MinMaxMode {
+    Min,
+    Max,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "lowercase")] // makes serialization case insensitive
+pub enum AppearanceCounterReset {
+    Zero,
+    Substract,
+    Keep,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(tag = "policy")]
+#[serde(tag = "policy", rename_all = "lowercase")]
 pub enum ResultBufferConfig {
     #[default]
     Immediate,
@@ -139,7 +216,7 @@ impl ResultBufferConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "constraint_role")]
+#[serde(tag = "constraint_role", rename_all = "lowercase")]
 pub enum ConstraintConfig {
     ResponseProducer {
         constraint_id: ConstraintId,
@@ -186,14 +263,42 @@ pub enum ConstraintConfig {
         event_id: EventId,
         #[serde(deserialize_with = "deserialize_humantime_duration")]
         duration: Duration,
-        mode: TimeConstraintMode,
+        mode: MinMaxMode,
     },
     TimeStop {
         constraint_id: ConstraintId,
         event_id: EventId,
         time_start_peers: Vec<SocketAddr>,
     },
-    // TODO: add more
+    NotCoexistence {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        other_peer: SocketAddr,
+    },
+    AppearanceCounter {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        mode: MinMaxMode,
+        frequency: u64,
+        reset: AppearanceCounterReset,
+    },
+    AppearanceTrigger {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        counter_peers: Vec<SocketAddr>,
+    },
+    DistributedAppearanceCounter {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        reset: AppearanceCounterReset,
+    },
+    DistributedAppearanceTrigger {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        mode: MinMaxMode,
+        frequency: u64,
+        counter_peers: Vec<SocketAddr>,
+    },
 }
 
 impl ConstraintConfig {
@@ -209,6 +314,11 @@ impl ConstraintConfig {
             ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStart { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStop { constraint_id, .. } => constraint_id,
+            ConstraintConfig::NotCoexistence { constraint_id, .. } => constraint_id,
+            ConstraintConfig::AppearanceCounter { constraint_id, .. } => constraint_id,
+            ConstraintConfig::AppearanceTrigger { constraint_id, .. } => constraint_id,
+            ConstraintConfig::DistributedAppearanceCounter { constraint_id, .. } => constraint_id,
+            ConstraintConfig::DistributedAppearanceTrigger { constraint_id, .. } => constraint_id,
         }
     }
 
@@ -223,10 +333,23 @@ impl ConstraintConfig {
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
             ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
             ConstraintConfig::TimeStart { mode, .. } => match mode {
-                TimeConstraintMode::Max => ConstraintType::TimerStartMax,
-                TimeConstraintMode::Min => ConstraintType::TimerStartMin,
+                MinMaxMode::Max => ConstraintType::TimerStartMax,
+                MinMaxMode::Min => ConstraintType::TimerStartMin,
             },
             ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
+            ConstraintConfig::NotCoexistence { .. } => ConstraintType::NotCoexistence,
+            ConstraintConfig::AppearanceCounter { mode, .. } => match mode {
+                MinMaxMode::Max => ConstraintType::AppearanceMax,
+                MinMaxMode::Min => ConstraintType::AppearanceMin,
+            },
+            ConstraintConfig::AppearanceTrigger { .. } => ConstraintType::AppearanceTrigger,
+            ConstraintConfig::DistributedAppearanceCounter { .. } => {
+                ConstraintType::DistributedAppearanceCounter
+            }
+            ConstraintConfig::DistributedAppearanceTrigger { mode, .. } => match mode {
+                MinMaxMode::Max => ConstraintType::DistributedAppearanceTriggerMax,
+                MinMaxMode::Min => ConstraintType::DistributedAppearanceTriggerMin,
+            },
         }
     }
 
@@ -242,6 +365,11 @@ impl ConstraintConfig {
             ConstraintConfig::Sensor { event_id, .. } => event_id,
             ConstraintConfig::TimeStart { event_id, .. } => event_id,
             ConstraintConfig::TimeStop { event_id, .. } => event_id,
+            ConstraintConfig::NotCoexistence { event_id, .. } => event_id,
+            ConstraintConfig::AppearanceCounter { event_id, .. } => event_id,
+            ConstraintConfig::AppearanceTrigger { event_id, .. } => event_id,
+            ConstraintConfig::DistributedAppearanceCounter { event_id, .. } => event_id,
+            ConstraintConfig::DistributedAppearanceTrigger { event_id, .. } => event_id,
         }
     }
 }

@@ -1,6 +1,13 @@
 use crate::config::node_config::{ConstraintConfig, NodeConfig};
+use crate::protocol::constraint_logic::appearance_constraint_handler::{
+    AppearanceCounterHandler, AppearanceTriggerHandler,
+};
 use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
+use crate::protocol::constraint_logic::distributed_appearance_constraint_handler::{
+    DistributedAppearanceCounterHandler, DistributedAppearanceTriggerHandler,
+};
 use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
+use crate::protocol::constraint_logic::not_coexistence_handler::NotCoexistenceHandler;
 use crate::protocol::constraint_logic::order_constraint_handler::{
     OrderFirstHandler, OrderSecondHandler,
 };
@@ -138,6 +145,64 @@ impl HandlerRegistry {
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     time_start_peers: time_start_peers.clone(),
+                }),
+                ConstraintConfig::NotCoexistence {
+                    constraint_id,
+                    event_id,
+                    other_peer,
+                } => Box::new(NotCoexistenceHandler {
+                    handler_id: ConstraintHandlerId::NotCoexistence,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    other_peer: *other_peer,
+                }),
+                ConstraintConfig::AppearanceCounter {
+                    constraint_id,
+                    event_id,
+                    mode,
+                    frequency,
+                    reset,
+                } => Box::new(AppearanceCounterHandler {
+                    handler_id: ConstraintHandlerId::AppearanceCounter,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    mode: mode.clone(),
+                    frequency: *frequency,
+                    reset: reset.clone(),
+                }),
+                ConstraintConfig::AppearanceTrigger {
+                    constraint_id,
+                    event_id,
+                    counter_peers,
+                } => Box::new(AppearanceTriggerHandler {
+                    handler_id: ConstraintHandlerId::AppearanceTrigger,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    counter_peers: counter_peers.clone(),
+                }),
+                ConstraintConfig::DistributedAppearanceCounter {
+                    constraint_id,
+                    event_id,
+                    reset,
+                } => Box::new(DistributedAppearanceCounterHandler {
+                    handler_id: ConstraintHandlerId::DistributedAppearanceCounter,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    reset: reset.clone(),
+                }),
+                ConstraintConfig::DistributedAppearanceTrigger {
+                    constraint_id,
+                    event_id,
+                    mode,
+                    frequency,
+                    counter_peers,
+                } => Box::new(DistributedAppearanceTriggerHandler {
+                    handler_id: ConstraintHandlerId::AppearanceTrigger,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    counter_peers: counter_peers.clone(),
+                    mode: mode.clone(),
+                    frequency: *frequency,
                 }),
             };
             registry.register(handler);

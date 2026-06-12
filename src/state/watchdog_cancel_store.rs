@@ -12,6 +12,9 @@ use crate::types::{CaseId, ConstraintId, EventInstanceId};
 pub struct WatchdogCancelStore {
     parent_tokens: HashMap<(CaseId, ConstraintId), CancellationToken>,
     cancel_tokens: HashMap<EventInstanceId, CancellationToken>,
+    cancel_token_index: HashMap<(CaseId, ConstraintId), Vec<EventInstanceId>>,
+    // used to remove a specific token/id from the index
+    cancel_token_reverse_index: HashMap<EventInstanceId, (CaseId, ConstraintId)>,
 }
 
 impl WatchdogCancelStore {
@@ -35,6 +38,14 @@ impl WatchdogCancelStore {
         let child = parent.child_token();
         // Store the constraint key alongside the child token.
         self.cancel_tokens.insert(event_instance_id, child.clone());
+        // update index
+        self.cancel_token_index
+            .entry(key)
+            .or_default()
+            .push(event_instance_id);
+        // update reverse index
+        self.cancel_token_reverse_index
+            .insert(event_instance_id, (case_id.clone(), constraint_id.clone()));
         child
     }
 
@@ -74,20 +85,32 @@ impl WatchdogCancelStore {
                 event_instance_id
             );
         }
+        // update index using reverse index
+        #[allow(clippy::collapsible_if)]
+        if let Some(index_key) = self.cancel_token_reverse_index.remove(event_instance_id) {
+            if let Some(ids) = self.cancel_token_index.get_mut(&index_key) {
+                ids.retain(|id| id != event_instance_id);
+                if ids.is_empty() {
+                    self.cancel_token_index.remove(&index_key);
+                }
+            }
+        }
     }
 
     /// remove the parent and all children for a constraint without cancelling
     /// used during case-end cleanup when watchdogs have already been dealt with.
-    pub fn remove_constraint(
-        &mut self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        event_instance_ids: &[EventInstanceId],
-    ) {
-        self.parent_tokens
-            .remove(&(case_id.clone(), constraint_id.clone()));
-        for id in event_instance_ids {
-            self.cancel_tokens.remove(id);
+    pub fn remove_constraint(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) {
+        let key = (case_id.clone(), constraint_id.clone());
+        // remove parent token
+        self.parent_tokens.remove(&key);
+        // remove from index
+        if let Some(ids) = self.cancel_token_index.remove(&key) {
+            for id in ids {
+                // remove child cancel token
+                self.cancel_tokens.remove(&id);
+                // remove from reverse index
+                self.cancel_token_reverse_index.remove(&id);
+            }
         }
     }
 

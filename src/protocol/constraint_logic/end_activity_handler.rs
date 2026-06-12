@@ -19,9 +19,11 @@ impl ConstraintHandler for EndActivityHandler {
 
     // notify all handlers that this case has ended
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
-        log::info!("received end event for case {}", event.case_id);
+        log::info!(
+            "end activity handler: received end event for case {}",
+            event.case_id
+        );
 
-        // TODO: should this also happen after the grace period?
         for handler in state.handlers.all() {
             handler.handle_case_end(&event.case_id, state.clone()).await
         }

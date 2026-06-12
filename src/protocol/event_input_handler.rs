@@ -36,7 +36,16 @@ pub async fn handle_event(
 
         let log = import_xes_slice(&read_buf, false, import_options).unwrap();
         for trace in log.traces {
-            let trace_id: CaseId = get_trace_id(&trace);
+            let trace_id: CaseId = match get_trace_id(&trace) {
+                Some(id) => id,
+                None => {
+                    log::error!(
+                        "received xes event input, but trace/case id is missing. ignoring trace ({:?})",
+                        trace
+                    );
+                    continue;
+                }
+            };
 
             for event in trace.events {
                 let traced_event = TracedEvent {
@@ -65,20 +74,22 @@ pub async fn handle_event(
                         );
                     }
                 } else {
-                    log::warn!("event does not contain an event_id (concept:name). ignoring");
+                    log::warn!(
+                        "received event does not contain an event_id (concept:name). ignoring event {:?}",
+                        traced_event.event
+                    );
                 }
             }
         }
     }
 }
 
-fn get_trace_id(trace: &Trace) -> String {
+fn get_trace_id(trace: &Trace) -> Option<String> {
     trace
         .attributes
         .get_by_key("concept:name")
         .and_then(|a| a.value.try_as_string())
         .cloned()
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+pub mod case_closing_task;
 pub mod constraint_logic;
 pub mod event_input_handler;
 pub mod result_emitter;

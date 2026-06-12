@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
+    config::node_config::MinMaxMode,
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
@@ -16,7 +17,7 @@ use crate::{
     state::app_state::AppState,
     types::{
         CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
-        EventTime, TimeConstraintMode, Token, TracedEvent,
+        EventTime, Token, TracedEvent,
     },
 };
 
@@ -25,7 +26,7 @@ pub struct TimeStartHandler {
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub duration: Duration,
-    pub mode: TimeConstraintMode,
+    pub mode: MinMaxMode,
 }
 
 #[async_trait]
@@ -35,7 +36,7 @@ impl ConstraintHandler for TimeStartHandler {
     /// start timer
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "received configured time start event for constraint {}; event={}",
+            "time start handler: received configured time start event for constraint {}; event={}",
             self.constraint_id,
             event
         );
@@ -47,8 +48,8 @@ impl ConstraintHandler for TimeStartHandler {
             event.case_id.clone(),
             self.constraint_id.clone(),
             match self.mode {
-                TimeConstraintMode::Max => ConstraintType::TimerStartMax,
-                TimeConstraintMode::Min => ConstraintType::TimerStartMin,
+                MinMaxMode::Max => ConstraintType::TimerStartMax,
+                MinMaxMode::Min => ConstraintType::TimerStartMin,
             },
             Some(start_time),
             state.config.node_id,
@@ -61,7 +62,7 @@ impl ConstraintHandler for TimeStartHandler {
         }
 
         log::info!(
-            "time start: inserted timer token {} for constraint {}/case {}",
+            "time start handler: inserted timer token {} for constraint {}/case {}",
             token_id,
             self.constraint_id,
             event.case_id
@@ -96,11 +97,7 @@ impl ConstraintHandler for TimeStartHandler {
             self.constraint_id,
             message
         );
-        log::debug!(
-            "received message for constraint {}; message={:?}",
-            self.constraint_id,
-            message
-        );
+        log::debug!("message={:?}", message);
 
         if message.message_type != CCMessageType::TriggerCheck {
             log::warn!(
@@ -126,6 +123,7 @@ impl ConstraintHandler for TimeStartHandler {
         {
             let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
             cancel_tokens.cancel_constraint(&message.case_id, &self.constraint_id);
+            cancel_tokens.remove_constraint(&message.case_id, &self.constraint_id);
         }
 
         // evaluate timer data
@@ -170,7 +168,7 @@ impl ConstraintHandler for TimeStartHandler {
             let was_fired = timer_data.live_tokens.iter().all(|t| t.id != token.id);
             let (result, info) = self.evaluate_token(token, stop_time);
             log::info!(
-                "time start: token {} ({}) -> {:?}: {}",
+                "time start handler: : token {} ({}) -> {:?}: {}",
                 token.id,
                 if was_fired { "late-correction" } else { "live" },
                 result,
@@ -188,13 +186,20 @@ impl ConstraintHandler for TimeStartHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::debug!(
-            "time start handler: finalize ({}/{}) - clearing timer state",
+        log::info!(
+            "time start handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
-        let mut timer_store = state.timer_token_store.lock().unwrap();
-        timer_store.clear_timer_state(case_id, &self.constraint_id);
+        {
+            let mut timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.clear_timer_state(case_id, &self.constraint_id);
+        }
+        {
+            let mut watchdog_store = state.watchdog_cancel_tokens.lock().unwrap();
+            watchdog_store.remove_constraint(case_id, &self.constraint_id);
+        }
+        // TODO: watchdogs?
     }
 }
 
@@ -210,7 +215,7 @@ impl TimeStartHandler {
             Duration::from_millis(elapsed_ms as u64)
         } else {
             log::warn!(
-                "time start: negative elapsed for token {} \
+                "ttime start handler: negative elapsed for token {} \
                  (stop={} before start={}); treating as zero",
                 token.id,
                 stop_time,
@@ -220,7 +225,7 @@ impl TimeStartHandler {
         };
 
         match self.mode {
-            TimeConstraintMode::Max => {
+            MinMaxMode::Max => {
                 if elapsed <= self.duration {
                     (
                         ConstraintResultType::Satisfied,
@@ -239,7 +244,7 @@ impl TimeStartHandler {
                     )
                 }
             }
-            TimeConstraintMode::Min => {
+            MinMaxMode::Min => {
                 if elapsed >= self.duration {
                     (
                         ConstraintResultType::Satisfied,
@@ -277,19 +282,25 @@ impl ConstraintHandler for TimeStopHandler {
         self.time_start_peers.clone()
     }
 
-    // notify all handlers that this case has ended
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "received configured time stop event for constraint {}; event={}",
+            "time stop handler: received configured time stop event for constraint {}; event={}",
             self.constraint_id,
             event
         );
 
-        let stop_time = event.timestamp_utc().unwrap_or(Utc::now());
+        let stop_time = match event.timestamp_utc() {
+            Some(timestamp) => timestamp,
+            None => {
+                log::warn!(
+                    "time stop handler: time stop event did not contain a timestamp - using current time as event time"
+                );
+                Utc::now()
+            }
+        };
 
         // notify timer start peers
-        log::info!("notifying time start peers that time stop event happened");
-        log::debug!("time start peers: {:?}", self.time_start_peers);
+        log::info!("time stop handler: notifying time start peers that time stop event happened");
         for &peer_addr in self.time_start_peers.iter() {
             send_cc_trigger_message(
                 peer_addr,
@@ -317,7 +328,7 @@ async fn send_cc_trigger_message(
     ));
 
     log::info!(
-        "sending cc trigger message for constraint {} to peer {}",
+        "time stop handler: sending cc trigger message for constraint {} to peer {}",
         constraint_id,
         peer_address
     );
@@ -330,7 +341,7 @@ mod tests {
     use super::*;
     use crate::config::node_config::{ConstraintConfig, ResultBufferConfig};
     use crate::network::message_types::CCMessage;
-    use crate::types::{ConstraintResultType, ConstraintType, TimeConstraintMode};
+    use crate::types::{ConstraintResultType, ConstraintType};
     use crate::util::test_tools::{
         make_config_with_buffers, make_state_from_config, make_traced_event_at,
     };
@@ -345,7 +356,7 @@ mod tests {
         chrono::Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
     }
 
-    fn make_handler(duration_secs: u64, mode: TimeConstraintMode) -> TimeStartHandler {
+    fn make_handler(duration_secs: u64, mode: MinMaxMode) -> TimeStartHandler {
         TimeStartHandler {
             handler_id: ConstraintHandlerId::TimeStart,
             constraint_id: CID.into(),
@@ -359,12 +370,12 @@ mod tests {
     /// the case pre-registered in cc_results, and the buffering policy set.
     fn make_test_state(
         duration_secs: u64,
-        mode: TimeConstraintMode,
+        mode: MinMaxMode,
         buffer: ResultBufferConfig,
     ) -> AppState {
         let constraint_type = match &mode {
-            TimeConstraintMode::Max => ConstraintType::TimerStartMax,
-            TimeConstraintMode::Min => ConstraintType::TimerStartMin,
+            MinMaxMode::Max => ConstraintType::TimerStartMax,
+            MinMaxMode::Min => ConstraintType::TimerStartMin,
         };
         let mut buffers = HashMap::new();
         buffers.insert(CID.to_string(), buffer);
@@ -432,8 +443,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn handle_event_creates_timer_token_and_registers_watchdog() {
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Max);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
         let event = make_traced_event_at(CASE, "start", 0);
 
         handler.handle_event(&event, state.clone()).await;
@@ -452,8 +463,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn max_watchdog_timeout_sets_violated() {
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Max);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
         let event = make_traced_event_at(CASE, "start", 0);
 
         handler.handle_event(&event, state.clone()).await;
@@ -470,8 +481,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn min_watchdog_timeout_sets_satisfied() {
-        let state = make_test_state(10, TimeConstraintMode::Min, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Min);
+        let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Min);
         let event = make_traced_event_at(CASE, "start", 0);
 
         handler.handle_event(&event, state.clone()).await;
@@ -488,8 +499,8 @@ mod tests {
 
     #[tokio::test]
     async fn message_with_no_start_ever_is_satisfied_immediately() {
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Max);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
 
         let stop_time = base_time() + chrono::Duration::seconds(5);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
@@ -505,8 +516,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn max_in_time_stop_satisfies() {
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Max);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
         let event = make_traced_event_at(CASE, "start", 0);
         handler.handle_event(&event, state.clone()).await;
 
@@ -525,8 +536,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn max_late_stop_within_live_window_violates() {
-        let state = make_test_state(5, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(5, TimeConstraintMode::Max);
+        let state = make_test_state(5, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(5, MinMaxMode::Max);
         let event = make_traced_event_at(CASE, "start", 0);
         handler.handle_event(&event, state.clone()).await;
 
@@ -546,8 +557,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn min_sufficient_elapsed_satisfies() {
-        let state = make_test_state(5, TimeConstraintMode::Min, ResultBufferConfig::Immediate);
-        let handler = make_handler(5, TimeConstraintMode::Min);
+        let state = make_test_state(5, MinMaxMode::Min, ResultBufferConfig::Immediate);
+        let handler = make_handler(5, MinMaxMode::Min);
         let event = make_traced_event_at(CASE, "start", 0);
         handler.handle_event(&event, state.clone()).await;
 
@@ -563,8 +574,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn min_too_early_stop_violates() {
-        let state = make_test_state(10, TimeConstraintMode::Min, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Min);
+        let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Min);
         let event = make_traced_event_at(CASE, "start", 0);
         handler.handle_event(&event, state.clone()).await;
 
@@ -589,12 +600,12 @@ mod tests {
         // correct the result to Satisfied before the grace window expires.
         let state = make_test_state(
             5,
-            TimeConstraintMode::Max,
+            MinMaxMode::Max,
             ResultBufferConfig::GracePeriod {
                 duration: Duration::from_secs(60),
             },
         );
-        let handler = make_handler(5, TimeConstraintMode::Max);
+        let handler = make_handler(5, MinMaxMode::Max);
         let event = make_traced_event_at(CASE, "start", 0);
         handler.handle_event(&event, state.clone()).await;
 
@@ -638,8 +649,8 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_clears_timer_state() {
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, TimeConstraintMode::Max);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
 
         // Plant some state to be cleared
         let event = make_traced_event_at(CASE, "start", 0);
@@ -664,7 +675,7 @@ mod tests {
             event_id: "stop".into(),
             time_start_peers: vec![],
         };
-        let state = make_test_state(10, TimeConstraintMode::Max, ResultBufferConfig::Immediate);
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
         // Should not panic, should not touch token_store
         stop.clean_up_state(&CASE.to_string(), state.clone()).await;
     }
