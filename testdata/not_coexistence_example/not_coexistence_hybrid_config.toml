@@ -1,0 +1,16 @@
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener.sock"
+log_file = "not_coexistence_hybrid.log"
+
+[[constraints]]
+constraint_role = "NotCoexistence"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_event_1"
+other_peer = "127.0.0.1:8003"
+
+[[constraints]]
+constraint_role = "NotCoexistence"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_event_2"
+other_peer = "127.0.0.1:8003"

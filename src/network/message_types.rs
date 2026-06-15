@@ -148,14 +148,7 @@ impl PeerMessage {
 
 impl Display for PeerMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let payload_type = match self.payload {
-            PeerMessagePayload::Hello(_) => "hello",
-            PeerMessagePayload::Cli(_) => "cli",
-            PeerMessagePayload::Conformance(_) => "conformance",
-            PeerMessagePayload::Overlay(_) => "overlay",
-            PeerMessagePayload::TerminationDetection(_) => "termination detection",
-        };
-        write!(f, "message_id={} type={}", self.message_id, payload_type)
+        write!(f, "message_id={} type={}", self.message_id, self.payload)
     }
 }
 
@@ -166,6 +159,18 @@ pub enum PeerMessagePayload {
     Conformance(CCMessage),
     Overlay(OverlayMessage),
     TerminationDetection(TerminationDetectionMessage),
+}
+
+impl Display for PeerMessagePayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerMessagePayload::Hello(_) => write!(f, "hello"),
+            PeerMessagePayload::Cli(_) => write!(f, "cli"),
+            PeerMessagePayload::Conformance(_) => write!(f, "conformance"),
+            PeerMessagePayload::Overlay(_) => write!(f, "overlay"),
+            PeerMessagePayload::TerminationDetection(_) => write!(f, "termination detection"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
