@@ -12,7 +12,7 @@ event_id = "response_producer_event"
 constraint_role = "ResponseConsumer"
 constraint_id = "response_test"
 event_id = "response_consumer_event"
-producer_peers = ["127.0.0.1:8001"]
+producer_peers = ["127.0.0.1:8003"]
 
 [[constraints]]
 constraint_role = "EndActivity"

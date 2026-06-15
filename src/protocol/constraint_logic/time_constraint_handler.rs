@@ -333,7 +333,13 @@ async fn send_cc_trigger_message(
         peer_address
     );
 
-    send_to_peer(peer_address, message, state.clone()).await;
+    if let Err(e) = send_to_peer(peer_address, message, state.clone()).await {
+        log::error!(
+            "time stop handler: error sending cc trigger message to {}: {}",
+            peer_address,
+            e
+        );
+    }
 }
 
 #[cfg(test)]

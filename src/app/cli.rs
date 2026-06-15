@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 
-use crate::network::message_types::{CliTestMessage, PeerMessage};
-use crate::network::tcp_router::{connect_peer, send_to_peer};
+use crate::network::message_types::{CliTestMessage, PeerMessage, PeerMessagePayload};
+use crate::network::tcp_router::{connect_peer, send_and_receive};
 use crate::state::app_state::AppState;
 use crate::types::CliCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 pub fn spawn_cli(state: AppState) {
     let stdin = BufReader::new(tokio::io::stdin());
@@ -62,34 +62,27 @@ pub fn spawn_cli(state: AppState) {
         while let Some(command) = cmd_rx.recv().await {
             match command {
                 CliCommand::Send { peer_address, msg } => {
-                    let request_id = {
-                        let mut request_ids = cmd_interpreter_state.request_ids.lock().unwrap();
-                        request_ids.get_next_id()
-                    };
-
-                    let message = PeerMessage::cli(CliTestMessage {
-                        request_id,
+                    let message = PeerMessage::cli_req(CliTestMessage {
                         message: msg.clone(),
                         sender_addr: cmd_interpreter_state.config.tcp_listen_address,
                     });
 
-                    // oneshot waiting channel for response
-                    let (tx, rx) = oneshot::channel();
+                    log::info!("sending cli message to {}", &peer_address);
 
-                    let len = {
-                        let mut pending = cmd_interpreter_state.pending.lock().unwrap();
-                        pending.insert(request_id, tx);
-                        pending.len()
+                    match send_and_receive(peer_address, message, state.clone()).await {
+                        Ok(response) => {
+                            log::info!("got response: {}", response);
+                            if let PeerMessagePayload::Cli(cli_message) = response.payload {
+                                log::info!(
+                                    "peer {} sent: \"{}\"",
+                                    peer_address,
+                                    cli_message.message
+                                );
+                            }
+                        }
+
+                        Err(e) => log::error!("error when trying to receive response: {}", e),
                     };
-                    send_to_peer(peer_address, message, state.clone()).await;
-                    log::info!("sent request. now {} pending requests in total", len);
-                    match rx.await {
-                        Ok(resp) => log::debug!("got response: {:?}", resp),
-                        Err(_) => log::error!(
-                            "error when trying to receive response for request id {}",
-                            request_id
-                        ),
-                    }
                 }
                 CliCommand::Connect { peer_address } => {
                     if peer_address == state.config.tcp_listen_address {
@@ -107,7 +100,9 @@ pub fn spawn_cli(state: AppState) {
 mod tests {
     use std::net::SocketAddr;
 
-    use crate::types::CliCommand;
+    use uuid::Uuid;
+
+    use crate::{network::tcp_router::send_to_peer, types::CliCommand};
 
     /// Parsing "send <addr> <msg>" produces the expected CliCommand.
     #[test]
@@ -210,23 +205,14 @@ mod tests {
                 match command {
                     CliCommand::Send { peer_address, msg } => {
                         use crate::network::message_types::{CliTestMessage, PeerMessage};
-                        let request_id = {
-                            let mut ids = state_clone.request_ids.lock().unwrap();
-                            ids.get_next_id()
-                        };
+                        let request_id = Uuid::new_v4();
                         let message = PeerMessage::cli(CliTestMessage {
-                            request_id,
                             message: msg,
                             sender_addr: state_clone.config.tcp_listen_address,
                         });
                         let (tx, _rx) = tokio::sync::oneshot::channel();
                         state_clone.pending.lock().unwrap().insert(request_id, tx);
-                        crate::network::tcp_router::send_to_peer(
-                            peer_address,
-                            message,
-                            state_clone.clone(),
-                        )
-                        .await;
+                        let _ = send_to_peer(peer_address, message, state_clone.clone()).await;
                     }
                     CliCommand::Connect { .. } => {}
                 }

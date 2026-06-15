@@ -1,8 +1,8 @@
 use std::fmt::Display;
 
 use crate::{
-    network::message_types::{MESSAGE_TTL, PeerMessage, PeerMessagePayload},
-    types::MessageId,
+    network::message_types::{MESSAGE_TTL, MessageKind, PeerMessage, PeerMessagePayload},
+    types::{MessageId, RequestId},
 };
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,8 @@ impl std::error::Error for FramingError {}
 #[derive(Serialize, Deserialize)]
 struct WirePeerMessage {
     message_id: MessageId,
+    request_id: Option<RequestId>,
+    message_kind: MessageKind,
     payload: PeerMessagePayload,
 }
 
@@ -44,6 +46,8 @@ impl From<&PeerMessage> for WirePeerMessage {
     fn from(msg: &PeerMessage) -> Self {
         Self {
             message_id: msg.message_id,
+            request_id: msg.request_id,
+            message_kind: msg.message_kind,
             payload: msg.payload.clone(),
         }
     }
@@ -56,6 +60,8 @@ impl From<WirePeerMessage> for PeerMessage {
         PeerMessage {
             message_id: wire.message_id,
             payload: wire.payload,
+            request_id: wire.request_id,
+            message_kind: wire.message_kind,
             deadline: Some(
                 Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
             ),

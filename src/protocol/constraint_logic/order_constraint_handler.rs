@@ -361,5 +361,11 @@ async fn send_push_token_message(
         "order second handler: sending push token message to {}",
         peer_addr
     );
-    send_to_peer(peer_addr, message, state.clone()).await;
+    if let Err(e) = send_to_peer(peer_addr, message, state.clone()).await {
+        log::error!(
+            "order second handler: error sending push token message to {}: {}",
+            peer_addr,
+            e
+        );
+    }
 }

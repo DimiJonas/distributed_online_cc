@@ -5,14 +5,15 @@ use tokio::time::Instant;
 
 use crate::{
     config::node_config::NodeConfig,
-    types::{CaseId, ConstraintId, EventTime, MessageId, Token, TokenId},
+    network::message_types::MessageKind::{FireAndForget, Request, Response},
+    types::{CaseId, ConstraintId, EventTime, MessageId, RequestId, Token},
 };
 
-// !gets set once at startup
-// !consider switching to a message factory that lives in the appstate if more values have to be configured
-// controls how long a message lives in the queue before being dropped
+/// gets set once at startup
+/// consider switching to a message factory that lives in the appstate if more values have to be configured
+///
+/// controls how long a message lives in the queue before being dropped
 pub static MESSAGE_TTL: OnceLock<Duration> = OnceLock::new();
-// static DEFAULT_MESSAGE_TTL: Duration = Duration::from_secs(30);
 
 pub fn init(config: NodeConfig) {
     match MESSAGE_TTL.set(config.message_ttl) {
@@ -23,10 +24,21 @@ pub fn init(config: NodeConfig) {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
+pub enum MessageKind {
+    Request,
+    Response,
+    FireAndForget,
+}
+
 #[derive(Debug, Clone)]
 pub struct PeerMessage {
     pub message_id: MessageId,
+    pub request_id: Option<RequestId>,
+    pub message_kind: MessageKind,
     pub payload: PeerMessagePayload,
+    // just an internal field to avoid messages being stuck permanently in the message queue
+    // gets stripped when the message is sent to another peer
     // None = never expires (used for handshake)
     pub deadline: Option<Instant>,
 }
@@ -35,6 +47,32 @@ impl PeerMessage {
     pub fn new(payload: PeerMessagePayload) -> Self {
         Self {
             message_id: MessageId::new_v4(),
+            request_id: None,
+            message_kind: FireAndForget,
+            payload,
+            deadline: Some(
+                Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
+            ),
+        }
+    }
+
+    pub fn new_request(payload: PeerMessagePayload) -> Self {
+        Self {
+            message_id: MessageId::new_v4(),
+            request_id: Some(RequestId::new_v4()),
+            message_kind: Request,
+            payload,
+            deadline: Some(
+                Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
+            ),
+        }
+    }
+
+    pub fn new_response(request_id: Option<RequestId>, payload: PeerMessagePayload) -> Self {
+        Self {
+            message_id: MessageId::new_v4(),
+            request_id,
+            message_kind: Response,
             payload,
             deadline: Some(
                 Instant::now() + *MESSAGE_TTL.get().expect("message TTL not initialized"),
@@ -46,6 +84,8 @@ impl PeerMessage {
     pub fn new_no_expiry(payload: PeerMessagePayload) -> Self {
         Self {
             message_id: MessageId::new_v4(),
+            request_id: None,
+            message_kind: FireAndForget,
             payload,
             deadline: None,
         }
@@ -54,6 +94,8 @@ impl PeerMessage {
     pub fn new_with_ttl(payload: PeerMessagePayload, ttl: Duration) -> Self {
         Self {
             message_id: MessageId::new_v4(),
+            request_id: None,
+            message_kind: FireAndForget,
             payload,
             deadline: Some(Instant::now() + ttl),
         }
@@ -70,11 +112,29 @@ impl PeerMessage {
     pub fn hello(msg: HelloMessage) -> Self {
         Self::new_no_expiry(PeerMessagePayload::Hello(msg))
     }
+
     pub fn cli(msg: CliTestMessage) -> Self {
         Self::new(PeerMessagePayload::Cli(msg))
     }
+
+    pub fn cli_req(msg: CliTestMessage) -> Self {
+        Self::new_request(PeerMessagePayload::Cli(msg))
+    }
+
+    pub fn cli_res(request_id: RequestId, msg: CliTestMessage) -> Self {
+        Self::new_response(Some(request_id), PeerMessagePayload::Cli(msg))
+    }
+
     pub fn conformance(msg: CCMessage) -> Self {
         Self::new(PeerMessagePayload::Conformance(msg))
+    }
+
+    pub fn conformance_req(msg: CCMessage) -> Self {
+        Self::new_request(PeerMessagePayload::Conformance(msg))
+    }
+
+    pub fn conformance_res(request_id: RequestId, msg: CCMessage) -> Self {
+        Self::new_response(Some(request_id), PeerMessagePayload::Conformance(msg))
     }
 
     pub fn overlay_gossip(msg: OverlayMessage) -> Self {
@@ -95,7 +155,7 @@ impl Display for PeerMessage {
             PeerMessagePayload::Overlay(_) => "overlay",
             PeerMessagePayload::TerminationDetection(_) => "termination detection",
         };
-        write!(f, "id={} type={}", self.message_id, payload_type)
+        write!(f, "message_id={} type={}", self.message_id, payload_type)
     }
 }
 
@@ -121,7 +181,6 @@ impl Display for HelloMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliTestMessage {
-    pub request_id: u64,
     pub message: String,
     pub sender_addr: SocketAddr,
 }
@@ -144,8 +203,6 @@ pub enum CCMessageType {
     DeleteToken,
     // trigger constraint check for a case on another node
     TriggerCheck,
-    // response to TriggerCheck with the check result (maybe not needed)
-    CheckResult,
     // notify case termination
     CaseTerminated,
 }
@@ -159,12 +216,9 @@ pub struct CCMessage {
     // no timestamp unless needed for a specific constraint
     pub timestamp: Option<EventTime>,
     // present for: PushToken, PullTokenResponse
-    // TODO: check if this can be removed - pushtoken just uses the timestamp for the order constraint
     pub token: Option<Token>,
-    // present for: DeleteToken (identifies which token to remove)
-    pub token_id: Option<TokenId>,
-    // present for: CheckResult (true = constraint satisfied)
-    pub result: Option<bool>,
+    // present for: PullTokenRequest and requests in general
+    pub request_id: Option<RequestId>,
 }
 
 impl CCMessage {
@@ -175,8 +229,7 @@ impl CCMessage {
             constraint_id,
             timestamp: None,
             token: None,
-            token_id: None,
-            result: None,
+            request_id: None,
         }
     }
 
@@ -191,14 +244,26 @@ impl CCMessage {
         msg
     }
 
+    pub fn pull_token_request(case_id: CaseId, constraint_id: ConstraintId) -> Self {
+        Self::base(CCMessageType::PullTokenRequest, case_id, constraint_id)
+    }
+
+    pub fn pull_token_response(token: Token) -> Self {
+        let mut msg = Self::base(
+            CCMessageType::PullTokenResponse,
+            token.case_id.clone(),
+            token.constraint_id.clone(),
+        );
+        msg.token = Some(token);
+        msg
+    }
+
     pub fn delete_token(
         case_id: CaseId,
         constraint_id: ConstraintId,
         event_timestamp: EventTime,
-        token_id: TokenId,
     ) -> Self {
         let mut msg = Self::base(CCMessageType::DeleteToken, case_id, constraint_id);
-        msg.token_id = Some(token_id);
         msg.timestamp = Some(event_timestamp);
         msg
     }
@@ -210,12 +275,6 @@ impl CCMessage {
     ) -> Self {
         let mut msg = Self::base(CCMessageType::TriggerCheck, case_id, constraint_id);
         msg.timestamp = Some(event_timestamp);
-        msg
-    }
-
-    pub fn check_result(case_id: CaseId, constraint_id: ConstraintId, satisfied: bool) -> Self {
-        let mut msg = Self::base(CCMessageType::CheckResult, case_id, constraint_id);
-        msg.result = Some(satisfied);
         msg
     }
 
@@ -263,7 +322,7 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::types::{ConstraintType, Token, TokenId};
+    use crate::types::{ConstraintType, Token};
 
     #[test]
     fn push_token_has_correct_type_and_token() {
@@ -282,14 +341,8 @@ mod tests {
 
     #[test]
     fn delete_token_has_correct_type_and_token_id() {
-        let msg = CCMessage::delete_token(
-            "case-2".to_string(),
-            "c-2".to_string(),
-            Utc::now(),
-            TokenId::nil(),
-        );
+        let msg = CCMessage::delete_token("case-2".to_string(), "c-2".to_string(), Utc::now());
         assert_eq!(msg.message_type, CCMessageType::DeleteToken);
-        assert!(msg.token_id.is_some());
         assert!(msg.token.is_none());
     }
 
@@ -298,14 +351,6 @@ mod tests {
         let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string(), Utc::now());
         assert_eq!(msg.message_type, CCMessageType::TriggerCheck);
         assert!(msg.token.is_none());
-        assert!(msg.result.is_none());
-    }
-
-    #[test]
-    fn check_result_carries_boolean_result() {
-        let msg = CCMessage::check_result("case-4".to_string(), "c-4".to_string(), true);
-        assert_eq!(msg.message_type, CCMessageType::CheckResult);
-        assert_eq!(msg.result, Some(true));
     }
 
     #[test]
@@ -325,7 +370,6 @@ mod tests {
         assert!(matches!(hello.payload, PeerMessagePayload::Hello(_)));
 
         let cli = PeerMessage::cli(CliTestMessage {
-            request_id: 1,
             message: "test".to_string(),
             sender_addr: "127.0.0.1:9000".parse().unwrap(),
         });

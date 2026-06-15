@@ -24,9 +24,10 @@ async fn main() {
 
     // create event queue
     let (event_q_tx, _event_q_rx) = mpsc::channel(config.event_queue_size);
-    // create outbound router message queue
+    // create loopback message queue - it decouples tcp router from tcp channel for messages that are mean for the own host that skip the tcp communication
+    let (loopback_q_tx, loopback_q_rx) = mpsc::channel(config.loopback_queue_size);
 
-    let state = AppState::new(config, event_q_tx);
+    let state = AppState::new(config, event_q_tx, loopback_q_tx);
 
     setup_tcp_channels(state.clone()).await;
 
@@ -39,6 +40,10 @@ async fn main() {
     distributed_online_cc::app::event_q_processor::spawn_event_processor(
         state.clone(),
         _event_q_rx,
+    );
+    distributed_online_cc::app::loopback_q_processor::spawn_loopback_q_processor(
+        state.clone(),
+        loopback_q_rx,
     );
 
     // keeps main alive until i shut it down

@@ -4,73 +4,72 @@
 */
 
 use crate::network::message_types::{
-    CCMessage, CliTestMessage, OverlayMessage, PeerMessage, TerminationDetectionMessage,
+    CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessage,
+    TerminationDetectionMessage,
 };
-use crate::network::peer_manager_task::PeerManagerMessage;
+use crate::network::tcp_router::send_to_peer;
 use crate::state::app_state::AppState;
-use uuid::Uuid;
+use crate::types::{MessageId, RequestId};
 
-pub async fn handle_cli_message(msg: CliTestMessage, state: AppState, msg_id: Uuid) {
-    log::debug!("received cli message id={} msg={}", msg_id, msg);
+pub async fn handle_cli_message(
+    msg: CliTestMessage,
+    state: AppState,
+    msg_id: MessageId,
+    kind: MessageKind,
+    request_id: Option<RequestId>,
+) {
+    log::debug!(
+        "tcp handler: received cli message id={} msg={}",
+        msg_id,
+        msg
+    );
 
-    if msg.message.starts_with("ACK") {
-        // its a response
-
-        // remove pending request
-        let (sender, len) = {
-            let mut pending = state.pending.lock().unwrap();
-            (pending.remove(&msg.request_id), pending.len())
-        };
-
-        if let Some(waiting_channel) = sender {
+    match kind {
+        MessageKind::Request => {
             log::info!(
-                "matched response with pending request. {} pending requests left",
-                len
+                "received request from peer {} saying: \"{}\"",
+                msg.sender_addr,
+                msg.message
             );
-            // notofy task that is waiting for response
-            waiting_channel.send(PeerMessage::cli(msg)).unwrap();
-        } else {
-            log::warn!(
-                "no pending request found for response with id {}",
-                msg.request_id
-            );
-        }
-    } else {
-        // its a request
 
-        // send response
-        let response = PeerMessage::cli(CliTestMessage {
-            request_id: msg.request_id,
-            message: format!("ACK '{}'", msg.message),
-            sender_addr: state.config.tcp_listen_address,
-        });
-
-        let manager_tx = {
-            let managers = state.peer_managers.lock().unwrap();
-            managers.get(&msg.sender_addr)
-        };
-        match manager_tx {
-            Some(tx) => {
-                if let Err(e) = tx
-                    .send(PeerManagerMessage::Outbound(Box::new(response)))
-                    .await
-                {
-                    log::error!("failed to enqueue cli response: {}", e);
+            let request_id = match request_id {
+                Some(id) => id,
+                None => {
+                    log::error!(
+                        "request did not contain a request id. cannot create a response. message={}",
+                        msg
+                    );
+                    return;
                 }
+            };
+            let dest_peer = msg.sender_addr;
+
+            // send response
+            let response = PeerMessage::cli_res(
+                request_id,
+                CliTestMessage {
+                    message: format!("ACK '{}'", msg.message),
+                    sender_addr: state.config.tcp_listen_address,
+                },
+            );
+
+            match send_to_peer(dest_peer, response, state.clone()).await {
+                Ok(()) => log::info!("sent response to {}", dest_peer),
+                Err(e) => log::error!("error sending response to peer {}: {}", dest_peer, e),
             }
-            None => {
-                log::error!(
-                    "no peer manager for {} found to send cli response to",
-                    msg.sender_addr
-                );
-            }
+        }
+        MessageKind::Response => {
+            // do nothing - responses are already handled in the tcp channel instead of dispatching it somewhere
+        }
+        MessageKind::FireAndForget => {
+            // do nothing - there are no fire and forget messages yet for cli
         }
     }
 }
 
-pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
+pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageId) {
     log::debug!(
-        "handling conformance message with id={} msg={}",
+        "tcp handler: handling conformance message with id={} msg={}",
         &msg_id,
         msg
     );
@@ -79,15 +78,16 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
     {
         let mut result_store = state.cc_results.lock().unwrap();
         if !result_store.has_case(&msg.case_id) {
-            log::info!("identified new case id={}", &msg.case_id);
+            log::info!("tcp handler: new case detected; id={}", &msg.case_id);
             let constraints = state.config.build_constraint_list();
             result_store.register_case(msg.case_id.clone(), &constraints);
         }
     }
+
     let constraint_handler = state.handlers.get_by_constraint_id(&msg.constraint_id);
     if constraint_handler.is_empty() {
         log::warn!(
-            "received cc message did not match any configured constraints: message={}",
+            "tcp handler: the received cc message did not match any configured constraints: message={}",
             msg
         );
     } else {
@@ -98,31 +98,43 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: Uuid) {
     }
 }
 
-pub async fn handle_td_message(msg: TerminationDetectionMessage, _state: AppState, msg_id: Uuid) {
+pub async fn handle_td_message(
+    msg: TerminationDetectionMessage,
+    _state: AppState,
+    msg_id: MessageId,
+    _kind: MessageKind,
+    _request_id: Option<RequestId>,
+) {
     log::debug!(
-        "handling termination detection message message with id={} msg={}",
+        "tcp handler: handling termination detection message message with id={} msg={}",
         &msg_id,
         msg
     );
     // TODO
 }
 
-pub async fn handle_overlay_message(msg: OverlayMessage, _state: AppState, msg_id: Uuid) {
-    log::debug!("handling overlay message with id={} msg={}", &msg_id, msg);
+pub async fn handle_overlay_message(
+    msg: OverlayMessage,
+    _state: AppState,
+    msg_id: MessageId,
+    _kind: MessageKind,
+    _request_id: Option<RequestId>,
+) {
+    log::debug!(
+        "tcp handler: handling overlay message with id={} msg={}",
+        &msg_id,
+        msg
+    );
     // TODO
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
-    use tokio::sync::oneshot;
-    use uuid::Uuid;
-
     use crate::{
         config::node_config::ConstraintConfig,
         network::{
             message_types::{
-                CCMessage, CliTestMessage, OverlayMessage, PeerMessagePayload,
+                CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessagePayload,
                 TerminationDetectionMessage,
             },
             peer_manager_task::PeerManagerMessage,
@@ -131,63 +143,126 @@ mod tests {
             handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintType},
+        types::{ConstraintHandlerId, ConstraintType, MessageId},
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state, register_manager,
         },
     };
+    use chrono::Utc;
+    use uuid::Uuid;
 
-    // -- handle_cli_message --
+    // ----------------------------------------------------------------
+    // handle_cli_message — Request
+    // ----------------------------------------------------------------
 
-    /// An ACK response is matched to a pending request and the oneshot fires.
+    /// A Request message sends an ACK response back to the sender's peer manager.
     #[tokio::test]
-    async fn cli_ack_resolves_pending_request() {
+    async fn cli_request_sends_ack_to_peer_manager() {
         let state = make_state(21000);
+        let sender_addr = addr(21001);
+        let mut mgr_rx = register_manager(&state, sender_addr);
+        let request_id = Uuid::new_v4();
 
-        let request_id: u64 = 42;
-        let (tx, rx) = oneshot::channel();
-        {
-            state.pending.lock().unwrap().insert(request_id, tx);
-        }
-
-        let ack_msg = CliTestMessage {
-            request_id,
-            message: "ACK 'hello'".to_string(),
-            sender_addr: addr(21001),
-        };
-        handle_cli_message(ack_msg, state.clone(), Uuid::new_v4()).await;
-
-        assert!(state.pending.lock().unwrap().is_empty());
-
-        let resp = rx.await.expect("oneshot was not sent");
-        assert!(matches!(resp.payload, PeerMessagePayload::Cli(_)));
-    }
-
-    /// An ACK for an unknown request_id is silently ignored.
-    #[tokio::test]
-    async fn cli_ack_unknown_request_does_not_panic() {
-        let state = make_state(21010);
         let msg = CliTestMessage {
-            request_id: 999,
-            message: "ACK 'x'".to_string(),
-            sender_addr: addr(21011),
+            message: "hello".to_string(),
+            sender_addr,
         };
-        handle_cli_message(msg, state, Uuid::new_v4()).await;
+        handle_cli_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            MessageKind::Request,
+            Some(request_id),
+        )
+        .await;
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(200), mgr_rx.recv())
+            .await
+            .expect("timed out waiting for ACK")
+            .expect("manager channel closed");
+
+        match received {
+            PeerManagerMessage::Outbound(boxed) => match boxed.payload {
+                PeerMessagePayload::Cli(m) => {
+                    assert!(
+                        m.message.starts_with("ACK"),
+                        "response should be an ACK, got: {}",
+                        m.message
+                    );
+                }
+                other => panic!("expected Cli payload, got {:?}", other),
+            },
+            other => panic!("expected Outbound, got {:?}", other),
+        }
     }
 
-    /// A non-ACK message triggers a response via the peer manager.
+    /// A Request without a request_id logs an error and does not send anything.
     #[tokio::test]
-    async fn cli_request_sends_ack_response_to_peer_manager() {
-        let state = make_state(21020);
-        let sender_addr = addr(21021);
+    async fn cli_request_missing_request_id_does_not_send() {
+        let state = make_state(21010);
+        let sender_addr = addr(21011);
         let mut mgr_rx = register_manager(&state, sender_addr);
 
         let msg = CliTestMessage {
-            request_id: 1,
-            message: "hello world".to_string(),
+            message: "hello".to_string(),
             sender_addr,
         };
-        handle_cli_message(msg, state.clone(), Uuid::new_v4()).await;
+        handle_cli_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            MessageKind::Request,
+            None,
+        )
+        .await;
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), mgr_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "no message should be sent when request_id is missing"
+        );
+    }
+
+    /// A Request with no registered peer manager does not panic.
+    #[tokio::test]
+    async fn cli_request_no_manager_does_not_panic() {
+        let state = make_state(21020);
+        let msg = CliTestMessage {
+            message: "hello".to_string(),
+            sender_addr: addr(21021),
+        };
+        handle_cli_message(
+            msg,
+            state,
+            MessageId::new_v4(),
+            MessageKind::Request,
+            Some(Uuid::new_v4()),
+        )
+        .await;
+        // reaching here without panic is the assertion
+    }
+
+    /// The ACK response echoes back the same request_id.
+    #[tokio::test]
+    async fn cli_request_response_contains_original_request_id() {
+        let state = make_state(21030);
+        let sender_addr = addr(21031);
+        let mut mgr_rx = register_manager(&state, sender_addr);
+        let request_id = Uuid::new_v4();
+
+        let msg = CliTestMessage {
+            message: "ping".to_string(),
+            sender_addr,
+        };
+        handle_cli_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            MessageKind::Request,
+            Some(request_id),
+        )
+        .await;
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(200), mgr_rx.recv())
             .await
@@ -195,31 +270,99 @@ mod tests {
             .unwrap();
 
         if let PeerManagerMessage::Outbound(boxed) = received {
-            if let PeerMessagePayload::Cli(m) = boxed.payload {
-                assert!(m.message.starts_with("ACK"));
-            } else {
-                panic!("expected Cli payload");
-            }
+            assert_eq!(
+                boxed.request_id,
+                Some(request_id),
+                "response must echo the original request_id"
+            );
         } else {
             panic!("expected Outbound");
         }
     }
 
-    /// A non-ACK when no peer manager exists logs an error but must not panic.
+    // ----------------------------------------------------------------
+    // handle_cli_message — Response
+    // ----------------------------------------------------------------
+
+    /// A Response message is a no-op in the handler (already resolved in dispatch_message).
     #[tokio::test]
-    async fn cli_request_no_manager_does_not_panic() {
-        let state = make_state(21030);
+    async fn cli_response_is_noop_in_handler() {
+        let state = make_state(21040);
+        let sender_addr = addr(21041);
+        let mut mgr_rx = register_manager(&state, sender_addr);
+
         let msg = CliTestMessage {
-            request_id: 1,
-            message: "hello".to_string(),
-            sender_addr: addr(21031),
+            message: "ACK 'hello'".to_string(),
+            sender_addr,
         };
-        handle_cli_message(msg, state, Uuid::new_v4()).await;
+        handle_cli_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            MessageKind::Response,
+            Some(Uuid::new_v4()),
+        )
+        .await;
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), mgr_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "Response kind should produce no outbound message from handler"
+        );
     }
 
-    // -- handle_cc_message --
+    // ----------------------------------------------------------------
+    // handle_cli_message — FireAndForget
+    // ----------------------------------------------------------------
 
-    /// A DeleteToken CCMessage is dispatched to the correct handler and removes the token.
+    /// A FireAndForget message is a no-op in the handler.
+    #[tokio::test]
+    async fn cli_fire_and_forget_is_noop_in_handler() {
+        let state = make_state(21050);
+        let sender_addr = addr(21051);
+        let mut mgr_rx = register_manager(&state, sender_addr);
+
+        let msg = CliTestMessage {
+            message: "broadcast".to_string(),
+            sender_addr,
+        };
+        handle_cli_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            MessageKind::FireAndForget,
+            None,
+        )
+        .await;
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), mgr_rx.recv()).await;
+        assert!(
+            result.is_err(),
+            "FireAndForget should produce no outbound message from handler"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // handle_cc_message
+    // ----------------------------------------------------------------
+
+    /// A CCMessage for a new case registers it in the result store.
+    #[tokio::test]
+    async fn cc_message_registers_new_case() {
+        let state = make_state(21060);
+        let msg = CCMessage::delete_token("new-case".to_string(), "rp".to_string(), Utc::now());
+        handle_cc_message(msg, state.clone(), MessageId::new_v4()).await;
+
+        let store = state.cc_results.lock().unwrap();
+        assert!(
+            store.has_case(&"new-case".to_string()),
+            "case should be registered on first message"
+        );
+    }
+
+    /// A CCMessage is dispatched to the correct handler and applies its effect.
     #[tokio::test]
     async fn cc_message_dispatched_to_correct_handler() {
         let config = make_config_with_constraints_and_port(
@@ -227,10 +370,11 @@ mod tests {
                 constraint_id: "rp".to_string(),
                 event_id: "e".to_string(),
             }],
-            21040,
+            21070,
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx);
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2);
 
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -255,46 +399,50 @@ mod tests {
                 .produce_with_overwrite(token, ConstraintHandlerId::ResponseProducer);
         }
 
-        let delete_msg = CCMessage::delete_token(
-            "c1".to_string(),
-            "rp".to_string(),
-            Utc::now(),
-            uuid::Uuid::nil(),
-        );
+        let delete_msg = CCMessage::delete_token("c1".to_string(), "rp".to_string(), Utc::now());
         handle_cc_message(delete_msg, state.clone(), Uuid::new_v4()).await;
 
-        assert!(!state.token_out.lock().unwrap().has_open_token(
-            &"c1".to_string(),
-            &"rp".to_string(),
-            ConstraintHandlerId::ResponseProducer
-        ));
+        assert!(
+            !state.token_out.lock().unwrap().has_open_token(
+                &"c1".to_string(),
+                &"rp".to_string(),
+                ConstraintHandlerId::ResponseProducer
+            ),
+            "token should be deleted after handling"
+        );
     }
 
-    /// A CCMessage for an unknown constraint_id is silently ignored.
+    /// A CCMessage for an unknown constraint_id logs a warning but does not panic.
     #[tokio::test]
     async fn cc_message_unknown_constraint_does_not_panic() {
-        let state = make_state(21050);
-        let msg = CCMessage::delete_token(
-            "c".to_string(),
-            "ghost".to_string(),
-            Utc::now(),
-            uuid::Uuid::nil(),
-        );
+        let state = make_state(21080);
+        let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), Utc::now());
         handle_cc_message(msg, state, Uuid::new_v4()).await;
     }
 
-    // -- stub handlers --
+    // ----------------------------------------------------------------
+    // stub handlers
+    // ----------------------------------------------------------------
 
-    /// Stub handlers (td / overlay) must not panic.
+    /// Stub handlers must not panic regardless of kind.
     #[tokio::test]
-    async fn td_and_overlay_message_handlers_do_not_panic() {
-        let state = make_state(21060);
+    async fn td_and_overlay_handlers_do_not_panic() {
+        let state = make_state(21090);
         handle_td_message(
             TerminationDetectionMessage {},
             state.clone(),
             Uuid::new_v4(),
+            MessageKind::FireAndForget,
+            None,
         )
         .await;
-        handle_overlay_message(OverlayMessage {}, state, Uuid::new_v4()).await;
+        handle_overlay_message(
+            OverlayMessage {},
+            state,
+            Uuid::new_v4(),
+            MessageKind::FireAndForget,
+            None,
+        )
+        .await;
     }
 }

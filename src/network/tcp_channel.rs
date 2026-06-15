@@ -1,5 +1,5 @@
 use crate::network::framing::*;
-use crate::network::message_types::{HelloMessage, PeerMessage, PeerMessagePayload};
+use crate::network::message_types::{HelloMessage, MessageKind, PeerMessage, PeerMessagePayload};
 use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
 use crate::protocol::tcp_handler::*;
 use crate::state::app_state::AppState;
@@ -256,6 +256,65 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
 }
 
 pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
+    match msg.message_kind {
+        MessageKind::FireAndForget => {
+            // regular message that does not wait for a response
+            dispatch_to_handler(msg, peer_address, state).await;
+        }
+        MessageKind::Request => {
+            // Handle as an incoming request, send back a Response with the same request_id
+            if msg.request_id.is_none() {
+                log::error!(
+                    "tcp channel: received request message but request id is missing. dropping request. message={:?}",
+                    msg
+                );
+                return;
+            };
+
+            dispatch_to_handler(msg, peer_address, state).await;
+        }
+        MessageKind::Response => {
+            // receive response and pass it to the requestor
+
+            let request_id = match msg.request_id {
+                Some(id) => id,
+                None => {
+                    log::error!(
+                        "tcp channel: received response message but request id is missing. dropping response. message={:?}",
+                        msg
+                    );
+                    return;
+                }
+            };
+
+            // Look up request_id in pending map and resolve the oneshot
+            let sender = {
+                let mut pending = state.pending.lock().unwrap();
+                pending.remove(&request_id)
+            };
+            if let Some(waiting_channel) = sender {
+                log::debug!(
+                    "tcp channel: matched response with pending request for request id {}",
+                    &request_id
+                );
+                // notify handler that is waiting for response
+                if waiting_channel.send(msg).is_err() {
+                    log::warn!(
+                        "pending request {} was cancelled before response arrived",
+                        request_id
+                    );
+                }
+            } else {
+                log::error!(
+                    "tcp channel: no pending request found for response with id {}",
+                    &request_id
+                );
+            }
+        }
+    }
+}
+
+pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
     // dispatch message based on payload type of the peer message
     match msg.payload {
         PeerMessagePayload::Hello(_) => {
@@ -265,9 +324,17 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
             );
         }
         PeerMessagePayload::Cli(cli_msg) => {
-            tokio::spawn(handle_cli_message(cli_msg, state.clone(), msg.message_id));
+            tokio::spawn(handle_cli_message(
+                cli_msg,
+                state.clone(),
+                msg.message_id,
+                msg.message_kind,
+                msg.request_id,
+            ));
         }
-        PeerMessagePayload::Conformance(cc_msg) => {
+        PeerMessagePayload::Conformance(mut cc_msg) => {
+            // put the request id from the outer peer message into the cc message for the constraint handlers
+            cc_msg.request_id = msg.request_id;
             tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
         }
         PeerMessagePayload::Overlay(overlay_msg) => {
@@ -275,10 +342,18 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
                 overlay_msg,
                 state.clone(),
                 msg.message_id,
+                msg.message_kind,
+                msg.request_id,
             ));
         }
         PeerMessagePayload::TerminationDetection(td_msg) => {
-            tokio::spawn(handle_td_message(td_msg, state.clone(), msg.message_id));
+            tokio::spawn(handle_td_message(
+                td_msg,
+                state.clone(),
+                msg.message_id,
+                msg.message_kind,
+                msg.request_id,
+            ));
         }
     }
 }

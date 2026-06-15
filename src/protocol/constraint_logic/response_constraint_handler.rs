@@ -31,7 +31,7 @@ use crate::protocol::result_emitter::emit_result;
 use crate::state::app_state::AppState;
 use crate::types::{
     CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-    Token, TokenId, TracedEvent,
+    Token, TracedEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -230,7 +230,6 @@ async fn send_delete_token(
         trace_id,
         constraint_id,
         event_timestamp,
-        TokenId::nil(),
     ));
 
     // send message
@@ -238,7 +237,14 @@ async fn send_delete_token(
         "response consumer handler: sending delete token message to {}",
         peer_addr
     );
-    send_to_peer(peer_addr, message, state.clone()).await;
+
+    if let Err(e) = send_to_peer(peer_addr, message, state.clone()).await {
+        log::error!(
+            "response consumer handler: error sending cc trigger message to {}: {}",
+            peer_addr,
+            e
+        );
+    }
 }
 
 #[cfg(test)]
@@ -256,8 +262,10 @@ mod tests {
             response_constraint_handler::{ResponseConsumerHandler, ResponseProducerHandler},
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintType, TokenId},
-        util::test_tools::{addr, make_config_with_constraints_and_port, register_manager},
+        types::{ConstraintHandlerId, ConstraintType},
+        util::test_tools::{
+            addr, make_config_with_constraints_and_port, make_state_from_config, register_manager,
+        },
     };
 
     use crate::util::test_tools::make_traced_event;
@@ -270,8 +278,7 @@ mod tests {
             }],
             port,
         );
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        AppState::new(config, tx)
+        make_state_from_config(config)
     }
 
     // -- ResponseProducerHandler --
@@ -331,12 +338,7 @@ mod tests {
             handler.handler_id()
         ));
 
-        let delete_msg = CCMessage::delete_token(
-            "c2".to_string(),
-            "rp".to_string(),
-            Utc::now(),
-            TokenId::nil(),
-        );
+        let delete_msg = CCMessage::delete_token("c2".to_string(), "rp".to_string(), Utc::now());
         handler.handle_message(state.clone(), delete_msg).await;
 
         assert!(!state.token_out.lock().unwrap().has_open_token(
@@ -461,7 +463,8 @@ mod tests {
             20050,
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx);
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2);
 
         let mut mgr_rx = register_manager(&state, producer_addr);
 
@@ -506,7 +509,8 @@ mod tests {
             20062,
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx);
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2);
 
         let mut rx1 = register_manager(&state, p1);
         let mut rx2 = register_manager(&state, p2);

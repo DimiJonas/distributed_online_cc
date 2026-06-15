@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub type PeerId = u8;
-pub type RequestId = u64;
+pub type RequestId = Uuid;
 pub type CaseId = String;
 pub type ConstraintId = String;
 pub type EventId = String;

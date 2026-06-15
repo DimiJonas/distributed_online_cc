@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, net::SocketAddr, time::Duration};
+use std::{collections::VecDeque, net::SocketAddr, pin::Pin, time::Duration};
 
 use tokio::{net::TcpStream, sync::mpsc, time::sleep};
 
@@ -12,6 +12,7 @@ use crate::{
 //  ConnectionLost: notify the manager that the tcp channel broke down
 //  ConnectionReady: notify the manager that the tcp channel was rebuilt
 //  ConnectIfNeeded: signal the manager to initiate a tcp connection if none exists yet
+#[derive(Debug)]
 pub enum PeerManagerMessage {
     Outbound(Box<PeerMessage>),
     ConnectionLost,
@@ -20,102 +21,108 @@ pub enum PeerManagerMessage {
 }
 
 // the peer manager task routine
-pub async fn peer_manager_task(
+pub fn peer_manager_task(
     peer_address: SocketAddr,
     mut manager_receiver: mpsc::Receiver<PeerManagerMessage>,
     state: AppState,
-) {
-    let mut queue: VecDeque<PeerMessage> = VecDeque::new();
-    let mut tcp_channel_sender: Option<mpsc::Sender<PeerMessage>> = None;
-    let mut reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        let mut queue: VecDeque<PeerMessage> = VecDeque::new();
+        let mut tcp_channel_sender: Option<mpsc::Sender<PeerMessage>> = None;
+        let mut reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
 
-    loop {
-        let manager_msg = match manager_receiver.recv().await {
-            Some(msg) => msg,
-            None => {
-                log::info!("peer manager for {} shutting down", peer_address);
-                break;
-            }
-        };
-
-        match manager_msg {
-            PeerManagerMessage::Outbound(peer_msg) => {
-                if peer_msg.is_expired() {
-                    log::warn!(
-                        "dropping expired message {} for {}",
-                        peer_msg.message_id,
-                        peer_address
-                    );
-                    continue;
+        loop {
+            let manager_msg = match manager_receiver.recv().await {
+                Some(msg) => msg,
+                None => {
+                    log::info!("peer manager for {} shutting down", peer_address);
+                    break;
                 }
-                match &tcp_channel_sender {
-                    Some(sender) => {
-                        if let Err(e) = sender.send(*peer_msg.clone()).await {
-                            log::error!("send to tcp_channel failed for {}: {}", peer_address, e);
-                            tcp_channel_sender = None;
-                            // channel closed unexpectedly; re-queue so it isn't lost
-                            // ConnectionLost will arrive shortly from tcp_channel
-                            enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
-                        }
-                    }
-                    None => {
-                        enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
-                    }
-                }
-            }
+            };
 
-            PeerManagerMessage::ConnectionLost => {
-                log::warn!(
-                    "connection to {} lost, reconnecting in {}s",
-                    peer_address,
-                    humantime::format_duration(reconnect_delay)
-                );
-                tcp_channel_sender = None;
-                schedule_reconnect(peer_address, state.clone(), reconnect_delay);
-                reconnect_delay =
-                    (reconnect_delay * 2).min(state.config.tcp_channels.reconnect_max_delay);
-            }
-
-            PeerManagerMessage::ConnectionReady(sender) => {
-                log::info!(
-                    "connection to {} ready, flushing {} queued messages",
-                    peer_address,
-                    queue.len()
-                );
-                tcp_channel_sender = Some(sender.clone());
-                // reset reconnect delay
-                reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
-
-                // flush messages
-                while let Some(queued_msg) = queue.pop_front() {
-                    if queued_msg.is_expired() {
+            match manager_msg {
+                PeerManagerMessage::Outbound(peer_msg) => {
+                    if peer_msg.is_expired() {
                         log::warn!(
-                            "dropping expired queued message {} for {} during flush",
-                            queued_msg.message_id,
+                            "dropping expired message {} for {}",
+                            peer_msg.message_id,
                             peer_address
                         );
                         continue;
                     }
-                    if let Err(e) = sender.send(queued_msg).await {
-                        log::error!("flush to {} failed: {}", peer_address, e);
-                        break;
+                    match &tcp_channel_sender {
+                        Some(sender) => {
+                            if let Err(e) = sender.send(*peer_msg.clone()).await {
+                                log::error!(
+                                    "send to tcp_channel failed for {}: {}",
+                                    peer_address,
+                                    e
+                                );
+                                tcp_channel_sender = None;
+                                // channel closed unexpectedly; re-queue so it isn't lost
+                                // ConnectionLost will arrive shortly from tcp_channel
+                                enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
+                            }
+                        }
+                        None => {
+                            enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
+                        }
+                    }
+                }
+
+                PeerManagerMessage::ConnectionLost => {
+                    log::warn!(
+                        "connection to {} lost, reconnecting in {}s",
+                        peer_address,
+                        humantime::format_duration(reconnect_delay)
+                    );
+                    tcp_channel_sender = None;
+                    schedule_reconnect(peer_address, state.clone(), reconnect_delay);
+                    reconnect_delay =
+                        (reconnect_delay * 2).min(state.config.tcp_channels.reconnect_max_delay);
+                }
+
+                PeerManagerMessage::ConnectionReady(sender) => {
+                    log::info!(
+                        "connection to {} ready, flushing {} queued messages",
+                        peer_address,
+                        queue.len()
+                    );
+                    tcp_channel_sender = Some(sender.clone());
+                    // reset reconnect delay
+                    reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
+
+                    // flush messages
+                    while let Some(queued_msg) = queue.pop_front() {
+                        if queued_msg.is_expired() {
+                            log::warn!(
+                                "dropping expired queued message {} for {} during flush",
+                                queued_msg.message_id,
+                                peer_address
+                            );
+                            continue;
+                        }
+                        if let Err(e) = sender.send(queued_msg).await {
+                            log::error!("flush to {} failed: {}", peer_address, e);
+                            break;
+                        }
+                    }
+                }
+
+                PeerManagerMessage::ConnectIfNeeded => {
+                    if tcp_channel_sender.is_some() {
+                        log::debug!(
+                            "connect requested for {} but already connected, ignoring",
+                            peer_address
+                        );
+                    } else {
+                        log::info!("connect requested for {}, attempting", peer_address);
+                        do_connect(peer_address, state.clone()).await;
                     }
                 }
             }
-
-            PeerManagerMessage::ConnectIfNeeded => {
-                if tcp_channel_sender.is_some() {
-                    log::debug!(
-                        "connect requested for {} but already connected, ignoring",
-                        peer_address
-                    );
-                } else {
-                    log::info!("connect requested for {}, attempting", peer_address);
-                    do_connect(peer_address, state.clone()).await;
-                }
-            }
         }
-    }
+    })
 }
 
 fn enqueue(
@@ -147,32 +154,37 @@ fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: Dur
     });
 }
 
-async fn do_connect(peer_address: SocketAddr, state: AppState) {
-    log::debug!("connecting to peer {}", peer_address);
-    match TcpStream::connect(&peer_address).await {
-        Ok(stream) => {
-            let (tcp_channel_sender, tcp_channel_receiver) =
-                mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
-            tokio::spawn(initiate_tcp_connection(
-                peer_address,
-                stream,
-                tcp_channel_sender,
-                tcp_channel_receiver,
-                state,
-            ));
-        }
-        Err(e) => {
-            log::error!("could not connect to {}: {}", peer_address, e);
-            // signal back to manager task loop
-            let manager_sender = {
-                let managers = state.peer_managers.lock().unwrap();
-                managers.get(&peer_address)
-            };
-            if let Some(sender) = manager_sender {
-                let _ = sender.send(PeerManagerMessage::ConnectionLost).await;
+fn do_connect(
+    peer_address: SocketAddr,
+    state: AppState,
+) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        log::debug!("connecting to peer {}", peer_address);
+        match TcpStream::connect(&peer_address).await {
+            Ok(stream) => {
+                let (tcp_channel_sender, tcp_channel_receiver) =
+                    mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
+                tokio::spawn(initiate_tcp_connection(
+                    peer_address,
+                    stream,
+                    tcp_channel_sender,
+                    tcp_channel_receiver,
+                    state,
+                ));
+            }
+            Err(e) => {
+                log::error!("could not connect to {}: {}", peer_address, e);
+                // signal back to manager task loop
+                let manager_sender = {
+                    let managers = state.peer_managers.lock().unwrap();
+                    managers.get(&peer_address)
+                };
+                if let Some(sender) = manager_sender {
+                    let _ = sender.send(PeerManagerMessage::ConnectionLost).await;
+                }
             }
         }
-    }
+    })
 }
 
 /// signals the peer manager task that corresponds to the peer_address to create a tcp channel if needed
@@ -191,7 +203,7 @@ pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
 mod tests {
     use super::*;
     use crate::network::message_types::{CliTestMessage, PeerMessage, PeerMessagePayload};
-    use crate::util::test_tools::{addr, cli_msg, make_state_with_event_q, spawn_manager};
+    use crate::util::test_tools::{addr, cli_msg, make_state_and_event_q, spawn_manager};
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::{Instant, timeout};
@@ -203,7 +215,7 @@ mod tests {
     /// Dropping the sender closes the channel; the task must exit cleanly.
     #[tokio::test]
     async fn task_exits_when_sender_dropped() {
-        let (state, _eq) = make_state_with_event_q(19100);
+        let (state, _eq) = make_state_and_event_q(19100);
         let peer = addr(19101);
         let tx = spawn_manager(peer, state);
 
@@ -225,7 +237,7 @@ mod tests {
     /// when ConnectionReady arrives.
     #[tokio::test]
     async fn queued_messages_are_flushed_on_connection_ready() {
-        let (state, _eq) = make_state_with_event_q(19110);
+        let (state, _eq) = make_state_and_event_q(19110);
         let peer = addr(19111);
         let manager_tx = spawn_manager(peer, state);
 
@@ -268,7 +280,7 @@ mod tests {
     /// immediately to the tcp channel — nothing should sit in the queue.
     #[tokio::test]
     async fn outbound_message_forwarded_immediately_when_connected() {
-        let (state, _eq) = make_state_with_event_q(19120);
+        let (state, _eq) = make_state_and_event_q(19120);
         let peer = addr(19121);
         let manager_tx = spawn_manager(peer, state);
 
@@ -296,7 +308,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_outbound_message_is_dropped() {
-        let (state, _eq) = make_state_with_event_q(19130);
+        let (state, _eq) = make_state_and_event_q(19130);
         let peer = addr(19131);
         let manager_tx = spawn_manager(peer, state);
 
@@ -331,7 +343,7 @@ mod tests {
     /// (not forwarded on the old — now dead — channel).
     #[tokio::test]
     async fn connection_lost_clears_sender_and_re_queues() {
-        let (state, _eq) = make_state_with_event_q(19140);
+        let (state, _eq) = make_state_and_event_q(19140);
         let peer = addr(19141);
         let manager_tx = spawn_manager(peer, state);
 
@@ -394,7 +406,7 @@ mod tests {
     /// and is omitted here for simplicity.)
     #[tokio::test]
     async fn task_remains_responsive_after_multiple_connection_losses() {
-        let (state, _eq) = make_state_with_event_q(19150);
+        let (state, _eq) = make_state_and_event_q(19150);
         let peer = addr(19151);
         let manager_tx = spawn_manager(peer, state);
 
@@ -431,14 +443,13 @@ mod tests {
     /// entry, not panic and not block.
     #[tokio::test]
     async fn queue_overflow_drops_oldest_message() {
-        let (state, _eq) = make_state_with_event_q(19160);
+        let (state, _eq) = make_state_and_event_q(19160);
         let peer = addr(19161);
         let manager_tx = spawn_manager(peer, state.clone());
 
         // Send tcp_message_queue_size + 10 messages with no tcp channel.
         for i in 0..(state.config.tcp_channels.message_queue_size + 10) {
             let msg = PeerMessage::cli(CliTestMessage {
-                request_id: i as u64,
                 message: format!("msg-{}", i),
                 sender_addr: addr(19160),
             });
@@ -477,7 +488,7 @@ mod tests {
     /// ConnectionLost/Ready cycles correctly.
     #[tokio::test]
     async fn connection_ready_resets_reconnect_delay() {
-        let (state, _eq) = make_state_with_event_q(19170);
+        let (state, _eq) = make_state_and_event_q(19170);
         let peer = addr(19171);
         let manager_tx = spawn_manager(peer, state);
 

@@ -25,7 +25,10 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                 {
                     let mut result_store = state.cc_results.lock().unwrap();
                     if !result_store.has_case(&event.case_id) {
-                        log::info!("identified new case id={}", &event.case_id);
+                        log::info!(
+                            "event queue processor: new case detected; id={}",
+                            &event.case_id
+                        );
                         let constraints = state.config.build_constraint_list();
                         result_store.register_case(event.case_id.clone(), &constraints);
                     }
@@ -46,10 +49,12 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::types::ConstraintHandlerId;
-    use crate::util::test_tools::make_traced_event;
+    use crate::util::test_tools::{
+        make_state_with_config_and_event_q, make_state_with_event_q, make_traced_event,
+    };
     use crate::{
         app::event_q_processor::spawn_event_processor, config::node_config::ConstraintConfig,
-        state::app_state::AppState, util::test_tools::make_config_with_constraints,
+        util::test_tools::make_config_with_constraints,
     };
 
     /// Sending an event for a new case registers it in the result store.
@@ -60,8 +65,7 @@ mod tests {
             event_id: "end".to_string(),
         }]);
         let (event_tx, event_rx) = mpsc::channel(16);
-        let state = AppState::new(config, event_tx.clone());
-
+        let state = make_state_with_config_and_event_q(config, event_tx.clone());
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
@@ -79,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn same_case_is_not_registered_twice() {
         let (event_tx, event_rx) = mpsc::channel(16);
-        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+        let state = make_state_with_event_q(event_tx.clone());
 
         spawn_event_processor(state.clone(), event_rx);
 
@@ -102,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_cases_each_registered() {
         let (event_tx, event_rx) = mpsc::channel(16);
-        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+        let state = make_state_with_event_q(event_tx.clone());
 
         spawn_event_processor(state.clone(), event_rx);
 
@@ -122,7 +126,7 @@ mod tests {
     #[tokio::test]
     async fn processor_does_not_panic_when_sender_dropped() {
         let (event_tx, event_rx) = mpsc::channel(16);
-        let state = AppState::new(make_config_with_constraints(vec![]), event_tx.clone());
+        let state = make_state_with_event_q(event_tx.clone());
 
         spawn_event_processor(state.clone(), event_rx);
         drop(event_tx);
@@ -139,7 +143,7 @@ mod tests {
             event_id: "produce".to_string(),
         }]);
         let (event_tx, event_rx) = mpsc::channel(16);
-        let state = AppState::new(config, event_tx.clone());
+        let state = make_state_with_config_and_event_q(config, event_tx.clone());
 
         // Register the case first so handle_case_end doesn't crash.
         {

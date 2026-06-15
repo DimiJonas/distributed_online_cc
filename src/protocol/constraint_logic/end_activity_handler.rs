@@ -52,9 +52,8 @@ mod tests {
         protocol::constraint_logic::{
             constraint_handler_trait::ConstraintHandler, end_activity_handler::EndActivityHandler,
         },
-        state::app_state::AppState,
         types::{ConstraintHandlerId, ConstraintType},
-        util::test_tools::make_config_with_constraints,
+        util::test_tools::{make_config_with_constraints, make_state_from_config},
     };
 
     use crate::util::test_tools::make_traced_event;
@@ -86,8 +85,7 @@ mod tests {
                 event_id: "produce".to_string(),
             },
         ]);
-        let (event_tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, event_tx);
+        let state = make_state_from_config(config);
 
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -124,8 +122,7 @@ mod tests {
             constraint_id: "ea".to_string(),
             event_id: "end".to_string(),
         }]);
-        let (event_tx, _rx) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, event_tx);
+        let state = make_state_from_config(config);
 
         {
             let mut store = state.cc_results.lock().unwrap();

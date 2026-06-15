@@ -32,12 +32,14 @@ fn make_base_config() -> NodeConfig {
         log_file: "test.log".to_string(),
         message_ttl: Duration::from_secs(30),
         event_queue_size: 100,
+        loopback_queue_size: 100,
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_task_mpsc_channel_size: 256,
             message_queue_size: 256,
             reconnect_start_delay: Duration::from_secs(1),
             reconnect_max_delay: Duration::from_secs(30),
+            wait_for_response_timeout: Duration::from_secs(20),
         },
         constraints: vec![],
         result_buffers: HashMap::new(),
@@ -69,15 +71,30 @@ pub fn make_config_with_constraints_and_port(
     config
 }
 
-pub fn make_state_with_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<TracedEvent>) {
+pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<TracedEvent>) {
     let (event_tx, event_rx) = mpsc::channel(16);
-    let state = AppState::new(make_config_with_port(listen_port), event_tx);
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    let state = AppState::new(make_config_with_port(listen_port), event_tx, loopback_tx);
     (state, event_rx)
+}
+
+pub fn make_state_with_event_q(event_tx: mpsc::Sender<TracedEvent>) -> AppState {
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    AppState::new(make_base_config(), event_tx, loopback_tx)
+}
+
+pub fn make_state_with_config_and_event_q(
+    config: NodeConfig,
+    event_tx: mpsc::Sender<TracedEvent>,
+) -> AppState {
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    AppState::new(config, event_tx, loopback_tx)
 }
 
 pub fn make_state(listen_port: u16) -> AppState {
     let (event_tx, _event_rx) = mpsc::channel(16);
-    AppState::new(make_config_with_port(listen_port), event_tx)
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    AppState::new(make_config_with_port(listen_port), event_tx, loopback_tx)
 }
 
 pub fn spawn_manager(peer_addr: SocketAddr, state: AppState) -> mpsc::Sender<PeerManagerMessage> {
@@ -96,7 +113,6 @@ pub fn register_manager(state: &AppState, peer: SocketAddr) -> mpsc::Receiver<Pe
 
 pub fn cli_msg(port: u16) -> PeerMessage {
     PeerMessage::cli(CliTestMessage {
-        request_id: 1,
         message: "hello".to_string(),
         sender_addr: addr(port),
     })
@@ -187,7 +203,8 @@ pub fn make_config_with_buffers(
 
 pub fn make_state_from_config(config: NodeConfig) -> AppState {
     let (event_tx, _event_rx) = mpsc::channel(16);
-    AppState::new(config, event_tx)
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    AppState::new(config, event_tx, loopback_tx)
 }
 
 pub fn make_traced_event_at(case_id: &str, event_name: &str, seconds_offset: i64) -> TracedEvent {

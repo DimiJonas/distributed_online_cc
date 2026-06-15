@@ -1,3 +1,4 @@
+pub mod errors;
 pub mod framing;
 pub mod message_types;
 pub mod peer_manager_task;

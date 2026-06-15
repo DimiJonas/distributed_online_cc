@@ -163,7 +163,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             event
         );
 
-        let event_timestamp = {
+        let event_time = {
             if let Some(timestamp) = event.timestamp_utc() {
                 timestamp
             } else {
@@ -182,7 +182,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 peer_addr,
                 event.case_id.clone(),
                 self.constraint_id.clone(),
-                event_timestamp,
+                event_time,
                 state.clone(),
             )
             .await;
@@ -209,5 +209,11 @@ async fn send_cc_trigger_message(
         peer_address
     );
 
-    send_to_peer(peer_address, message, state.clone()).await;
+    if let Err(e) = send_to_peer(peer_address, message, state.clone()).await {
+        log::error!(
+            "precedence consumer handler: error sending cc trigger message to {}: {}",
+            peer_address,
+            e
+        );
+    }
 }

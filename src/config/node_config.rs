@@ -23,6 +23,8 @@ pub struct NodeConfig {
     pub message_ttl: Duration,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
+    #[serde(default = "default_loopback_q_size")]
+    pub loopback_queue_size: usize,
     pub constraints: Vec<ConstraintConfig>,
     #[serde(default)]
     pub tcp_channels: TcpChannelConfig,
@@ -98,6 +100,11 @@ pub struct TcpChannelConfig {
         deserialize_with = "deserialize_humantime_duration"
     )]
     pub reconnect_max_delay: Duration,
+    #[serde(
+        default = "default_wait_for_response_timeout",
+        deserialize_with = "deserialize_humantime_duration"
+    )]
+    pub wait_for_response_timeout: Duration,
 }
 
 impl Default for TcpChannelConfig {
@@ -108,6 +115,7 @@ impl Default for TcpChannelConfig {
             message_queue_size: default_tcp_message_queue_size(),
             reconnect_start_delay: default_tcp_reconnect_start_delay(),
             reconnect_max_delay: default_tcp_reconnect_max_delay(),
+            wait_for_response_timeout: default_wait_for_response_timeout(),
         }
     }
 }
@@ -170,14 +178,12 @@ impl Display for SensorConstraintMode {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")] // makes serialization case insensitive
 pub enum MinMaxMode {
     Min,
     Max,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "lowercase")] // makes serialization case insensitive
 pub enum AppearanceCounterReset {
     Zero,
     Substract,
@@ -185,7 +191,7 @@ pub enum AppearanceCounterReset {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(tag = "policy", rename_all = "lowercase")]
+#[serde(tag = "policy")]
 pub enum ResultBufferConfig {
     #[default]
     Immediate,
@@ -216,7 +222,7 @@ impl ResultBufferConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "constraint_role", rename_all = "lowercase")]
+#[serde(tag = "constraint_role")]
 pub enum ConstraintConfig {
     ResponseProducer {
         constraint_id: ConstraintId,
@@ -390,6 +396,10 @@ fn default_event_q_size() -> usize {
     100
 }
 
+fn default_loopback_q_size() -> usize {
+    100
+}
+
 fn default_tcp_channel_mpsc_channel_size() -> usize {
     100
 }
@@ -408,6 +418,10 @@ fn default_tcp_reconnect_max_delay() -> Duration {
 
 fn default_peer_manager_task_mpsc_channel_size() -> usize {
     256
+}
+
+fn default_wait_for_response_timeout() -> Duration {
+    Duration::from_secs(20)
 }
 
 // deserialize a value that can be int or float

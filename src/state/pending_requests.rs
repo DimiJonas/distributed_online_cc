@@ -39,9 +39,11 @@ impl Default for PendingRequestManager {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
 
-    fn make_sender() -> oneshot::Sender<crate::network::message_types::PeerMessage> {
+    fn make_sender() -> oneshot::Sender<PeerMessage> {
         let (tx, _rx) = oneshot::channel();
         tx
     }
@@ -56,16 +58,17 @@ mod tests {
     #[test]
     fn insert_increases_len() {
         let mut mgr = PendingRequestManager::new();
-        mgr.insert(1, make_sender());
+        mgr.insert(Uuid::new_v4(), make_sender());
         assert_eq!(mgr.len(), 1);
         assert!(!mgr.is_empty());
     }
 
     #[test]
     fn remove_returns_sender_and_decreases_len() {
+        let id = Uuid::new_v4();
         let mut mgr = PendingRequestManager::new();
-        mgr.insert(42, make_sender());
-        let result = mgr.remove(&42);
+        mgr.insert(id, make_sender());
+        let result = mgr.remove(&id);
         assert!(result.is_some());
         assert_eq!(mgr.len(), 0);
     }
@@ -73,14 +76,15 @@ mod tests {
     #[test]
     fn remove_unknown_returns_none() {
         let mut mgr = PendingRequestManager::new();
-        assert!(mgr.remove(&99).is_none());
+        assert!(mgr.remove(&Uuid::new_v4()).is_none());
     }
 
     #[test]
     fn double_insert_same_id_overwrites() {
+        let id = Uuid::new_v4();
         let mut mgr = PendingRequestManager::new();
-        mgr.insert(1, make_sender());
-        mgr.insert(1, make_sender());
+        mgr.insert(id, make_sender());
+        mgr.insert(id, make_sender());
         assert_eq!(mgr.len(), 1); // still one entry
     }
 }
