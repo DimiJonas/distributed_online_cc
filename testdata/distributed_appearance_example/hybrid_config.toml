@@ -1,0 +1,24 @@
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener_t.sock"
+log_file = "distributed_appearance_trigger.log"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter1_event"
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter2_event"
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceTrigger"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001", "127.0.0.1:8002"]
+mode = "Min"
+frequency = 5

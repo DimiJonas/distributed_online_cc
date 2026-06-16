@@ -41,36 +41,39 @@ impl ConstraintHandler for AppearanceCounterHandler {
         );
 
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        let count =
-            match meta_tokens.get_token_mut(&event.case_id, &self.constraint_id, self.handler_id) {
-                Some(counter_token) => {
-                    counter_token.payload.increment_counter();
-                    counter_token.payload.get_count()
-                }
-                None => {
-                    log::info!(
-                        "starting counter for event_id={} constraint_id={} case_id={}",
-                        self.event_id,
-                        self.constraint_id,
-                        event.case_id
-                    );
+        let count = match meta_tokens.get_token_mut(
+            &event.case_id,
+            &self.constraint_id,
+            self.handler_id,
+        ) {
+            Some(counter_token) => {
+                counter_token.payload.increment_counter();
+                counter_token.payload.get_count()
+            }
+            None => {
+                log::info!(
+                    "appearance counter handler: starting counter for event_id={} constraint_id={} case_id={}",
+                    self.event_id,
+                    self.constraint_id,
+                    event.case_id
+                );
 
-                    let contraint_type = match self.mode {
-                        MinMaxMode::Min => ConstraintType::AppearanceMin,
-                        MinMaxMode::Max => ConstraintType::AppearanceMax,
-                    };
-                    let counter_token = Token::new_with_payload(
-                        event.case_id.clone(),
-                        self.constraint_id.clone(),
-                        contraint_type,
-                        None,
-                        state.config.node_id,
-                        TokenPayload::Counter(1),
-                    );
-                    meta_tokens.insert_meta_token(counter_token.clone(), self.handler_id);
-                    counter_token.payload.get_count()
-                }
-            };
+                let contraint_type = match self.mode {
+                    MinMaxMode::Min => ConstraintType::AppearanceMin,
+                    MinMaxMode::Max => ConstraintType::AppearanceMax,
+                };
+                let counter_token = Token::new_with_payload(
+                    event.case_id.clone(),
+                    self.constraint_id.clone(),
+                    contraint_type,
+                    None,
+                    state.config.node_id,
+                    TokenPayload::Counter(1),
+                );
+                meta_tokens.insert_meta_token(counter_token.clone(), self.handler_id);
+                counter_token.payload.get_count()
+            }
+        };
         log::info!("appearance counter handler: counter is now at {}", count);
     }
 
@@ -92,13 +95,29 @@ impl ConstraintHandler for AppearanceCounterHandler {
         }
 
         let count: u64 = {
-            let meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_cloned(
-                &message.case_id,
-                &self.constraint_id,
-                self.handler_id,
-            ) {
-                Some(token) => token.payload.get_count(),
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            match meta_tokens.get_token_mut(&message.case_id, &self.constraint_id, self.handler_id)
+            {
+                Some(token) => {
+                    let count = token.payload.get_count();
+                    // reset counter while store is locked
+                    if let Some(counter_token) = meta_tokens.get_token_mut(
+                        &message.case_id,
+                        &self.constraint_id,
+                        self.handler_id,
+                    ) {
+                        match self.reset {
+                            AppearanceCounterReset::Keep => {}
+                            AppearanceCounterReset::Subtract => {
+                                counter_token.payload.subtract_counter(self.frequency);
+                            }
+                            AppearanceCounterReset::Zero => {
+                                counter_token.payload.reset_counter();
+                            }
+                        }
+                    }
+                    count
+                }
                 None => 0,
             }
         };
@@ -152,24 +171,6 @@ impl ConstraintHandler for AppearanceCounterHandler {
             state.clone(),
         )
         .await;
-
-        // reset counter
-        {
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            if let Some(counter_token) =
-                meta_tokens.get_token_mut(&message.case_id, &self.constraint_id, self.handler_id)
-            {
-                match self.reset {
-                    AppearanceCounterReset::Keep => {}
-                    AppearanceCounterReset::Subtract => {
-                        counter_token.payload.subtract_counter(self.frequency);
-                    }
-                    AppearanceCounterReset::Zero => {
-                        counter_token.payload.reset_counter();
-                    }
-                }
-            }
-        }
     }
 
     async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {

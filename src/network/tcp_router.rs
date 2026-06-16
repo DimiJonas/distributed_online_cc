@@ -23,6 +23,11 @@ pub async fn send_to_peer(
     msg: PeerMessage,
     state: AppState,
 ) -> Result<(), SendReceiveError> {
+    log::debug!(
+        "send_to_peer: sending {} message to {}",
+        msg.payload,
+        peer_address
+    );
     if peer_address == state.config.tcp_listen_address {
         log::debug!("send_to_peer: short-circuiting self-addressed message");
         deliver_to_self(msg, state).await;
@@ -32,7 +37,11 @@ pub async fn send_to_peer(
         match tx.send(PeerManagerMessage::Outbound(Box::new(msg))).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                log::error!("peer manager for {} got lost: {}", peer_address, e);
+                log::error!(
+                    "send_to_peer: peer manager for {} got lost: {}",
+                    peer_address,
+                    e
+                );
                 Err(SendReceiveError::SendFailed {
                     peer_address,
                     source: (e),
@@ -72,7 +81,10 @@ pub async fn send_and_receive(
     }
 
     send_to_peer(peer_address, message, state.clone()).await?;
-    log::info!("sent request with id {}; waiting for response", &request_id);
+    log::info!(
+        "send_and_receive: waiting for response to request id {}",
+        &request_id
+    );
 
     tokio::select! {
         _ = tokio::time::sleep(timeout) => {
@@ -81,18 +93,18 @@ pub async fn send_and_receive(
                 let mut pending = state.pending.lock().unwrap();
                 pending.remove(&request_id);
             }
-            log::error!("timed out waiting for response to request {}", request_id);
+            log::error!("send_and_receive: timed out waiting for response to request {}", request_id);
             Err(SendReceiveError::Timeout{request_id})
         }
         result = waiting_channel_receiver => {
             match result {
                 Ok(peer_message) => {
-                    log::info!("received response for request {}", request_id);
+                    log::info!("send_and_receive: received response for request {}", request_id);
                     Ok(peer_message)
                 }
                 Err(e) => {
                     log::error!(
-                        "channel closed before response arrived for request {}: {}",
+                        "send_and_receive: channel closed before response arrived for request {}: {}",
                         request_id, e
                     );
                     Err(SendReceiveError::ChannelClosed{request_id})
@@ -105,7 +117,10 @@ pub async fn send_and_receive(
 // short circuits message directly to self through the loopback queue without tcp overhead
 async fn deliver_to_self(msg: PeerMessage, state: AppState) {
     if let Err(e) = state.loopback_q.send(msg).await {
-        log::error!("failed to send message to loopback channel: {}", e);
+        log::error!(
+            "deliver_to_self: failed to send message to loopback channel: {}",
+            e
+        );
     }
 }
 
@@ -133,7 +148,10 @@ async fn get_or_create_manager(
         manager_sender
     };
 
-    log::info!("created peer manager task fo {}", peer_address);
+    log::info!(
+        "get_or_create_manager: created peer manager task fo {}",
+        peer_address
+    );
 
     attempt_connect(peer_address, state.clone()).await;
 

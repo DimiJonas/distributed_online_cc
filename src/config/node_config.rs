@@ -190,6 +190,12 @@ pub enum AppearanceCounterReset {
     Keep,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum DistributedAppearanceCounterReset {
+    Zero,
+    Keep,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(tag = "policy")]
 pub enum ResultBufferConfig {
@@ -296,7 +302,7 @@ pub enum ConstraintConfig {
     DistributedAppearanceCounter {
         constraint_id: ConstraintId,
         event_id: EventId,
-        reset: AppearanceCounterReset,
+        reset: DistributedAppearanceCounterReset,
     },
     DistributedAppearanceTrigger {
         constraint_id: ConstraintId,

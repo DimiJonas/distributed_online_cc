@@ -18,7 +18,10 @@ pub async fn initiate_tcp_connection(
     tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
     state: AppState,
 ) {
-    log::debug!("starting handshake with peer {}", peer_address);
+    log::debug!(
+        "initiate_tcp_connection: starting handshake with peer {}",
+        peer_address
+    );
 
     // create hello message
     let hello = PeerMessage::hello(HelloMessage {
@@ -29,7 +32,11 @@ pub async fn initiate_tcp_connection(
     let encoded = match encode(&hello) {
         Ok(b) => b,
         Err(e) => {
-            log::error!("failed to encode hello for peer {}: {}", peer_address, e);
+            log::error!(
+                "initiate_tcp_connection: failed to encode hello for peer {}: {}",
+                peer_address,
+                e
+            );
             notify_manager(
                 state.clone(),
                 peer_address,
@@ -42,7 +49,10 @@ pub async fn initiate_tcp_connection(
 
     // send hello message
     if stream.write_all(&encoded).await.is_err() {
-        log::error!("error sending hello to peer {}", peer_address);
+        log::error!(
+            "initiate_tcp_connection: error sending hello to peer {}",
+            peer_address
+        );
         notify_manager(
             state.clone(),
             peer_address,
@@ -52,8 +62,11 @@ pub async fn initiate_tcp_connection(
         return;
     }
 
-    log::debug!("handshake successful");
-    log::info!("tcp channel to {} initiated", peer_address);
+    log::debug!("initiate_tcp_connection: handshake successful");
+    log::info!(
+        "initiate_tcp_connection: tcp channel to {} initiated",
+        peer_address
+    );
     notify_manager(
         state.clone(),
         peer_address,
@@ -81,12 +94,17 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
     let peer_address = loop {
         match stream.read_buf(&mut read_buf).await {
             Ok(0) => {
-                log::error!("peer disconnected before sending Hello");
+                log::error!(
+                    "acept_incoming_tcp_connection: peer disconnected before sending Hello"
+                );
                 return;
             }
             Ok(_) => {}
             Err(e) => {
-                log::error!("read error while waiting for Hello: {}", e);
+                log::error!(
+                    "acept_incoming_tcp_connection: read error while waiting for Hello: {}",
+                    e
+                );
                 return;
             }
         }
@@ -98,7 +116,10 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
         let msg = match decode(&mut read_buf) {
             Ok(m) => m,
             Err(e) => {
-                log::error!("failed to decode Hello frame: {}", e);
+                log::error!(
+                    "acept_incoming_tcp_connection: failed to decode Hello frame: {}",
+                    e
+                );
                 return;
             }
         };
@@ -106,13 +127,18 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
         match msg.payload {
             PeerMessagePayload::Hello(hello_msg) => break hello_msg.listening_address,
             _ => {
-                log::error!("expected Hello as the first message, dropping connection");
+                log::error!(
+                    "acept_incoming_tcp_connection: expected Hello as the first message, dropping connection"
+                );
                 return;
             }
         }
     };
 
-    log::info!("accepted tcp connection from peer {}", peer_address);
+    log::info!(
+        "acept_incoming_tcp_connection: accepted tcp connection from peer {}",
+        peer_address
+    );
 
     // save new connection
     let (tcp_channel_sender, tcp_channel_receiver) =
@@ -145,19 +171,19 @@ async fn tcp_channel(
             // send msg
             Some(msg) = tcp_channel_receiver.recv() => {
                 if msg.is_expired() {
-                    log::warn!("dropping expired message {} for {}", msg.message_id, peer_address);
+                    log::warn!("tcp_channel: dropping expired message {} for {}", msg.message_id, peer_address);
                     continue;
                 }
                 let encoded = match encode(&msg) {
                     Ok(b) => b,
                     Err(e) => {
-                        log::error!("failed to encode message for peer {}: {}", peer_address, e);
+                        log::error!("tcp_channel: failed to encode message for peer {}: {}", peer_address, e);
                         continue;
                     }
                 };
 
                 if stream.write_all(&encoded).await.is_err() {
-                    log::error!("writing to tcp stream failed to peer {}", peer_address);
+                    log::error!("tcp_channel: writing to tcp stream failed to peer {}", peer_address);
                     break;
                 }
             }
@@ -166,7 +192,7 @@ async fn tcp_channel(
                 match result {
                     Ok(0) => {
                         // connection closed
-                        log::info!("got zero bytes. peer {} probably disconnected", peer_address);
+                        log::info!("tcp_channel: got zero bytes. peer {} probably disconnected", peer_address);
                         break;
                     }
                     Ok(_) => {
@@ -180,7 +206,7 @@ async fn tcp_channel(
                                 Ok(m) => m,
                                 Err(e) => {
                                     log::error!(
-                                        "failed to decode message from peer {}: {}, closing connection and removing peer from peer manager",
+                                        "tcp_channel: failed to decode message from peer {}: {}, closing connection and removing peer from peer manager",
                                         peer_address, e
                                     );
                                     // deserialization failure probably means the stream is
@@ -191,7 +217,7 @@ async fn tcp_channel(
                             };
 
                             log::info!(
-                                "decoded message from peer {}: {}",
+                                "tcp_channel: decoded message from peer {}: {}",
                                 peer_address,
                                 msg
                             );
@@ -200,7 +226,7 @@ async fn tcp_channel(
                         }
                     }
                     Err(e) => {
-                        log::error!("error reading from peer {}: {}", peer_address, e);
+                        log::error!("tcp_channel: error reading from peer {}: {}", peer_address, e);
                         break;
                     }
                 }
@@ -208,7 +234,7 @@ async fn tcp_channel(
         }
     }
 
-    log::info!("peer connection to {} closed", peer_address);
+    log::info!("tcp_channel: peer connection to {} closed", peer_address);
     notify_manager(
         state.clone(),
         peer_address,
@@ -225,11 +251,15 @@ async fn notify_manager(state: AppState, peer_address: SocketAddr, msg: PeerMana
     match manager_sender_opt {
         Some(manager_sender) => {
             if let Err(e) = manager_sender.send(msg).await {
-                log::error!("failed notifying manager for peer {}: {}", peer_address, e);
+                log::error!(
+                    "notify_manager: failed notifying manager for peer {}: {}",
+                    peer_address,
+                    e
+                );
             }
         }
         None => {
-            log::warn!("no manager found for peer {}", peer_address);
+            log::warn!("notify_manager: no manager found for peer {}", peer_address);
         }
     }
 }
@@ -252,7 +282,10 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
         manager_receiver,
         state.clone(),
     ));
-    log::info!("created manager task for peer {}", peer_address);
+    log::info!(
+        "ensure_manager_exists: created manager task for peer {}",
+        peer_address
+    );
 }
 
 pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
@@ -265,7 +298,7 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
             // Handle as an incoming request, send back a Response with the same request_id
             if msg.request_id.is_none() {
                 log::error!(
-                    "tcp channel: received request message but request id is missing. dropping request. message={:?}",
+                    "dispatch_message: received request message but request id is missing. dropping request. message={:?}",
                     msg
                 );
                 return;
@@ -280,7 +313,7 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
                 Some(id) => id,
                 None => {
                     log::error!(
-                        "tcp channel: received response message but request id is missing. dropping response. message={:?}",
+                        "dispatch_message: received response message but request id is missing. dropping response. message={:?}",
                         msg
                     );
                     return;
@@ -294,19 +327,19 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
             };
             if let Some(waiting_channel) = sender {
                 log::debug!(
-                    "tcp channel: matched response with pending request for request id {}",
+                    "dispatch_message: matched response with pending request for request id {}",
                     &request_id
                 );
                 // notify handler that is waiting for response
                 if waiting_channel.send(msg).is_err() {
                     log::warn!(
-                        "pending request {} was cancelled before response arrived",
+                        "dispatch_message: pending request {} was cancelled before response arrived",
                         request_id
                     );
                 }
             } else {
                 log::error!(
-                    "tcp channel: no pending request found for response with id {}",
+                    "dispatch_message: no pending request found for response with id {}",
                     &request_id
                 );
             }
@@ -319,7 +352,7 @@ pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, sta
     match msg.payload {
         PeerMessagePayload::Hello(_) => {
             log::warn!(
-                "unexpected Hello from peer {} (connection is already established)",
+                "dispatch_to_handler: unexpected Hello from peer {} (connection is already established)",
                 peer_address
             );
         }
@@ -335,6 +368,8 @@ pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, sta
         PeerMessagePayload::Conformance(mut cc_msg) => {
             // put the request id from the outer peer message into the cc message for the constraint handlers
             cc_msg.request_id = msg.request_id;
+            // add the sender address to respond to the sender
+            cc_msg.sender_address = Some(peer_address);
             tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
         }
         PeerMessagePayload::Overlay(overlay_msg) => {

@@ -1,0 +1,10 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_c2.sock"
+log_file = "distributed_appearance_counter2.log"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter2_event"
+reset = "Zero"

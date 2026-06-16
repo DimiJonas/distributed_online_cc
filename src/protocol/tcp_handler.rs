@@ -19,7 +19,7 @@ pub async fn handle_cli_message(
     request_id: Option<RequestId>,
 ) {
     log::debug!(
-        "tcp handler: received cli message id={} msg={}",
+        "handle_cli_message: received cli message id={} msg={}",
         msg_id,
         msg
     );
@@ -27,7 +27,7 @@ pub async fn handle_cli_message(
     match kind {
         MessageKind::Request => {
             log::info!(
-                "received request from peer {} saying: \"{}\"",
+                "handle_cli_message: received request from peer {} saying: \"{}\"",
                 msg.sender_addr,
                 msg.message
             );
@@ -36,7 +36,7 @@ pub async fn handle_cli_message(
                 Some(id) => id,
                 None => {
                     log::error!(
-                        "request did not contain a request id. cannot create a response. message={}",
+                        "handle_cli_message: request did not contain a request id. cannot create a response. message={}",
                         msg
                     );
                     return;
@@ -54,8 +54,12 @@ pub async fn handle_cli_message(
             );
 
             match send_to_peer(dest_peer, response, state.clone()).await {
-                Ok(()) => log::info!("sent response to {}", dest_peer),
-                Err(e) => log::error!("error sending response to peer {}: {}", dest_peer, e),
+                Ok(()) => log::info!("handle_cli_message: sent response to {}", dest_peer),
+                Err(e) => log::error!(
+                    "handle_cli_message: error sending response to peer {}: {}",
+                    dest_peer,
+                    e
+                ),
             }
         }
         MessageKind::Response => {
@@ -69,7 +73,7 @@ pub async fn handle_cli_message(
 
 pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageId) {
     log::debug!(
-        "tcp handler: handling conformance message with id={} msg={}",
+        "handle_cc_message: handling conformance message with id={} msg={}",
         &msg_id,
         msg
     );
@@ -78,7 +82,7 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageI
     {
         let mut result_store = state.cc_results.lock().unwrap();
         if !result_store.has_case(&msg.case_id) {
-            log::info!("tcp handler: new case detected; id={}", &msg.case_id);
+            log::info!("handle_cc_message: new case detected; id={}", &msg.case_id);
             let constraints = state.config.build_constraint_list();
             result_store.register_case(msg.case_id.clone(), &constraints);
         }
@@ -87,7 +91,7 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageI
     let constraint_handler = state.handlers.get_by_constraint_id(&msg.constraint_id);
     if constraint_handler.is_empty() {
         log::warn!(
-            "tcp handler: the received cc message did not match any configured constraints: message={}",
+            "handle_cc_message: the received cc message did not match any configured constraints: message={}",
             msg
         );
     } else {
@@ -106,7 +110,7 @@ pub async fn handle_td_message(
     _request_id: Option<RequestId>,
 ) {
     log::debug!(
-        "tcp handler: handling termination detection message message with id={} msg={}",
+        "handle_td_message: handling termination detection message message with id={} msg={}",
         &msg_id,
         msg
     );
@@ -121,7 +125,7 @@ pub async fn handle_overlay_message(
     _request_id: Option<RequestId>,
 ) {
     log::debug!(
-        "tcp handler: handling overlay message with id={} msg={}",
+        "handle_overlay_message: handling overlay message with id={} msg={}",
         &msg_id,
         msg
     );

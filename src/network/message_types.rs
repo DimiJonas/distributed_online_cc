@@ -224,6 +224,8 @@ pub struct CCMessage {
     pub token: Option<Token>,
     // present for: PullTokenRequest and requests in general
     pub request_id: Option<RequestId>,
+    // present for: PullTokenRequest
+    pub sender_address: Option<SocketAddr>,
 }
 
 impl CCMessage {
@@ -235,6 +237,7 @@ impl CCMessage {
             timestamp: None,
             token: None,
             request_id: None,
+            sender_address: None,
         }
     }
 
@@ -296,7 +299,11 @@ impl CCMessage {
 
 impl Display for CCMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CCMessage {}/{}", self.case_id, self.constraint_id)
+        write!(
+            f,
+            "CCMessage({:?}) for {}/{}",
+            self.message_type, self.case_id, self.constraint_id
+        )
     }
 }
 
