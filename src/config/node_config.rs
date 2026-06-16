@@ -186,7 +186,7 @@ pub enum MinMaxMode {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum AppearanceCounterReset {
     Zero,
-    Substract,
+    Subtract,
     Keep,
 }
 

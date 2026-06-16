@@ -1,0 +1,12 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_c.sock"
+log_file = "appearance_counter.log"
+
+[[constraints]]
+constraint_role = "AppearanceCounter"
+constraint_id = "appearance_test"
+event_id = "appearance_counter_event"
+mode = "Max"
+frequency = 3
+reset = "Zero"

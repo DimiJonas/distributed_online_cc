@@ -207,16 +207,54 @@ pub enum TokenPayload {
     None,
     Timestamps(Vec<EventTime>),
     ExecutionPermission(bool),
+    Counter(u64),
 }
 
 impl TokenPayload {
+    pub fn get_count(&self) -> u64 {
+        match self {
+            TokenPayload::Counter(count) => *count,
+            _ => 0,
+        }
+    }
+
+    pub fn increment_counter(&mut self) {
+        match self {
+            TokenPayload::Counter(count) => *count += 1,
+            TokenPayload::None => {
+                *self = TokenPayload::Counter(1);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn reset_counter(&mut self) {
+        match self {
+            TokenPayload::Counter(count) => *count = 0,
+            TokenPayload::None => {
+                *self = TokenPayload::Counter(0);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn subtract_counter(&mut self, amount: u64) {
+        match self {
+            TokenPayload::Counter(count) => *count = count.saturating_sub(amount),
+            TokenPayload::None => {
+                *self = TokenPayload::Counter(0);
+            }
+            _ => {}
+        }
+    }
+
     pub fn push_timestamp(&mut self, t: EventTime) {
         match self {
             TokenPayload::Timestamps(v) => v.push(t),
             TokenPayload::None => {
                 *self = TokenPayload::Timestamps(vec![t]);
             }
-            TokenPayload::ExecutionPermission { .. } => {}
+            _ => {}
         }
     }
 

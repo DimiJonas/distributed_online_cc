@@ -1,0 +1,10 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_t.sock"
+log_file = "appearance_trigger.log"
+
+[[constraints]]
+constraint_role = "AppearanceTrigger"
+constraint_id = "appearance_test"
+event_id = "appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001"]

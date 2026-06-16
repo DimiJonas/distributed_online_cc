@@ -24,8 +24,9 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "distributed appearance counter handler: received end event for case {}",
-            event.case_id
+            "distributed appearance counter handler: received configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
         );
     }
 
@@ -74,8 +75,9 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
 
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "distributed appearance trigger handler: received end event for case {}",
-            event.case_id
+            "distributed appearance trigger handler: rreceived configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
         );
     }
 

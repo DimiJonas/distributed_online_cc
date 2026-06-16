@@ -72,7 +72,7 @@ pub fn peer_manager_task(
 
                 PeerManagerMessage::ConnectionLost => {
                     log::warn!(
-                        "connection to {} lost, reconnecting in {}s",
+                        "connection to {} lost, reconnecting in {}",
                         peer_address,
                         humantime::format_duration(reconnect_delay)
                     );

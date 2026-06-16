@@ -39,8 +39,9 @@ impl ConstraintHandler for NotCoexistenceHandler {
     ///     - no: produce claim token an negotiate with other_peer, then check afterwards
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
-            "not coexistence handler: received end event for case {}",
-            event.case_id
+            "not coexistence handler: received configured event for constraint {}; event={}",
+            self.constraint_id,
+            event
         );
 
         let event_time = match event.timestamp_utc() {
