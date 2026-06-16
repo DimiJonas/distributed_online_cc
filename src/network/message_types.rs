@@ -6,7 +6,7 @@ use tokio::time::Instant;
 use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
-    types::{CaseId, ConstraintId, EventTime, MessageId, RequestId, Token},
+    types::{CaseId, ConstraintHandlerId, ConstraintId, EventTime, MessageId, RequestId, Token},
 };
 
 /// gets set once at startup
@@ -226,6 +226,9 @@ pub struct CCMessage {
     pub request_id: Option<RequestId>,
     // present for: PullTokenRequest
     pub sender_address: Option<SocketAddr>,
+    // present for: PushToken for NotCoexistence constraint pushing claim tokens
+    // used to differentiate if the token came from notcoexistence a or b handler which is needed when both are configured on the same node
+    pub creating_handler: Option<ConstraintHandlerId>,
 }
 
 impl CCMessage {
@@ -238,6 +241,7 @@ impl CCMessage {
             token: None,
             request_id: None,
             sender_address: None,
+            creating_handler: None,
         }
     }
 
@@ -249,6 +253,18 @@ impl CCMessage {
         );
         msg.timestamp = token.event_time;
         msg.token = Some(token);
+        msg
+    }
+
+    pub fn push_claim_token(token: Token, handler_id: ConstraintHandlerId) -> Self {
+        let mut msg = Self::base(
+            CCMessageType::PushToken,
+            token.case_id.clone(),
+            token.constraint_id.clone(),
+        );
+        msg.timestamp = token.event_time;
+        msg.token = Some(token);
+        msg.creating_handler = Some(handler_id);
         msg
     }
 

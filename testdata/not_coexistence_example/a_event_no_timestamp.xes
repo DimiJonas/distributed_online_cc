@@ -3,7 +3,7 @@
   <trace>
     <string key="concept:name" value="case-12"/>
     <event>
-      <string key="concept:name" value="not_coexistence_event_1"/>
+      <string key="concept:name" value="not_coexistence_a_event"/>
     </event>
   </trace>
 </log>

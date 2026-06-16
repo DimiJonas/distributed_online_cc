@@ -295,7 +295,7 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
             dispatch_to_handler(msg, peer_address, state).await;
         }
         MessageKind::Request => {
-            // Handle as an incoming request, send back a Response with the same request_id
+            // check that a request id is included before dispatching it
             if msg.request_id.is_none() {
                 log::error!(
                     "dispatch_message: received request message but request id is missing. dropping request. message={:?}",

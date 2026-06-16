@@ -1,0 +1,10 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_a.sock"
+log_file = "not_coexistence_a.log"
+
+[[constraints]]
+constraint_role = "NotCoexistenceA"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_a_event"
+b_peer = "127.0.0.1:8002"

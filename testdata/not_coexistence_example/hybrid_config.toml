@@ -4,13 +4,13 @@ unix_socket = "/tmp/event_listener.sock"
 log_file = "not_coexistence_hybrid.log"
 
 [[constraints]]
-constraint_role = "NotCoexistence"
+constraint_role = "NotCoexistenceA"
 constraint_id = "not_coexistence_test"
-event_id = "not_coexistence_event_1"
-other_peer = "127.0.0.1:8003"
+event_id = "not_coexistence_a_event"
+b_peer = "127.0.0.1:8003"
 
 [[constraints]]
-constraint_role = "NotCoexistence"
+constraint_role = "NotCoexistenceB"
 constraint_id = "not_coexistence_test"
-event_id = "not_coexistence_event_2"
-other_peer = "127.0.0.1:8003"
+event_id = "not_coexistence_b_event"
+a_peer = "127.0.0.1:8003"

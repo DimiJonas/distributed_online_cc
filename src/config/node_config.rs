@@ -282,10 +282,15 @@ pub enum ConstraintConfig {
         event_id: EventId,
         time_start_peers: Vec<SocketAddr>,
     },
-    NotCoexistence {
+    NotCoexistenceA {
         constraint_id: ConstraintId,
         event_id: EventId,
-        other_peer: SocketAddr,
+        b_peer: SocketAddr,
+    },
+    NotCoexistenceB {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        a_peer: SocketAddr,
     },
     AppearanceCounter {
         constraint_id: ConstraintId,
@@ -326,7 +331,8 @@ impl ConstraintConfig {
             ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStart { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStop { constraint_id, .. } => constraint_id,
-            ConstraintConfig::NotCoexistence { constraint_id, .. } => constraint_id,
+            ConstraintConfig::NotCoexistenceA { constraint_id, .. } => constraint_id,
+            ConstraintConfig::NotCoexistenceB { constraint_id, .. } => constraint_id,
             ConstraintConfig::AppearanceCounter { constraint_id, .. } => constraint_id,
             ConstraintConfig::AppearanceTrigger { constraint_id, .. } => constraint_id,
             ConstraintConfig::DistributedAppearanceCounter { constraint_id, .. } => constraint_id,
@@ -349,7 +355,8 @@ impl ConstraintConfig {
                 MinMaxMode::Min => ConstraintType::TimerStartMin,
             },
             ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
-            ConstraintConfig::NotCoexistence { .. } => ConstraintType::NotCoexistence,
+            ConstraintConfig::NotCoexistenceA { .. } => ConstraintType::NotCoexistence,
+            ConstraintConfig::NotCoexistenceB { .. } => ConstraintType::NotCoexistence,
             ConstraintConfig::AppearanceCounter { mode, .. } => match mode {
                 MinMaxMode::Max => ConstraintType::AppearanceMax,
                 MinMaxMode::Min => ConstraintType::AppearanceMin,
@@ -377,7 +384,8 @@ impl ConstraintConfig {
             ConstraintConfig::Sensor { event_id, .. } => event_id,
             ConstraintConfig::TimeStart { event_id, .. } => event_id,
             ConstraintConfig::TimeStop { event_id, .. } => event_id,
-            ConstraintConfig::NotCoexistence { event_id, .. } => event_id,
+            ConstraintConfig::NotCoexistenceA { event_id, .. } => event_id,
+            ConstraintConfig::NotCoexistenceB { event_id, .. } => event_id,
             ConstraintConfig::AppearanceCounter { event_id, .. } => event_id,
             ConstraintConfig::AppearanceTrigger { event_id, .. } => event_id,
             ConstraintConfig::DistributedAppearanceCounter { event_id, .. } => event_id,

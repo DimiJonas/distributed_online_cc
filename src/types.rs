@@ -147,7 +147,7 @@ impl Display for ConstraintType {
     }
 }
 
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
 pub enum ConstraintHandlerId {
     EndActivity,
     ResponseConsumer,
@@ -159,7 +159,8 @@ pub enum ConstraintHandlerId {
     TimeStart,
     TimeStop,
     Sensor,
-    NotCoexistence,
+    NotCoexistenceA,
+    NotCoexistenceB,
     AppearanceCounter,
     AppearanceTrigger,
     DistributedAppearanceCounter,
@@ -285,7 +286,7 @@ impl TokenPayload {
         }
     }
 
-    pub fn execution_is_allowed(&self) -> bool {
+    pub fn is_execution_allowed(&self) -> bool {
         match self {
             TokenPayload::ExecutionPermission(b) => *b,
             _ => false,

@@ -7,7 +7,9 @@ use crate::protocol::constraint_logic::distributed_appearance_constraint_handler
     DistributedAppearanceCounterHandler, DistributedAppearanceTriggerHandler,
 };
 use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
-use crate::protocol::constraint_logic::not_coexistence_handler::NotCoexistenceHandler;
+use crate::protocol::constraint_logic::not_coexistence_handler::{
+    NotCoexistenceAHandler, NotCoexistenceBHandler,
+};
 use crate::protocol::constraint_logic::order_constraint_handler::{
     OrderFirstHandler, OrderSecondHandler,
 };
@@ -146,15 +148,25 @@ impl HandlerRegistry {
                     event_id: event_id.clone(),
                     time_start_peers: time_start_peers.clone(),
                 }),
-                ConstraintConfig::NotCoexistence {
+                ConstraintConfig::NotCoexistenceA {
                     constraint_id,
                     event_id,
-                    other_peer,
-                } => Box::new(NotCoexistenceHandler {
-                    handler_id: ConstraintHandlerId::NotCoexistence,
+                    b_peer,
+                } => Box::new(NotCoexistenceAHandler {
+                    handler_id: ConstraintHandlerId::NotCoexistenceA,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
-                    other_peer: *other_peer,
+                    b_peer: *b_peer,
+                }),
+                ConstraintConfig::NotCoexistenceB {
+                    constraint_id,
+                    event_id,
+                    a_peer,
+                } => Box::new(NotCoexistenceBHandler {
+                    handler_id: ConstraintHandlerId::NotCoexistenceB,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    a_peer: *a_peer,
                 }),
                 ConstraintConfig::AppearanceCounter {
                     constraint_id,
