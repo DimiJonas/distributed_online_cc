@@ -3,8 +3,7 @@
   <trace>
     <string key="concept:name" value="case-12"/>
     <event>
-      <string key="concept:name" value="sensor_event"/>
-      <date key="time:timestamp" value="2026-05-04T11:00:00Z"/>
+      <string key="concept:name" value="sensor_collector_event"/>
       <float key="lt_value" value="10"/>
       <float key="gt_value" value="9"/>
       <float key="lte_value" value="10.1"/>

@@ -1,0 +1,80 @@
+node_id = 3
+tcp_listen_address = "127.0.0.1:8003"
+unix_socket = "/tmp/event_listener.sock"
+log_file = "sensor_hybrid.log"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_collector_event"
+attribute_key = "lt_value"
+mode = "<"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_collector_event"
+attribute_key = "gt_value"
+mode = ">"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_collector_event"
+attribute_key = "lte_value"
+mode = "<="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_collector_event"
+attribute_key = "gte_value"
+mode = ">="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_collector_event"
+attribute_key = "eq_value"
+mode = "=="
+value = 10
+max_value_age = "10s"
+
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8003"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8003"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8003"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8003"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8003"]

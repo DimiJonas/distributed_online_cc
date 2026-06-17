@@ -65,7 +65,7 @@ impl NodeConfig {
         let mut attributes =
             HashSet::from(["concept:name".to_string(), "time:timestamp".to_string()]);
         attributes.extend(self.constraints.iter().filter_map(|c| {
-            if let ConstraintConfig::Sensor { attribute_key, .. } = c {
+            if let ConstraintConfig::SensorCollector { attribute_key, .. } = c {
                 Some(attribute_key.clone().to_lowercase())
             } else {
                 None
@@ -262,13 +262,20 @@ pub enum ConstraintConfig {
         event_id: EventId,
         order_first_peers: Vec<SocketAddr>,
     },
-    Sensor {
+    SensorCollector {
         constraint_id: ConstraintId,
         event_id: EventId,
         attribute_key: String,
         #[serde(deserialize_with = "deserialize_f64")]
         value: f64,
         mode: SensorConstraintMode,
+        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        max_value_age: Duration,
+    },
+    SensorTrigger {
+        constraint_id: ConstraintId,
+        event_id: EventId,
+        collector_peers: Vec<SocketAddr>,
     },
     TimeStart {
         constraint_id: ConstraintId,
@@ -328,7 +335,8 @@ impl ConstraintConfig {
             ConstraintConfig::PrecedenceConsumer { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderFirst { constraint_id, .. } => constraint_id,
             ConstraintConfig::OrderSecond { constraint_id, .. } => constraint_id,
-            ConstraintConfig::Sensor { constraint_id, .. } => constraint_id,
+            ConstraintConfig::SensorCollector { constraint_id, .. } => constraint_id,
+            ConstraintConfig::SensorTrigger { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStart { constraint_id, .. } => constraint_id,
             ConstraintConfig::TimeStop { constraint_id, .. } => constraint_id,
             ConstraintConfig::NotCoexistenceA { constraint_id, .. } => constraint_id,
@@ -349,7 +357,8 @@ impl ConstraintConfig {
             ConstraintConfig::PrecedenceConsumer { .. } => ConstraintType::Precedence,
             ConstraintConfig::OrderFirst { .. } => ConstraintType::Order,
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
-            ConstraintConfig::Sensor { .. } => ConstraintType::Sensor,
+            ConstraintConfig::SensorCollector { .. } => ConstraintType::Sensor,
+            ConstraintConfig::SensorTrigger { .. } => ConstraintType::Sensor,
             ConstraintConfig::TimeStart { mode, .. } => match mode {
                 MinMaxMode::Max => ConstraintType::TimerStartMax,
                 MinMaxMode::Min => ConstraintType::TimerStartMin,
@@ -381,7 +390,8 @@ impl ConstraintConfig {
             ConstraintConfig::PrecedenceConsumer { event_id, .. } => event_id,
             ConstraintConfig::OrderFirst { event_id, .. } => event_id,
             ConstraintConfig::OrderSecond { event_id, .. } => event_id,
-            ConstraintConfig::Sensor { event_id, .. } => event_id,
+            ConstraintConfig::SensorCollector { event_id, .. } => event_id,
+            ConstraintConfig::SensorTrigger { event_id, .. } => event_id,
             ConstraintConfig::TimeStart { event_id, .. } => event_id,
             ConstraintConfig::TimeStop { event_id, .. } => event_id,
             ConstraintConfig::NotCoexistenceA { event_id, .. } => event_id,

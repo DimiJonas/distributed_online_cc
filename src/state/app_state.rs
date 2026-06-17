@@ -5,6 +5,7 @@ use crate::state::meta_token_store::MetaTokenStore;
 use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::result_send_buffer::ConstraintResultSendBuffer;
+use crate::state::sensor_event_store::SensorEventStore;
 use crate::state::timer_token_store::TimerTokenStore;
 use crate::state::token_in_store::TokenInStore;
 use crate::state::token_out_store::TokenOutStore;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub timer_token_store: Arc<Mutex<TimerTokenStore>>,
     pub meta_token_store: Arc<Mutex<MetaTokenStore>>,
     pub loopback_q: mpsc::Sender<PeerMessage>,
+    pub sensor_events: Arc<Mutex<SensorEventStore>>,
 }
 
 impl AppState {
@@ -51,6 +53,7 @@ impl AppState {
             timer_token_store: Arc::new(Mutex::new(TimerTokenStore::new())),
             meta_token_store: Arc::new(Mutex::new(MetaTokenStore::new())),
             loopback_q,
+            sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
         }
     }
 }

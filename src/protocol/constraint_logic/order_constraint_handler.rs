@@ -38,7 +38,17 @@ impl ConstraintHandler for OrderFirstHandler {
             event
         );
 
-        let order_first_event_time = event.timestamp_utc().unwrap_or(Utc::now());
+        let order_first_event_time = {
+            if let Some(timestamp) = event.timestamp_utc() {
+                timestamp
+            } else {
+                log::warn!(
+                    "order first handler: order first event did not contain a timestamp - using current time as event time"
+                );
+                Utc::now()
+            }
+        };
+
         if let Some(blocking_token) = {
             let token_in = state.token_in.lock().unwrap();
             token_in.get_in_cloned(&event.case_id, &self.constraint_id, self.handler_id)
@@ -275,7 +285,7 @@ impl ConstraintHandler for OrderSecondHandler {
                 timestamp
             } else {
                 log::warn!(
-                    "order second handler: precedence consumer event did not contain a timestamp - using current time as event time"
+                    "order second handler: order second event did not contain a timestamp - using current time as event time"
                 );
                 Utc::now()
             }

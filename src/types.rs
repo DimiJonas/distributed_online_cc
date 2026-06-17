@@ -14,6 +14,8 @@ pub type TokenId = Uuid;
 pub type EventInstanceId = Uuid;
 pub type MessageId = Uuid;
 pub type EventTime = DateTime<Utc>;
+pub type SensorEventKey = String;
+pub type SensorEventValue = f64;
 
 #[derive(Debug)]
 pub enum CliCommand {
@@ -158,7 +160,8 @@ pub enum ConstraintHandlerId {
     OrderSecond,
     TimeStart,
     TimeStop,
-    Sensor,
+    SensorCollector,
+    SensorTrigger,
     NotCoexistenceA,
     NotCoexistenceB,
     AppearanceCounter,

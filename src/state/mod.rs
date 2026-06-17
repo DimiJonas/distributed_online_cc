@@ -4,6 +4,7 @@ pub mod meta_token_store;
 pub mod peer_manager_map;
 pub mod pending_requests;
 pub mod result_send_buffer;
+pub mod sensor_event_store;
 pub mod timer_token_store;
 pub mod token_in_store;
 pub mod token_out_store;

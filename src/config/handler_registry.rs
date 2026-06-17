@@ -19,7 +19,9 @@ use crate::protocol::constraint_logic::precedence_constraint_handler::{
 use crate::protocol::constraint_logic::response_constraint_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };
-use crate::protocol::constraint_logic::sensor_constraint_handler::SensorConstraintHandler;
+use crate::protocol::constraint_logic::sensor_constraint_handler::{
+    SensorCollectorHandler, SensorTriggerHandler,
+};
 use crate::protocol::constraint_logic::time_constraint_handler::{
     TimeStartHandler, TimeStopHandler,
 };
@@ -112,19 +114,31 @@ impl HandlerRegistry {
                     event_id: event_id.clone(),
                     order_first_peers: order_first_peers.clone(),
                 }),
-                ConstraintConfig::Sensor {
+                ConstraintConfig::SensorCollector {
                     constraint_id,
                     event_id,
                     attribute_key,
                     value,
                     mode,
-                } => Box::new(SensorConstraintHandler {
-                    handler_id: ConstraintHandlerId::Sensor,
+                    max_value_age,
+                } => Box::new(SensorCollectorHandler {
+                    handler_id: ConstraintHandlerId::SensorCollector,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     attribute_key: attribute_key.clone(),
                     value: *value,
                     mode: mode.clone(),
+                    max_value_age: *max_value_age,
+                }),
+                ConstraintConfig::SensorTrigger {
+                    constraint_id,
+                    event_id,
+                    collector_peers,
+                } => Box::new(SensorTriggerHandler {
+                    handler_id: ConstraintHandlerId::SensorTrigger,
+                    constraint_id: constraint_id.clone(),
+                    event_id: event_id.clone(),
+                    collector_peers: collector_peers.clone(),
                 }),
                 ConstraintConfig::TimeStart {
                     constraint_id,
