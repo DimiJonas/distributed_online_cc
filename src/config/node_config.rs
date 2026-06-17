@@ -247,11 +247,11 @@ pub enum ConstraintConfig {
     PrecedenceProducer {
         constraint_id: ConstraintId,
         event_id: EventId,
+        consumer_peers: Vec<SocketAddr>,
     },
     PrecedenceConsumer {
         constraint_id: ConstraintId,
         event_id: EventId,
-        producer_peers: Vec<SocketAddr>,
     },
     OrderFirst {
         constraint_id: ConstraintId,

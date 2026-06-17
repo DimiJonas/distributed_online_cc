@@ -7,9 +7,9 @@ log_file = "precedence-hybrid.log"
 constraint_role = "PrecedenceConsumer"
 constraint_id = "precedence_test"
 event_id = "precedence_consumer_event"
-producer_peers = ["127.0.0.1:8003"]
 
 [[constraints]]
 constraint_role = "PrecedenceProducer"
 constraint_id = "precedence_test"
 event_id = "precedence_producer_event"
+consumer_peers = ["127.0.0.1:8003"]

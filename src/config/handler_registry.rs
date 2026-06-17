@@ -81,20 +81,20 @@ impl HandlerRegistry {
                 ConstraintConfig::PrecedenceProducer {
                     constraint_id,
                     event_id,
+                    consumer_peers,
                 } => Box::new(PrecedenceProducerHandler {
                     handler_id: ConstraintHandlerId::PrecedenceProducer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
+                    consumer_peers: consumer_peers.clone(),
                 }),
                 ConstraintConfig::PrecedenceConsumer {
                     constraint_id,
                     event_id,
-                    producer_peers,
                 } => Box::new(PrecedenceConsumerHandler {
                     handler_id: ConstraintHandlerId::PrecedenceConsumer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
-                    producer_peers: producer_peers.clone(),
                 }),
                 ConstraintConfig::OrderFirst {
                     constraint_id,

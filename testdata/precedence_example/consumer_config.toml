@@ -7,4 +7,3 @@ log_file = "precedence-consumer.log"
 constraint_role = "PrecedenceConsumer"
 constraint_id = "precedence_test"
 event_id = "precedence_consumer_event"
-producer_peers = ["127.0.0.1:8001"]
