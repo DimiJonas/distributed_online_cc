@@ -49,3 +49,6 @@ humantime = "2.3.0"
 
 # create custom errors
 thiserror = "2.0.18"
+
+# database for result sink
+rusqlite = {version = "0.39.0", features = ["bundled"] }

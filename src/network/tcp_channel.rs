@@ -270,12 +270,8 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
         return;
     }
     // TODO: configurable channel size?
-    let (manager_sender, manager_receiver) = mpsc::channel(
-        state
-            .config
-            .tcp_channels
-            .peer_manager_task_mpsc_channel_size,
-    );
+    let (manager_sender, manager_receiver) =
+        mpsc::channel(state.config.tcp_channels.peer_manager_mpsc_channel_size);
     managers.insert(peer_address, manager_sender);
     tokio::spawn(peer_manager_task(
         peer_address,
@@ -389,6 +385,20 @@ pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, sta
                 msg.message_kind,
                 msg.request_id,
             ));
+        }
+        PeerMessagePayload::Result(res_msg) => {
+            log::info!(
+                "received conformance result message for {}/{}",
+                res_msg.case_id,
+                res_msg.constraint_id
+            );
+            if let Err(e) = state.result_sink_channel.send(res_msg.clone()).await {
+                log::error!(
+                    "dispatch_to_handler: error passing result message {} to result sink: {}",
+                    res_msg,
+                    e
+                );
+            }
         }
     }
 }

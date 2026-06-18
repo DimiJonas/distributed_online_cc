@@ -378,7 +378,8 @@ mod tests {
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2);
+        let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2, tx3);
 
         {
             let mut store = state.cc_results.lock().unwrap();

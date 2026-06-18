@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -19,7 +20,7 @@ pub async fn watchdog_task(
     state: AppState,
 ) {
     tokio::select! {
-        _ = tokio::time::sleep(duration) => {
+        _ = sleep(duration) => {
             // timeout - stop event never arrived
 
             // remove cancel token (leave parent cancel token unaffected)

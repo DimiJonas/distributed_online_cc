@@ -1,5 +1,5 @@
 use crate::config::{handler_registry::HandlerRegistry, node_config::NodeConfig};
-use crate::network::message_types::PeerMessage;
+use crate::network::message_types::{CCResultMessage, PeerMessage};
 use crate::state::cc_result_store::CCResultStore;
 use crate::state::meta_token_store::MetaTokenStore;
 use crate::state::peer_manager_map::PeerManagerMap;
@@ -30,6 +30,7 @@ pub struct AppState {
     pub meta_token_store: Arc<Mutex<MetaTokenStore>>,
     pub loopback_q: mpsc::Sender<PeerMessage>,
     pub sensor_events: Arc<Mutex<SensorEventStore>>,
+    pub result_sink_channel: mpsc::Sender<CCResultMessage>,
 }
 
 impl AppState {
@@ -37,6 +38,7 @@ impl AppState {
         config: NodeConfig,
         event_q: mpsc::Sender<TracedEvent>,
         loopback_q: mpsc::Sender<PeerMessage>,
+        result_sink_channel: mpsc::Sender<CCResultMessage>,
     ) -> Self {
         let handlers = Arc::new(HandlerRegistry::build(&config));
         Self {
@@ -54,6 +56,7 @@ impl AppState {
             meta_token_store: Arc::new(Mutex::new(MetaTokenStore::new())),
             loopback_q,
             sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
+            result_sink_channel,
         }
     }
 }

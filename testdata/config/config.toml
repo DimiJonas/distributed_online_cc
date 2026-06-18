@@ -4,14 +4,21 @@ unix_socket = "/tmp/event_listener.sock"
 event_queue_size = 100
 loopback_queue_size = 100
 log_file = "app.log"
+result_sink_address = "127.0.0.1:8000"
 
 [tcp_channels]
 tcp_channel_mpsc_channel_size = 100
-peer_manager_task_mpsc_channel_size = 256
+peer_manager_mpsc_channel_size = 256
 message_queue_size = 256
 reconnect_start_delay = "1s"
 reconnect_max_delay = "30s"
 wait_for_response_timeout = "20s"
+
+[result_sink]
+db_path = "results.db"
+mpsc_channel_size = 1024
+retry_interval = "15s"
+retry_buffer_size = 4096
 
 [[constraints]]
 constraint_role = "EndActivity"

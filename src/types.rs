@@ -170,7 +170,7 @@ pub enum ConstraintHandlerId {
     DistributedAppearanceTrigger,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum ConstraintResultType {
     Violated,
     TemporarilyViolated,

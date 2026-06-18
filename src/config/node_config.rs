@@ -32,6 +32,8 @@ pub struct NodeConfig {
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
     #[serde(default)]
     pub default_result_buffer: ResultBufferConfig,
+    pub result_sink_address: Option<SocketAddr>,
+    pub result_sink: Option<ResultSinkConfig>,
 }
 
 impl NodeConfig {
@@ -86,8 +88,8 @@ impl NodeConfig {
 pub struct TcpChannelConfig {
     #[serde(default = "default_tcp_channel_mpsc_channel_size")]
     pub tcp_channel_mpsc_channel_size: usize,
-    #[serde(default = "default_peer_manager_task_mpsc_channel_size")]
-    pub peer_manager_task_mpsc_channel_size: usize,
+    #[serde(default = "default_peer_manager_mpsc_channel_size")]
+    pub peer_manager_mpsc_channel_size: usize,
     #[serde(default = "default_tcp_message_queue_size")]
     pub message_queue_size: usize,
     #[serde(
@@ -111,7 +113,7 @@ impl Default for TcpChannelConfig {
     fn default() -> Self {
         Self {
             tcp_channel_mpsc_channel_size: default_tcp_channel_mpsc_channel_size(),
-            peer_manager_task_mpsc_channel_size: default_peer_manager_task_mpsc_channel_size(),
+            peer_manager_mpsc_channel_size: default_peer_manager_mpsc_channel_size(),
             message_queue_size: default_tcp_message_queue_size(),
             reconnect_start_delay: default_tcp_reconnect_start_delay(),
             reconnect_max_delay: default_tcp_reconnect_max_delay(),
@@ -119,6 +121,21 @@ impl Default for TcpChannelConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResultSinkConfig {
+    pub db_path: String,
+    #[serde(default = "default_result_sink_mpsc_channel_size")]
+    pub mpsc_channel_size: usize,
+    #[serde(
+        default = "default_retry_interval",
+        deserialize_with = "deserialize_humantime_duration"
+    )]
+    pub retry_interval: Duration,
+    #[serde(default = "default_retry_buffer_size")]
+    pub retry_buffer_size: usize,
+}
+
 #[derive(Debug, PartialEq, Serialize, Clone)]
 pub enum SensorConstraintMode {
     Lt,
@@ -440,12 +457,24 @@ fn default_tcp_reconnect_max_delay() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_peer_manager_task_mpsc_channel_size() -> usize {
+fn default_peer_manager_mpsc_channel_size() -> usize {
     256
 }
 
 fn default_wait_for_response_timeout() -> Duration {
     Duration::from_secs(20)
+}
+
+fn default_result_sink_mpsc_channel_size() -> usize {
+    1024
+}
+
+fn default_retry_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_retry_buffer_size() -> usize {
+    4096
 }
 
 // deserialize a value that can be int or float

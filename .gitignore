@@ -4,3 +4,6 @@
 *.zip
 *.log
 *.lock
+*.db
+*.db-shm
+*.db-wal

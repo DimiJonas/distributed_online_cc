@@ -24,10 +24,18 @@ async fn main() {
 
     // create event queue
     let (event_q_tx, _event_q_rx) = mpsc::channel(config.event_queue_size);
-    // create loopback message queue - it decouples tcp router from tcp channel for messages that are mean for the own host that skip the tcp communication
+    // create loopback message queue - it decouples tcp router from tcp channel for messages that are meant for the own host that skip the tcp communication
     let (loopback_q_tx, loopback_q_rx) = mpsc::channel(config.loopback_queue_size);
+    // create result sync channel - decouples the asynchronous system from the synchronous/blocking database connection
+    let sink_channel_size = {
+        match config.result_sink.as_ref() {
+            Some(sink_config) => sink_config.mpsc_channel_size,
+            None => 16,
+        }
+    };
+    let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
 
-    let state = AppState::new(config, event_q_tx, loopback_q_tx);
+    let state = AppState::new(config, event_q_tx, loopback_q_tx, sink_tx);
 
     setup_tcp_channels(state.clone()).await;
 
@@ -45,6 +53,15 @@ async fn main() {
         state.clone(),
         loopback_q_rx,
     );
+
+    // spawn result sink if configured
+    if let Some(result_sink_config) = state.config.result_sink.as_ref() {
+        // TODO: wrap config in Arc<> and pass it so cloning is cheap
+        distributed_online_cc::app::result_sink::spawn_result_sink(
+            result_sink_config.clone(),
+            sink_rx,
+        );
+    }
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();

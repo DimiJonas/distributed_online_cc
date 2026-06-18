@@ -464,7 +464,8 @@ mod tests {
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2);
+        let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2, tx3);
 
         let mut mgr_rx = register_manager(&state, producer_addr);
 
@@ -510,7 +511,8 @@ mod tests {
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2);
+        let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2, tx3);
 
         let mut rx1 = register_manager(&state, p1);
         let mut rx2 = register_manager(&state, p2);

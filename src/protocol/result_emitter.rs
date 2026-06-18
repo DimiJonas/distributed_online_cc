@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use tokio_util::sync::CancellationToken;
 
 /// this module is used to realize the different result publication strategies:
@@ -7,6 +8,10 @@ use tokio_util::sync::CancellationToken;
 ///     - grace period
 ///     - revocable result
 use crate::{
+    network::{
+        message_types::{CCResultMessage, PeerMessage},
+        tcp_router::send_to_peer,
+    },
     state::{app_state::AppState, result_send_buffer::ResultBufferPolicy},
     types::{CaseId, ConstraintId, ConstraintResultType},
 };
@@ -34,6 +39,8 @@ pub async fn emit_result(
         info,
     );
 
+    let result_receive_time = Utc::now();
+
     let policy = state.config.result_buffer_policy(constraint_id);
 
     match policy {
@@ -47,9 +54,17 @@ pub async fn emit_result(
             // Immediate: no buffering at all
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result.clone(), info.clone());
+                results.update(case_id, constraint_id, result, info.clone());
             }
-            send_result_outbound(case_id, constraint_id, &result, &info, state.clone()).await;
+            send_result_outbound(
+                case_id,
+                constraint_id,
+                result,
+                &info,
+                state.clone(),
+                result_receive_time,
+            )
+            .await;
 
             call_finalizers(case_id, constraint_id, state.clone()).await;
         }
@@ -58,7 +73,7 @@ pub async fn emit_result(
             // only update cc result store for now
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result.clone(), info.clone());
+                results.update(case_id, constraint_id, result, info.clone());
             }
 
             // buffer the send and (re)start the grace timer
@@ -73,6 +88,7 @@ pub async fn emit_result(
                 case_id.clone(),
                 constraint_id.clone(),
                 cancel_token,
+                result_receive_time,
             ));
         }
 
@@ -80,9 +96,17 @@ pub async fn emit_result(
             // write to cc_results and send immediately; allow overwrite within window
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result.clone(), info.clone());
+                results.update(case_id, constraint_id, result, info.clone());
             }
-            send_result_outbound(case_id, constraint_id, &result, &info, state.clone()).await;
+            send_result_outbound(
+                case_id,
+                constraint_id,
+                result,
+                &info,
+                state.clone(),
+                result_receive_time,
+            )
+            .await;
 
             let cancel_token = {
                 let mut buf = state.result_send_buffer.lock().unwrap();
@@ -106,6 +130,7 @@ async fn grace_period_timer(
     case_id: CaseId,
     constraint_id: ConstraintId,
     cancel_token: CancellationToken,
+    created_at: DateTime<Utc>,
 ) {
     tokio::select! {
         _ = tokio::time::sleep(duration) => {
@@ -122,7 +147,8 @@ async fn grace_period_timer(
                 // is the outbound dispatch.
                 send_result_outbound(
                     &case_id, &constraint_id,
-                    &pending.result, &pending.info, state.clone(),
+                    pending.result, &pending.info, state.clone(),
+                    created_at,
                 ).await;
             }
 
@@ -172,17 +198,48 @@ async fn revocable_result_timer(
 async fn send_result_outbound(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
-    result: &ConstraintResultType,
-    _info: &str,
-    _state: AppState,
+    result: ConstraintResultType,
+    info: &str,
+    state: AppState,
+    created_at: DateTime<Utc>,
 ) {
-    // TODO: serialize and send the result somewhere
-    log::info!(
-        "send_result_outbound: ({}/{}) -> {} (sending not yet implemented)",
-        case_id,
-        constraint_id,
-        result
-    );
+    let sink_address = state.config.result_sink_address;
+
+    match sink_address {
+        Some(address) => {
+            // sink was configured - sending result there
+            let result_message = PeerMessage::result(CCResultMessage {
+                created_at,
+                info: info.to_string(),
+                case_id: case_id.clone(),
+                constraint_id: constraint_id.clone(),
+                result,
+            });
+            log::info!(
+                "send_result_outbound: sending result message {} to result sink at {}",
+                result_message,
+                address,
+            );
+            if let Err(e) = send_to_peer(address, result_message.clone(), state.clone()).await {
+                log::error!(
+                    "send_result_outbound: error sending result message {} to {} (result sink): {}",
+                    result_message,
+                    address,
+                    e
+                );
+            }
+        }
+        None => {
+            // no sink configured - logging result
+            log::info!(
+                "send_result_outbound: RESULT for case/constraint {}/{} is {}: {}",
+                case_id,
+                constraint_id,
+                result,
+                info
+            );
+        }
+    }
 }
 
 /// call finalize on the corresponding constraint handlers to clean up state
@@ -208,11 +265,21 @@ pub async fn emit_result_immediate(
     info: String,
     state: AppState,
 ) {
+    let result_receive_time = Utc::now();
+
     {
         let mut results = state.cc_results.lock().unwrap();
-        results.update(case_id, constraint_id, result.clone(), info.clone());
+        results.update(case_id, constraint_id, result, info.clone());
     }
-    send_result_outbound(case_id, constraint_id, &result, &info, state.clone()).await;
+    send_result_outbound(
+        case_id,
+        constraint_id,
+        result,
+        &info,
+        state.clone(),
+        result_receive_time,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -251,7 +318,6 @@ mod tests {
             .get_constraint(&case.to_string(), &constraint.to_string())
             .expect("constraint not registered")
             .constraint_result
-            .clone()
     }
 
     // ── Immediate policy ─────────────────────────────────────────────────

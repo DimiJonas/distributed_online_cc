@@ -1,12 +1,16 @@
 use std::{fmt::Display, net::SocketAddr, sync::OnceLock, time::Duration};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
-    types::{CaseId, ConstraintHandlerId, ConstraintId, EventTime, MessageId, RequestId, Token},
+    types::{
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, EventTime, MessageId,
+        RequestId, Token,
+    },
 };
 
 /// gets set once at startup
@@ -144,6 +148,10 @@ impl PeerMessage {
     pub fn termination(msg: TerminationDetectionMessage) -> Self {
         Self::new(PeerMessagePayload::TerminationDetection(msg))
     }
+
+    pub fn result(msg: CCResultMessage) -> Self {
+        Self::new(PeerMessagePayload::Result(msg))
+    }
 }
 
 impl Display for PeerMessage {
@@ -159,6 +167,7 @@ pub enum PeerMessagePayload {
     Conformance(CCMessage),
     Overlay(OverlayMessage),
     TerminationDetection(TerminationDetectionMessage),
+    Result(CCResultMessage),
 }
 
 impl Display for PeerMessagePayload {
@@ -169,6 +178,7 @@ impl Display for PeerMessagePayload {
             PeerMessagePayload::Conformance(_) => write!(f, "conformance"),
             PeerMessagePayload::Overlay(_) => write!(f, "overlay"),
             PeerMessagePayload::TerminationDetection(_) => write!(f, "termination detection"),
+            PeerMessagePayload::Result(_) => write!(f, "result"),
         }
     }
 }
@@ -319,6 +329,26 @@ impl Display for CCMessage {
             f,
             "CCMessage({:?}) for {}/{}",
             self.message_type, self.case_id, self.constraint_id
+        )
+    }
+}
+
+// only used to send results to the result sink
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CCResultMessage {
+    pub created_at: DateTime<Utc>,
+    pub info: String,
+    pub case_id: CaseId,
+    pub constraint_id: ConstraintId,
+    pub result: ConstraintResultType,
+}
+
+impl Display for CCResultMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CCResultMessage({:?}) for {}/{}",
+            self.result, self.case_id, self.constraint_id
         )
     }
 }
