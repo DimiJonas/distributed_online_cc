@@ -14,7 +14,7 @@ impl CCResultStore {
 
     // register a new case by initializing a constraint result map according to the constraint configuration
     pub fn register_case(&mut self, case_id: CaseId) {
-        self.results.entry(case_id).or_insert_with(HashMap::new);
+        self.results.entry(case_id).or_default();
     }
 
     pub fn upsert(
@@ -25,17 +25,14 @@ impl CCResultStore {
         constraint_result: ConstraintResultType,
         info: String,
     ) -> Option<ConstraintResult> {
-        self.results
-            .entry(case_id.clone())
-            .or_insert_with(HashMap::new)
-            .insert(
-                constraint_id.clone(),
-                ConstraintResult {
-                    constraint_type,
-                    constraint_result,
-                    info,
-                },
-            )
+        self.results.entry(case_id.clone()).or_default().insert(
+            constraint_id.clone(),
+            ConstraintResult {
+                constraint_type,
+                constraint_result,
+                info,
+            },
+        )
     }
 
     pub fn get_constraint(
@@ -110,13 +107,6 @@ impl Default for CCResultStore {
 mod tests {
     use super::*;
     use crate::types::{ConstraintResultType, ConstraintType};
-
-    fn constraints() -> Vec<(ConstraintId, ConstraintType)> {
-        vec![
-            ("c-response".to_string(), ConstraintType::Response),
-            ("c-end".to_string(), ConstraintType::EndActivity),
-        ]
-    }
 
     #[test]
     fn new_store_has_no_cases() {

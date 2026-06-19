@@ -4,7 +4,7 @@ unix_socket = "/tmp/event_listener.sock"
 event_queue_size = 100
 loopback_queue_size = 100
 log_file = "app.log"
-result_sink_address = "127.0.0.1:8000"
+result_sink_addresses = ["127.0.0.1:8000"]
 
 [tcp_channels]
 tcp_channel_mpsc_channel_size = 100

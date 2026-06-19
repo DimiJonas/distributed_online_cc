@@ -226,11 +226,9 @@ async fn send_result_outbound(
     state: AppState,
     created_at: DateTime<Utc>,
 ) {
-    let sink_address = state.config.result_sink_address;
-
-    match sink_address {
-        Some(address) => {
-            // sink was configured - sending result there
+    match &state.config.result_sink_addresses {
+        Some(addresses) => {
+            // sink addresses were configured - sending result there
             let result_message = PeerMessage::result(CCResultMessage {
                 created_at,
                 info: info.to_string(),
@@ -239,18 +237,21 @@ async fn send_result_outbound(
                 constraint_id: constraint_id.clone(),
                 result,
             });
-            log::info!(
-                "send_result_outbound: sending result message {} to result sink at {}",
-                result_message,
-                address,
-            );
-            if let Err(e) = send_to_peer(address, result_message.clone(), state.clone()).await {
-                log::error!(
-                    "send_result_outbound: error sending result message {} to {} (result sink): {}",
+            for address in addresses {
+                log::info!(
+                    "send_result_outbound: sending result message {} to result sink at {}",
                     result_message,
                     address,
-                    e
                 );
+                if let Err(e) = send_to_peer(*address, result_message.clone(), state.clone()).await
+                {
+                    log::error!(
+                        "send_result_outbound: error sending result message {} to {} (result sink): {}",
+                        result_message,
+                        address,
+                        e
+                    );
+                }
             }
         }
         None => {

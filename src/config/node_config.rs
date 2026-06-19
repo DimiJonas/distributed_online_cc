@@ -32,7 +32,7 @@ pub struct NodeConfig {
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
     #[serde(default)]
     pub default_result_buffer: ResultBufferConfig,
-    pub result_sink_address: Option<SocketAddr>,
+    pub result_sink_addresses: Option<Vec<SocketAddr>>,
     pub result_sink: Option<ResultSinkConfig>,
 }
 

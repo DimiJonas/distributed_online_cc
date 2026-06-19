@@ -2,7 +2,7 @@ node_id = 3
 tcp_listen_address = "127.0.0.1:8003"
 unix_socket = "/tmp/event_listener.sock"
 log_file = "appearance_hybrid.log"
-result_sink_address = "127.0.0.1:8003"
+result_sink_addresses = ["127.0.0.1:8003"]
 
 [result_sink]
 db_path = "results.db"

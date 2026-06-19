@@ -401,7 +401,6 @@ mod tests {
             .get_constraint(&CASE.to_string(), &CID.to_string())
             .expect("not registered")
             .constraint_result
-            .clone()
     }
 
     fn live_count(state: &AppState) -> usize {

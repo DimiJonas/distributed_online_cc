@@ -33,7 +33,7 @@ fn make_base_config() -> NodeConfig {
         message_ttl: Duration::from_secs(30),
         event_queue_size: 100,
         loopback_queue_size: 100,
-        result_sink_address: None,
+        result_sink_addresses: None,
         result_sink: None,
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
