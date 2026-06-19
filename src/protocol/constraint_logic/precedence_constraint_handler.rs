@@ -144,6 +144,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 emit_result(
                     &event.case_id,
                     &self.constraint_id,
+                    ConstraintType::Precedence,
                     ConstraintResultType::Violated,
                     info,
                     state.clone(),
@@ -177,6 +178,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         emit_result(
             &event.case_id,
             &self.constraint_id,
+            ConstraintType::Precedence,
             result,
             info,
             state.clone(),

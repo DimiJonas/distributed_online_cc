@@ -143,6 +143,7 @@ impl ConstraintHandler for ResponseProducerHandler {
         emit_result(
             case_id,
             &self.constraint_id,
+            ConstraintType::Response,
             constraint_result,
             info,
             state.clone(),
@@ -262,7 +263,7 @@ mod tests {
             response_constraint_handler::{ResponseConsumerHandler, ResponseProducerHandler},
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintType},
+        types::ConstraintHandlerId,
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state_from_config, register_manager,
         },
@@ -289,10 +290,7 @@ mod tests {
         let state = make_producer_state(20000);
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c1".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c1".to_string());
         }
 
         let handler = ResponseProducerHandler {
@@ -317,10 +315,7 @@ mod tests {
         let state = make_producer_state(20010);
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c2".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c2".to_string());
         }
 
         let handler = ResponseProducerHandler {
@@ -354,10 +349,7 @@ mod tests {
         let state = make_producer_state(20020);
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c3".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c3".to_string());
         }
 
         let handler = ResponseProducerHandler {
@@ -389,10 +381,7 @@ mod tests {
         let state = make_producer_state(20030);
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c4".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c4".to_string());
         }
 
         let handler = ResponseProducerHandler {
@@ -422,10 +411,7 @@ mod tests {
         let state = make_producer_state(20040);
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c5".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c5".to_string());
         }
 
         let handler = ResponseProducerHandler {

@@ -376,25 +376,18 @@ impl ConstraintConfig {
             ConstraintConfig::OrderSecond { .. } => ConstraintType::Order,
             ConstraintConfig::SensorCollector { .. } => ConstraintType::Sensor,
             ConstraintConfig::SensorTrigger { .. } => ConstraintType::Sensor,
-            ConstraintConfig::TimeStart { mode, .. } => match mode {
-                MinMaxMode::Max => ConstraintType::TimerStartMax,
-                MinMaxMode::Min => ConstraintType::TimerStartMin,
-            },
-            ConstraintConfig::TimeStop { .. } => ConstraintType::TimerStop,
+            ConstraintConfig::TimeStart { .. } => ConstraintType::Time,
+            ConstraintConfig::TimeStop { .. } => ConstraintType::Time,
             ConstraintConfig::NotCoexistenceA { .. } => ConstraintType::NotCoexistence,
             ConstraintConfig::NotCoexistenceB { .. } => ConstraintType::NotCoexistence,
-            ConstraintConfig::AppearanceCounter { mode, .. } => match mode {
-                MinMaxMode::Max => ConstraintType::AppearanceMax,
-                MinMaxMode::Min => ConstraintType::AppearanceMin,
-            },
-            ConstraintConfig::AppearanceTrigger { .. } => ConstraintType::AppearanceTrigger,
-            ConstraintConfig::DistributedAppearanceCounter { .. } => {
-                ConstraintType::DistributedAppearanceCounter
+            ConstraintConfig::AppearanceCounter { .. } => ConstraintType::Appearance,
+            ConstraintConfig::AppearanceTrigger { .. } => ConstraintType::Appearance,
+            ConstraintConfig::DistributedAppearanceTrigger { .. } => {
+                ConstraintType::DistributedAppearance
             }
-            ConstraintConfig::DistributedAppearanceTrigger { mode, .. } => match mode {
-                MinMaxMode::Max => ConstraintType::DistributedAppearanceTriggerMax,
-                MinMaxMode::Min => ConstraintType::DistributedAppearanceTriggerMin,
-            },
+            ConstraintConfig::DistributedAppearanceCounter { .. } => {
+                ConstraintType::DistributedAppearance
+            }
         }
     }
 

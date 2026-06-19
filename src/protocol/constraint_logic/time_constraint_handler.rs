@@ -47,10 +47,7 @@ impl ConstraintHandler for TimeStartHandler {
         let token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
-            match self.mode {
-                MinMaxMode::Max => ConstraintType::TimerStartMax,
-                MinMaxMode::Min => ConstraintType::TimerStartMin,
-            },
+            ConstraintType::Time,
             Some(start_time),
             state.config.node_id,
         );
@@ -142,6 +139,7 @@ impl ConstraintHandler for TimeStartHandler {
             emit_result(
                 &message.case_id,
                 &self.constraint_id,
+                ConstraintType::Time,
                 ConstraintResultType::Satisfied,
                 "TimerStop: no start event was ever observed".to_string(),
                 state.clone(),
@@ -177,6 +175,7 @@ impl ConstraintHandler for TimeStartHandler {
             emit_result(
                 &message.case_id,
                 &self.constraint_id,
+                ConstraintType::Time,
                 result,
                 info,
                 state.clone(),
@@ -347,7 +346,7 @@ mod tests {
     use super::*;
     use crate::config::node_config::{ConstraintConfig, ResultBufferConfig};
     use crate::network::message_types::CCMessage;
-    use crate::types::{ConstraintResultType, ConstraintType};
+    use crate::types::ConstraintResultType;
     use crate::util::test_tools::{
         make_config_with_buffers, make_state_from_config, make_traced_event_at,
     };
@@ -379,10 +378,6 @@ mod tests {
         mode: MinMaxMode,
         buffer: ResultBufferConfig,
     ) -> AppState {
-        let constraint_type = match &mode {
-            MinMaxMode::Max => ConstraintType::TimerStartMax,
-            MinMaxMode::Min => ConstraintType::TimerStartMin,
-        };
         let mut buffers = HashMap::new();
         buffers.insert(CID.to_string(), buffer);
         // Register the handler in the registry too — needed so finalize calls land.
@@ -394,11 +389,7 @@ mod tests {
         }];
         let cfg = make_config_with_buffers(constraints, buffers, ResultBufferConfig::Immediate);
         let state = make_state_from_config(cfg);
-        state
-            .cc_results
-            .lock()
-            .unwrap()
-            .register_case(CASE.into(), &[(CID.into(), constraint_type)]);
+        state.cc_results.lock().unwrap().register_case(CASE.into());
         state
     }
 

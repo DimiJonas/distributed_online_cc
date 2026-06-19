@@ -58,14 +58,10 @@ impl ConstraintHandler for AppearanceCounterHandler {
                     event.case_id
                 );
 
-                let contraint_type = match self.mode {
-                    MinMaxMode::Min => ConstraintType::AppearanceMin,
-                    MinMaxMode::Max => ConstraintType::AppearanceMax,
-                };
                 let counter_token = Token::new_with_payload(
                     event.case_id.clone(),
                     self.constraint_id.clone(),
-                    contraint_type,
+                    ConstraintType::Appearance,
                     None,
                     state.config.node_id,
                     TokenPayload::Counter(1),
@@ -166,6 +162,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
         emit_result(
             &message.case_id,
             &self.constraint_id,
+            ConstraintType::Appearance,
             result,
             info,
             state.clone(),

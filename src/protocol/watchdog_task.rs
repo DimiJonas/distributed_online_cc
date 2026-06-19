@@ -7,7 +7,7 @@ use crate::{
     config::node_config::MinMaxMode,
     protocol::result_emitter::emit_result,
     state::app_state::AppState,
-    types::{CaseId, ConstraintId, ConstraintResultType, TokenId},
+    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, TokenId},
 };
 
 pub async fn watchdog_task(
@@ -45,6 +45,7 @@ pub async fn watchdog_task(
                     emit_result(
                         &case_id,
                         &constraint_id,
+                        ConstraintType::Time,
                         ConstraintResultType::Violated,
                         format!(
                             "TimerMax: timer ran out after {:?} before stop event arrived (token {})",
@@ -62,6 +63,7 @@ pub async fn watchdog_task(
                     emit_result(
                         &case_id,
                         &constraint_id,
+                        ConstraintType::Time,
                         ConstraintResultType::Satisfied,
                         format!(
                             "TimerMin: timer ran out after {:?}; stop event never arrived (token {})",

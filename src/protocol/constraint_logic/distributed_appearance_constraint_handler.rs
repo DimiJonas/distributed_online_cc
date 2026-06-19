@@ -59,7 +59,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
                 let counter_token = Token::new_with_payload(
                     event.case_id.clone(),
                     self.constraint_id.clone(),
-                    ConstraintType::DistributedAppearanceCounter,
+                    ConstraintType::DistributedAppearance,
                     None,
                     state.config.node_id,
                     TokenPayload::Counter(1),
@@ -130,7 +130,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
                 None => Token::new(
                     message.case_id.clone(),
                     self.constraint_id.clone(),
-                    ConstraintType::DistributedAppearanceCounter,
+                    ConstraintType::DistributedAppearance,
                     None,
                     state.config.node_id,
                 ),
@@ -274,6 +274,7 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         emit_result(
             &event.case_id,
             &self.constraint_id,
+            ConstraintType::DistributedAppearance,
             result,
             info,
             state.clone(),

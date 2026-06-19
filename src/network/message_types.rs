@@ -8,8 +8,8 @@ use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, EventTime, MessageId,
-        RequestId, Token,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
+        MessageId, RequestId, Token,
     },
 };
 
@@ -340,7 +340,22 @@ pub struct CCResultMessage {
     pub info: String,
     pub case_id: CaseId,
     pub constraint_id: ConstraintId,
+    pub constraint_type: ConstraintType,
     pub result: ConstraintResultType,
+}
+
+impl CCResultMessage {
+    pub fn display_result(&self) -> String {
+        format!(
+            "Result of constraint {} ({:?} constraint) for {} at {} is {:?}:{}",
+            self.constraint_id,
+            self.constraint_type,
+            self.case_id,
+            self.created_at,
+            self.result,
+            self.info
+        )
+    }
 }
 
 impl Display for CCResultMessage {

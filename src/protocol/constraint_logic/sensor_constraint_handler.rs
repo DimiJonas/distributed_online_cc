@@ -16,7 +16,8 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, EventId, TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
+        TracedEvent,
     },
 };
 
@@ -145,6 +146,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                         emit_result(
                             &message.case_id,
                             &self.constraint_id,
+                            ConstraintType::Sensor,
                             ConstraintResultType::Violated,
                             info,
                             state.clone(),
@@ -163,6 +165,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                     emit_result(
                         &message.case_id,
                         &self.constraint_id,
+                        ConstraintType::Sensor,
                         ConstraintResultType::Violated,
                         info,
                         state.clone(),
@@ -191,6 +194,7 @@ impl ConstraintHandler for SensorCollectorHandler {
         emit_result(
             &message.case_id,
             &self.constraint_id,
+            ConstraintType::Sensor,
             constraint_result,
             info,
             state.clone(),

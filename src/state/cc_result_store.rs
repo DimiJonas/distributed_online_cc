@@ -13,64 +13,29 @@ impl CCResultStore {
     }
 
     // register a new case by initializing a constraint result map according to the constraint configuration
-    pub fn register_case(
-        &mut self,
-        case_id: CaseId,
-        constraints: &[(ConstraintId, ConstraintType)],
-    ) {
-        let case_results = constraints
-            .iter()
-            .map(|(cid, ctype)| {
-                (
-                    cid.clone(),
-                    ConstraintResult {
-                        constraint_type: ctype.clone(),
-                        constraint_result: ctype.initial_result(),
-                        info: format!("{:?}: initialized constraint", ctype),
-                        history: String::new(),
-                    },
-                )
-            })
-            .collect();
-        self.results.insert(case_id, case_results);
+    pub fn register_case(&mut self, case_id: CaseId) {
+        self.results.entry(case_id).or_insert_with(HashMap::new);
     }
 
-    /*
-       update a constraint result
-       info gives some information on the result change
-       history preserves the previous states of the constraint result with corresponding info
-    */
-    #[allow(clippy::collapsible_if)]
-    pub fn update(
+    pub fn upsert(
         &mut self,
         case_id: &CaseId,
         constraint_id: &ConstraintId,
-        new_result: ConstraintResultType,
+        constraint_type: ConstraintType,
+        constraint_result: ConstraintResultType,
         info: String,
-    ) {
-        if let Some(case) = self.results.get_mut(case_id) {
-            if let Some(existing) = case.get_mut(constraint_id) {
-                let history_entry = format!(
-                    "{}\n{:?}: {}",
-                    existing.history, existing.constraint_result, existing.info
-                );
-                existing.constraint_result = new_result;
-                existing.info = info;
-                existing.history = history_entry;
-            } else {
-                log::warn!(
-                    "update called for unknown constraint ({}/{}), ignoring",
-                    case_id,
-                    constraint_id
-                );
-            }
-        } else {
-            log::warn!(
-                "update called for unknown case ({}/{}), ignoring",
-                case_id,
-                constraint_id
-            );
-        }
+    ) -> Option<ConstraintResult> {
+        self.results
+            .entry(case_id.clone())
+            .or_insert_with(HashMap::new)
+            .insert(
+                constraint_id.clone(),
+                ConstraintResult {
+                    constraint_type,
+                    constraint_result,
+                    info,
+                },
+            )
     }
 
     pub fn get_constraint(
@@ -160,32 +125,14 @@ mod tests {
     }
 
     #[test]
-    fn register_case_marks_it_as_known() {
+    fn upsert_changes_result() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-        assert!(store.has_case(&"case-1".to_string()));
-    }
+        store.register_case("case-1".to_string());
 
-    #[test]
-    fn initial_result_is_satisfied() {
-        let _expected_result = ConstraintType::Response.initial_result();
-        let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-
-        let result = store
-            .get_constraint(&"case-1".to_string(), &"c-response".to_string())
-            .unwrap();
-        assert!(matches!(&result.constraint_result, _expected_result));
-    }
-
-    #[test]
-    fn update_changes_result() {
-        let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-
-        store.update(
+        store.upsert(
             &"case-1".to_string(),
             &"c-response".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "token still open".to_string(),
         );
@@ -201,31 +148,6 @@ mod tests {
     }
 
     #[test]
-    fn update_appends_to_history() {
-        let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-
-        store.update(
-            &"case-1".to_string(),
-            &"c-response".to_string(),
-            ConstraintResultType::Violated,
-            "first update".to_string(),
-        );
-        store.update(
-            &"case-1".to_string(),
-            &"c-response".to_string(),
-            ConstraintResultType::Satisfied,
-            "second update".to_string(),
-        );
-
-        let result = store
-            .get_constraint(&"case-1".to_string(), &"c-response".to_string())
-            .unwrap();
-        // History should contain the intermediate Violated state
-        assert!(result.history.contains("Violated") || result.history.contains("first update"));
-    }
-
-    #[test]
     fn get_constraint_unknown_case_returns_none() {
         let store = CCResultStore::new();
         assert!(
@@ -238,7 +160,7 @@ mod tests {
     #[test]
     fn get_constraint_unknown_constraint_returns_none() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
+        store.register_case("case-1".to_string());
         assert!(
             store
                 .get_constraint(&"case-1".to_string(), &"ghost".to_string())
@@ -249,17 +171,18 @@ mod tests {
     #[test]
     fn has_violations_false_when_all_satisfied() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
+        store.register_case("case-1".to_string());
         assert!(!store.has_violations(&"case-1".to_string()));
     }
 
     #[test]
     fn has_violations_true_after_violated_update() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-        store.update(
+        store.register_case("case-1".to_string());
+        store.upsert(
             &"case-1".to_string(),
             &"c-response".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "violated".to_string(),
         );
@@ -269,10 +192,11 @@ mod tests {
     #[test]
     fn has_violations_true_for_temporarily_violated() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-        store.update(
+        store.register_case("case-1".to_string());
+        store.upsert(
             &"case-1".to_string(),
             &"c-response".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::TemporarilyViolated,
             "temp".to_string(),
         );
@@ -282,10 +206,11 @@ mod tests {
     #[test]
     fn violations_returns_only_violated_constraints() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
-        store.update(
+        store.register_case("case-1".to_string());
+        store.upsert(
             &"case-1".to_string(),
             &"c-response".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "bad".to_string(),
         );
@@ -298,7 +223,7 @@ mod tests {
     #[test]
     fn remove_case_cleans_up() {
         let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string(), &constraints());
+        store.register_case("case-1".to_string());
         let removed = store.remove_case(&"case-1".to_string());
         assert!(removed.is_some());
         assert!(!store.has_case(&"case-1".to_string()));

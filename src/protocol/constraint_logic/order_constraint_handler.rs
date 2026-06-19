@@ -79,6 +79,7 @@ impl ConstraintHandler for OrderFirstHandler {
                 emit_result(
                     &event.case_id,
                     &self.constraint_id,
+                    ConstraintType::Order,
                     ConstraintResultType::Violated,
                     info,
                     state.clone(),
@@ -93,6 +94,7 @@ impl ConstraintHandler for OrderFirstHandler {
                 emit_result(
                     &event.case_id,
                     &self.constraint_id,
+                    ConstraintType::Order,
                     ConstraintResultType::Satisfied,
                     info,
                     state.clone(),
@@ -213,6 +215,7 @@ impl ConstraintHandler for OrderFirstHandler {
                     emit_result(
                         &message.case_id,
                         &self.constraint_id,
+                        ConstraintType::Order,
                         ConstraintResultType::Satisfied,
                         info,
                         state.clone(),
@@ -229,6 +232,7 @@ impl ConstraintHandler for OrderFirstHandler {
                 emit_result(
                     &message.case_id,
                     &self.constraint_id,
+                    ConstraintType::Order,
                     ConstraintResultType::Satisfied,
                     info,
                     state.clone(),

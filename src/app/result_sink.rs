@@ -264,17 +264,22 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
 
     // insert constraint into db
     tx.execute(
-        "INSERT OR IGNORE INTO constraints (constraint_id, first_seen_at) VALUES (?1, ?2)",
-        rusqlite::params![result_message.constraint_id, created_at],
+        "INSERT OR IGNORE INTO constraints (constraint_id, constraint_type, first_seen_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![
+            result_message.constraint_id,
+            result_message.constraint_type.to_string(),
+            created_at
+        ],
     )?;
 
     // insert result with info and timestamp into db
     tx.execute(
-        "INSERT INTO results (case_id, constraint_id, result, info, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO results (case_id, constraint_id, constraint_type, result, info, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             result_message.case_id,
             result_message.constraint_id,
+            result_message.constraint_type.to_string(),
             result_message.result.to_string(),
             result_message.info,
             created_at,
@@ -293,6 +298,7 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
 pub struct ResultRow {
     pub case_id: String,
     pub constraint_id: String,
+    pub constraint_type: String,
     pub result: String,
     pub info: String,
     pub created_at: String,
@@ -302,7 +308,7 @@ pub struct ResultRow {
 /// results are ordered by timestamp
 pub fn get_results_for_case(conn: &Connection, case_id: &str) -> Result<Vec<ResultRow>, SinkError> {
     let mut stmt = conn.prepare(
-        "SELECT case_id, constraint_id, result, info, created_at
+        "SELECT case_id, constraint_id, constraint_type, result, info, created_at
          FROM results
          WHERE case_id = ?1
          ORDER BY constraint_id, created_at",
@@ -313,9 +319,10 @@ pub fn get_results_for_case(conn: &Connection, case_id: &str) -> Result<Vec<Resu
             Ok(ResultRow {
                 case_id: row.get(0)?,
                 constraint_id: row.get(1)?,
-                result: row.get(2)?,
-                info: row.get(3)?,
-                created_at: row.get(4)?,
+                constraint_type: row.get(2)?,
+                result: row.get(3)?,
+                info: row.get(4)?,
+                created_at: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -330,7 +337,7 @@ pub fn get_results_for_case_and_constraint(
     constraint_id: &str,
 ) -> Result<Vec<ResultRow>, SinkError> {
     let mut stmt = conn.prepare(
-        "SELECT case_id, constraint_id, result, info, created_at
+        "SELECT case_id, constraint_id, constraint_type, result, info, created_at
          FROM results
          WHERE case_id = ?1 AND constraint_id = ?2
          ORDER BY created_at",
@@ -341,9 +348,10 @@ pub fn get_results_for_case_and_constraint(
             Ok(ResultRow {
                 case_id: row.get(0)?,
                 constraint_id: row.get(1)?,
-                result: row.get(2)?,
-                info: row.get(3)?,
-                created_at: row.get(4)?,
+                constraint_type: row.get(2)?,
+                result: row.get(3)?,
+                info: row.get(4)?,
+                created_at: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;

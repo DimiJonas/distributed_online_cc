@@ -13,7 +13,7 @@ use crate::{
         tcp_router::send_to_peer,
     },
     state::{app_state::AppState, result_send_buffer::ResultBufferPolicy},
-    types::{CaseId, ConstraintId, ConstraintResultType},
+    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType},
 };
 
 /// emit a constraint result, applying the configured buffering policy for the
@@ -26,20 +26,20 @@ use crate::{
 pub async fn emit_result(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
     result: ConstraintResultType,
     info: String,
     state: AppState,
 ) {
-    // TODO: should i remove this or move this to debug?
-    log::info!(
-        "constraint check result produced for ({}/{}): {}: {}",
+    let result_receive_time = Utc::now();
+
+    log::debug!(
+        "emitting result for ({}/{}): {:?}: {}",
         constraint_id,
         case_id,
         result,
         info,
     );
-
-    let result_receive_time = Utc::now();
 
     let policy = state.config.result_buffer_policy(constraint_id);
 
@@ -54,11 +54,18 @@ pub async fn emit_result(
             // Immediate: no buffering at all
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result, info.clone());
+                results.upsert(
+                    case_id,
+                    constraint_id,
+                    constraint_type,
+                    result,
+                    info.clone(),
+                );
             }
             send_result_outbound(
                 case_id,
                 constraint_id,
+                constraint_type,
                 result,
                 &info,
                 state.clone(),
@@ -73,7 +80,13 @@ pub async fn emit_result(
             // only update cc result store for now
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result, info.clone());
+                results.upsert(
+                    case_id,
+                    constraint_id,
+                    constraint_type,
+                    result,
+                    info.clone(),
+                );
             }
 
             // buffer the send and (re)start the grace timer
@@ -87,6 +100,7 @@ pub async fn emit_result(
                 state.clone(),
                 case_id.clone(),
                 constraint_id.clone(),
+                constraint_type,
                 cancel_token,
                 result_receive_time,
             ));
@@ -96,11 +110,18 @@ pub async fn emit_result(
             // write to cc_results and send immediately; allow overwrite within window
             {
                 let mut results = state.cc_results.lock().unwrap();
-                results.update(case_id, constraint_id, result, info.clone());
+                results.upsert(
+                    case_id,
+                    constraint_id,
+                    constraint_type,
+                    result,
+                    info.clone(),
+                );
             }
             send_result_outbound(
                 case_id,
                 constraint_id,
+                constraint_type,
                 result,
                 &info,
                 state.clone(),
@@ -129,6 +150,7 @@ async fn grace_period_timer(
     state: AppState,
     case_id: CaseId,
     constraint_id: ConstraintId,
+    constraint_type: ConstraintType,
     cancel_token: CancellationToken,
     created_at: DateTime<Utc>,
 ) {
@@ -146,7 +168,7 @@ async fn grace_period_timer(
                 // cc_results already holds the current value; this
                 // is the outbound dispatch.
                 send_result_outbound(
-                    &case_id, &constraint_id,
+                    &case_id, &constraint_id,constraint_type,
                     pending.result, &pending.info, state.clone(),
                     created_at,
                 ).await;
@@ -198,6 +220,7 @@ async fn revocable_result_timer(
 async fn send_result_outbound(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
     result: ConstraintResultType,
     info: &str,
     state: AppState,
@@ -212,6 +235,7 @@ async fn send_result_outbound(
                 created_at,
                 info: info.to_string(),
                 case_id: case_id.clone(),
+                constraint_type,
                 constraint_id: constraint_id.clone(),
                 result,
             });
@@ -232,7 +256,7 @@ async fn send_result_outbound(
         None => {
             // no sink configured - logging result
             log::info!(
-                "send_result_outbound: RESULT for case/constraint {}/{} is {}: {}",
+                "send_result_outbound: RESULT for case/constraint {}/{} is {:?}: {}",
                 case_id,
                 constraint_id,
                 result,
@@ -261,6 +285,7 @@ async fn call_finalizers(case_id: &CaseId, constraint_id: &ConstraintId, state: 
 pub async fn emit_result_immediate(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
     result: ConstraintResultType,
     info: String,
     state: AppState,
@@ -269,11 +294,18 @@ pub async fn emit_result_immediate(
 
     {
         let mut results = state.cc_results.lock().unwrap();
-        results.update(case_id, constraint_id, result, info.clone());
+        results.upsert(
+            case_id,
+            constraint_id,
+            constraint_type,
+            result,
+            info.clone(),
+        );
     }
     send_result_outbound(
         case_id,
         constraint_id,
+        constraint_type,
         result,
         &info,
         state.clone(),
@@ -290,12 +322,12 @@ mod tests {
     use crate::util::test_tools::{make_config_with_buffers, make_state_from_config};
     use std::collections::HashMap;
 
-    fn register(state: &AppState, case: &str, constraint: &str, ctype: ConstraintType) {
+    fn register(state: &AppState, case: &str) {
         state
             .cc_results
             .lock()
             .unwrap()
-            .register_case(case.to_string(), &[(constraint.to_string(), ctype)]);
+            .register_case(case.to_string());
     }
 
     /// Yield before and after advancing time so spawned tasks fully
@@ -326,11 +358,12 @@ mod tests {
     async fn immediate_writes_cc_results_synchronously() {
         let cfg = make_config_with_buffers(vec![], HashMap::new(), ResultBufferConfig::Immediate);
         let state = make_state_from_config(cfg);
-        register(&state, "case-1", "x", ConstraintType::Response);
+        register(&state, "case-1");
 
         emit_result(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
@@ -364,11 +397,12 @@ mod tests {
         );
         let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
         let state = make_state_from_config(cfg);
-        register(&state, "case-1", "x", ConstraintType::Response);
+        register(&state, "case-1");
 
         emit_result(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
@@ -413,11 +447,12 @@ mod tests {
         );
         let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
         let state = make_state_from_config(cfg);
-        register(&state, "case-1", "x", ConstraintType::Response);
+        register(&state, "case-1");
 
         emit_result(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "tentative".to_string(),
             state.clone(),
@@ -430,6 +465,7 @@ mod tests {
         emit_result(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Satisfied,
             "corrected".to_string(),
             state.clone(),
@@ -476,11 +512,12 @@ mod tests {
         );
         let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
         let state = make_state_from_config(cfg);
-        register(&state, "case-1", "x", ConstraintType::Response);
+        register(&state, "case-1");
 
         emit_result(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
@@ -526,11 +563,12 @@ mod tests {
             },
         );
         let state = make_state_from_config(cfg);
-        register(&state, "case-1", "x", ConstraintType::Response);
+        register(&state, "case-1");
 
         emit_result_immediate(
             &"case-1".to_string(),
             &"x".to_string(),
+            ConstraintType::Response,
             ConstraintResultType::Satisfied,
             "vacuous".to_string(),
             state.clone(),

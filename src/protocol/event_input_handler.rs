@@ -63,7 +63,7 @@ pub async fn handle_event(
                                     "event input handler dropped, unable to send event: {}",
                                     e
                                 );
-                                // TODO: trigger respawn of event input handler
+                                // TODO: trigger respawn of event input handler?
                                 break;
                             }
                         }

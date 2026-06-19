@@ -83,69 +83,22 @@ impl Display for TracedEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Copy)]
 pub enum ConstraintType {
     Response,
     EndActivity,
     Precedence,
     Order,
     Sensor,
-    TimerStartMax,
-    TimerStartMin,
-    TimerStop,
+    Time,
     NotCoexistence,
-    AppearanceMin,
-    AppearanceMax,
-    AppearanceTrigger,
-    DistributedAppearanceCounter,
-    DistributedAppearanceTriggerMin,
-    DistributedAppearanceTriggerMax,
-}
-
-impl ConstraintType {
-    // each constraint type can start with a different result
-    pub fn initial_result(&self) -> ConstraintResultType {
-        match self {
-            ConstraintType::Response => ConstraintResultType::Satisfied,
-            ConstraintType::EndActivity => ConstraintResultType::Satisfied,
-            ConstraintType::Precedence => ConstraintResultType::Satisfied,
-            ConstraintType::Order => ConstraintResultType::Satisfied,
-            ConstraintType::Sensor => ConstraintResultType::Satisfied,
-            ConstraintType::TimerStartMax => ConstraintResultType::Satisfied,
-            ConstraintType::TimerStartMin => ConstraintResultType::TemporarilyViolated,
-            ConstraintType::TimerStop => ConstraintResultType::Satisfied,
-            ConstraintType::NotCoexistence => ConstraintResultType::Satisfied,
-            ConstraintType::AppearanceMax => ConstraintResultType::Satisfied,
-            ConstraintType::AppearanceMin => ConstraintResultType::TemporarilyViolated,
-            ConstraintType::AppearanceTrigger => ConstraintResultType::Satisfied,
-            ConstraintType::DistributedAppearanceCounter => ConstraintResultType::Satisfied,
-            ConstraintType::DistributedAppearanceTriggerMin => {
-                ConstraintResultType::TemporarilyViolated
-            }
-            ConstraintType::DistributedAppearanceTriggerMax => ConstraintResultType::Satisfied,
-        }
-    }
+    Appearance,
+    DistributedAppearance,
 }
 
 impl Display for ConstraintType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Response => write!(f, "Response"),
-            Self::EndActivity => write!(f, "EndActivity"),
-            Self::Precedence => write!(f, "Precedence"),
-            Self::Order => write!(f, "Order"),
-            Self::Sensor => write!(f, "Sensor"),
-            Self::TimerStartMax => write!(f, "Time"),
-            Self::TimerStartMin => write!(f, "Time"),
-            Self::TimerStop => write!(f, "Time"),
-            Self::NotCoexistence => write!(f, "NotCoexistence"),
-            Self::AppearanceMax => write!(f, "Appearance"),
-            Self::AppearanceMin => write!(f, "Appearance"),
-            Self::AppearanceTrigger => write!(f, "Appearance"),
-            Self::DistributedAppearanceCounter => write!(f, "DistributedAppearance"),
-            Self::DistributedAppearanceTriggerMin => write!(f, "DistributedAppearance"),
-            Self::DistributedAppearanceTriggerMax => write!(f, "DistributedAppearance"),
-        }
+        write!(f, "{:?}", self)
     }
 }
 
@@ -170,6 +123,12 @@ pub enum ConstraintHandlerId {
     DistributedAppearanceTrigger,
 }
 
+impl Display for ConstraintHandlerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum ConstraintResultType {
     Violated,
@@ -179,11 +138,7 @@ pub enum ConstraintResultType {
 
 impl Display for ConstraintResultType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Violated => write!(f, "Violated"),
-            Self::TemporarilyViolated => write!(f, "TemporarilyViolated"),
-            Self::Satisfied => write!(f, "Satisfied"),
-        }
+        write!(f, "{:?}", self)
     }
 }
 
@@ -192,14 +147,13 @@ pub struct ConstraintResult {
     pub constraint_type: ConstraintType,
     pub constraint_result: ConstraintResultType,
     pub info: String,
-    pub history: String,
 }
 
 impl Display for ConstraintResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ConstraintResult: type={} result={} info={}",
+            "ConstraintResult: type={:?} result={:?} info={}",
             self.constraint_type, self.constraint_result, self.info
         )
     }
@@ -363,22 +317,6 @@ impl Display for Token {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn constraint_type_response_initial_result_is_satisfied() {
-        assert!(matches!(
-            ConstraintType::Response.initial_result(),
-            ConstraintResultType::Satisfied
-        ));
-    }
-
-    #[test]
-    fn constraint_type_end_activity_initial_result_is_satisfied() {
-        assert!(matches!(
-            ConstraintType::EndActivity.initial_result(),
-            ConstraintResultType::Satisfied
-        ));
-    }
 
     #[test]
     fn token_new_sets_fields_correctly() {

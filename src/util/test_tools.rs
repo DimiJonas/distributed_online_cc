@@ -206,7 +206,7 @@ pub fn make_timer_token(case_id: &str, constraint_id: &str) -> Token {
     Token::new(
         case_id.to_string(),
         constraint_id.to_string(),
-        ConstraintType::TimerStartMax,
+        ConstraintType::Time,
         Some(Utc::now()),
         1,
     )

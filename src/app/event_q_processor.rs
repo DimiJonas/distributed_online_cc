@@ -21,16 +21,30 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                 log::info!("processing event: {}", event);
                 log::debug!("event ({:?})", event);
 
-                // is it a new case? -> register it in result store
+                // is the case already closed? -> drop event
+                // is it a new case? -> register it in case state and result store
                 {
-                    let mut result_store = state.cc_results.lock().unwrap();
-                    if !result_store.has_case(&event.case_id) {
+                    let mut case_state = state.case_state.lock().unwrap();
+                    if case_state.is_closed(&event.case_id) {
+                        log::warn!(
+                            "the case of event {} is already closed. dropping event",
+                            event
+                        );
+                        continue;
+                    }
+
+                    if !case_state.has_case(&event.case_id) {
                         log::info!(
                             "event queue processor: new case detected; id={}",
                             &event.case_id
                         );
-                        let constraints = state.config.build_constraint_list();
-                        result_store.register_case(event.case_id.clone(), &constraints);
+                        case_state.open_case(event.case_id.clone());
+                    }
+                }
+                {
+                    let mut result_store = state.cc_results.lock().unwrap();
+                    if !result_store.has_case(&event.case_id) {
+                        result_store.register_case(event.case_id.clone());
                     }
                 }
 
@@ -148,10 +162,7 @@ mod tests {
         // Register the case first so handle_case_end doesn't crash.
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "case-dispatch".to_string(),
-                &[("rp".to_string(), crate::types::ConstraintType::Response)],
-            );
+            store.register_case("case-dispatch".to_string());
         }
 
         spawn_event_processor(state.clone(), event_rx);

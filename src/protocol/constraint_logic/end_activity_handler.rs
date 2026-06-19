@@ -17,7 +17,7 @@ pub struct EndActivityHandler {
 impl ConstraintHandler for EndActivityHandler {
     impl_constraint_handler_fields!(EndActivityHandler);
 
-    // notify all handlers that this case has ended
+    // spawn case closing task
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
             "end activity handler: received end event for case {}",
@@ -52,7 +52,7 @@ mod tests {
         protocol::constraint_logic::{
             constraint_handler_trait::ConstraintHandler, end_activity_handler::EndActivityHandler,
         },
-        types::{ConstraintHandlerId, ConstraintType},
+        types::ConstraintHandlerId,
         util::test_tools::{make_config_with_constraints, make_state_from_config},
     };
 
@@ -89,13 +89,7 @@ mod tests {
 
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "case-1".to_string(),
-                &[
-                    ("ea".to_string(), ConstraintType::EndActivity),
-                    ("rp".to_string(), ConstraintType::Response),
-                ],
-            );
+            store.register_case("case-1".to_string());
         }
 
         let handler = EndActivityHandler {
@@ -126,10 +120,7 @@ mod tests {
 
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "case-x".to_string(),
-                &[("ea".to_string(), ConstraintType::EndActivity)],
-            );
+            store.register_case("case-x".to_string());
         }
 
         let handler = EndActivityHandler {

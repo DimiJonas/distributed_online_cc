@@ -78,13 +78,29 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageI
         msg
     );
 
-    // is it a new case? -> register it in result store
+    // is the case already closed? -> drop message
+    // is it a new case? -> register it in case state and result store
+    {
+        let mut case_state = state.case_state.lock().unwrap();
+        if case_state.is_closed(&msg.case_id) {
+            log::warn!(
+                "the case of message {} is already closed. dropping message",
+                msg
+            );
+            return;
+        }
+        if !case_state.has_case(&msg.case_id) {
+            log::info!(
+                "event queue processor: new case detected; id={}",
+                &msg.case_id
+            );
+            case_state.open_case(msg.case_id.clone());
+        }
+    }
     {
         let mut result_store = state.cc_results.lock().unwrap();
         if !result_store.has_case(&msg.case_id) {
-            log::info!("handle_cc_message: new case detected; id={}", &msg.case_id);
-            let constraints = state.config.build_constraint_list();
-            result_store.register_case(msg.case_id.clone(), &constraints);
+            result_store.register_case(msg.case_id.clone());
         }
     }
 
@@ -147,7 +163,7 @@ mod tests {
             handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintType, MessageId},
+        types::{ConstraintHandlerId, MessageId},
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state, register_manager,
         },
@@ -383,10 +399,7 @@ mod tests {
 
         {
             let mut store = state.cc_results.lock().unwrap();
-            store.register_case(
-                "c1".to_string(),
-                &[("rp".to_string(), ConstraintType::Response)],
-            );
+            store.register_case("c1".to_string());
         }
         {
             use crate::types::{ConstraintType, Token};

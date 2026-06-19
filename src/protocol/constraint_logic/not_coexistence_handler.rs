@@ -160,6 +160,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
+                ConstraintType::NotCoexistence,
                 ConstraintResultType::Satisfied,
                 info,
                 state.clone(),
@@ -170,6 +171,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
+                ConstraintType::NotCoexistence,
                 ConstraintResultType::Violated,
                 info,
                 state.clone(),
@@ -482,6 +484,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
+                ConstraintType::NotCoexistence,
                 ConstraintResultType::Satisfied,
                 info,
                 state.clone(),
@@ -492,6 +495,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
+                ConstraintType::NotCoexistence,
                 ConstraintResultType::Violated,
                 info,
                 state.clone(),
