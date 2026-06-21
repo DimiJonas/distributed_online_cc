@@ -35,6 +35,8 @@ fn make_base_config() -> NodeConfig {
         loopback_queue_size: 100,
         result_sink_addresses: None,
         result_sink: None,
+        case_end_grace_period: Duration::from_secs(10),
+        case_retention_period: Duration::from_secs(15),
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_mpsc_channel_size: 256,

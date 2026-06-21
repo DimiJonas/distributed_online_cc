@@ -34,6 +34,16 @@ pub struct NodeConfig {
     pub default_result_buffer: ResultBufferConfig,
     pub result_sink_addresses: Option<Vec<SocketAddr>>,
     pub result_sink: Option<ResultSinkConfig>,
+    #[serde(
+        deserialize_with = "deserialize_humantime_duration",
+        default = "default_case_end_grace_period"
+    )]
+    pub case_end_grace_period: Duration,
+    #[serde(
+        deserialize_with = "deserialize_humantime_duration",
+        default = "default_case_retention_period"
+    )]
+    pub case_retention_period: Duration,
 }
 
 impl NodeConfig {
@@ -468,6 +478,14 @@ fn default_retry_interval() -> Duration {
 
 fn default_retry_buffer_size() -> usize {
     4096
+}
+
+fn default_case_end_grace_period() -> Duration {
+    Duration::from_secs(10)
+}
+
+fn default_case_retention_period() -> Duration {
+    Duration::from_secs(30)
 }
 
 // deserialize a value that can be int or float

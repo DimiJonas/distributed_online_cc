@@ -5,6 +5,8 @@ event_queue_size = 100
 loopback_queue_size = 100
 log_file = "app.log"
 result_sink_addresses = ["127.0.0.1:8000"]
+case_end_grace_period = "15s"
+case_retention_period = "30s"
 
 [tcp_channels]
 tcp_channel_mpsc_channel_size = 100
