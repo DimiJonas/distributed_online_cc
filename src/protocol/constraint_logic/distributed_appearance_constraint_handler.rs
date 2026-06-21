@@ -155,14 +155,6 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         }
     }
 
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "distributed appearance counter handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
-    }
-
     async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
         log::info!(
             "distributed appearance counter handler: clean up state for ({}/{})",
@@ -197,11 +189,68 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             event
         );
 
-        // accumulate count
+        let distributed_count: u64 = self
+            .get_distributed_count(state.clone(), &event.case_id)
+            .await;
+        let (info, result) = self.evaluate_count(distributed_count);
+
+        emit_result(
+            &event.case_id,
+            &self.constraint_id,
+            ConstraintType::DistributedAppearance,
+            result,
+            info,
+            state.clone(),
+        )
+        .await;
+    }
+
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "distributed appearance trigger handler: received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if !result_exists {
+            // produce result because none was emitted yet
+            let distributed_count: u64 = self.get_distributed_count(state.clone(), case_id).await;
+            let (info, result) = self.evaluate_count(distributed_count);
+
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::DistributedAppearance,
+                result,
+                info,
+                state.clone(),
+            )
+            .await;
+        }
+    }
+
+    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+        log::info!(
+            "distributed appearance trigger handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+    }
+}
+
+impl DistributedAppearanceTriggerHandler {
+    // accumulate count
+    async fn get_distributed_count(&self, state: AppState, case_id: &CaseId) -> u64 {
         let mut distributed_count: u64 = 0;
         for counter_peer in &self.counter_peers {
             let pull_token_request = PeerMessage::conformance_req(CCMessage::pull_token_request(
-                event.case_id.clone(),
+                case_id.clone(),
                 self.constraint_id.clone(),
             ));
             match send_and_receive(*counter_peer, pull_token_request, state.clone()).await {
@@ -229,9 +278,11 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                 }
             }
         }
+        distributed_count
+    }
 
-        // evaluate count
-        let (info, result) = match self.mode {
+    fn evaluate_count(&self, distributed_count: u64) -> (String, ConstraintResultType) {
+        match self.mode {
             MinMaxMode::Min => {
                 if distributed_count >= self.frequency {
                     (
@@ -270,31 +321,6 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                     )
                 }
             }
-        };
-        emit_result(
-            &event.case_id,
-            &self.constraint_id,
-            ConstraintType::DistributedAppearance,
-            result,
-            info,
-            state.clone(),
-        )
-        .await;
-    }
-
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "distributed appearance trigger handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
-    }
-
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "distributed appearance trigger handler: clean up state for ({}/{})",
-            case_id,
-            self.constraint_id
-        );
+        }
     }
 }

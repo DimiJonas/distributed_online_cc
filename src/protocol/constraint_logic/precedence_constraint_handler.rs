@@ -261,6 +261,43 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         }
     }
 
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "precedence consumer handler: received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if !result_exists {
+            // produce result because none was emitted yet
+            let producer_token_exists = {
+                let token_in = state.token_in.lock().unwrap();
+                token_in.contains_in_token(case_id, &self.constraint_id, self.handler_id)
+            };
+
+            let info = if producer_token_exists {
+                "consumer event never happened".to_string()
+            } else {
+                "neither producer nor consumer event happened".to_string()
+            };
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::Order,
+                ConstraintResultType::Satisfied,
+                info,
+                state.clone(),
+            )
+            .await;
+        }
+    }
+
     async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
         log::info!(
             "precedence consumer handler: clean up state for ({}/{})",

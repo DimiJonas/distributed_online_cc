@@ -54,11 +54,22 @@ impl ConstraintHandler for ResponseProducerHandler {
             event
         );
 
+        let producer_event_time = {
+            if let Some(timestamp) = event.timestamp_utc() {
+                timestamp
+            } else {
+                log::warn!(
+                    "response producer handler: response producer event did not contain a timestamp - using current time as event time"
+                );
+                Utc::now()
+            }
+        };
+
         let token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Response,
-            event.timestamp_utc(),
+            Some(producer_event_time),
             state.config.node_id,
         );
         {
@@ -68,6 +79,27 @@ impl ConstraintHandler for ResponseProducerHandler {
 
         log::info!("response producer handler: produced token: {}", token);
         log::debug!("token={:?}", token);
+
+        // produce result if case already ended
+        let case_ended = {
+            let case_state = state.case_state.lock().unwrap();
+            case_state.is_ended(&event.case_id)
+        };
+        if case_ended {
+            // produce negative result because token was produced after case end
+            emit_result(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::Response,
+                ConstraintResultType::Violated,
+                format!(
+                    "producer token from {} for {}/{} was not consumed",
+                    producer_event_time, event.case_id, self.constraint_id,
+                ),
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     // delete produced token of events that happened before the timestamp contained in the message
@@ -99,15 +131,39 @@ impl ConstraintHandler for ResponseProducerHandler {
                 return;
             }
         };
-        let mut token_out = state.token_out.lock().unwrap();
-        if let Some(token) = token_out.remove_out_before(
-            &message.case_id,
-            &self.constraint_id,
-            self.handler_id,
-            consumer_event_time,
-        ) {
+
+        if let Some(token) = {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out_before(
+                &message.case_id,
+                &self.constraint_id,
+                self.handler_id,
+                consumer_event_time,
+            )
+        } {
             log::info!("response producer handler: removed token {}", token);
             log::debug!("token={:?}", token);
+        }
+
+        // produce result if case already ended
+        let case_ended = {
+            let case_state = state.case_state.lock().unwrap();
+            case_state.is_ended(&message.case_id)
+        };
+        if case_ended {
+            // produce positive result because token was consumed after case end
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::Response,
+                ConstraintResultType::Satisfied,
+                format!(
+                    "all producer tokens for {}/{} were consumed",
+                    message.case_id, self.constraint_id,
+                ),
+                state.clone(),
+            )
+            .await;
         }
     }
 
@@ -119,25 +175,22 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        // create constraint result (with info message)
-        let (constraint_result, token) = {
+        // create constraint result
+        let (constraint_result, info) = {
             let mut token_out = state.token_out.lock().unwrap();
-            let constraint_result: ConstraintResultType =
-                match token_out.has_open_token(case_id, &self.constraint_id, self.handler_id) {
-                    true => ConstraintResultType::Violated,
-                    false => ConstraintResultType::Satisfied,
-                };
-            (
-                constraint_result,
-                token_out.remove_out(case_id, &self.constraint_id, self.handler_id),
-            )
-        };
-        let info = match token {
-            Some(t) => format!(
-                "token still exists. id: {} timestamp: {}",
-                t.id, t.created_at
-            ),
-            None => "no tokens exist".to_string(),
+            match token_out.remove_out(case_id, &self.constraint_id, self.handler_id) {
+                Some(token) => (
+                    ConstraintResultType::Violated,
+                    format!(
+                        "producer token from {} was not consumed",
+                        token.event_time.unwrap_or(token.created_at),
+                    ),
+                ),
+                None => (
+                    ConstraintResultType::Satisfied,
+                    "all producer tokens were consumed".to_string(),
+                ),
+            }
         };
 
         emit_result(

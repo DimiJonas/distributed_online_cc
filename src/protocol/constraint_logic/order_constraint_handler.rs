@@ -242,6 +242,33 @@ impl ConstraintHandler for OrderFirstHandler {
         }
     }
 
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "order first handler: received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if !result_exists {
+            // produce result because none was emitted yet
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::Order,
+                ConstraintResultType::Satisfied,
+                "order first event never happened".to_string(),
+                state.clone(),
+            )
+            .await;
+        }
+    }
+
     // remove the blocking token
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(

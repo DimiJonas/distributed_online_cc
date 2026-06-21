@@ -90,36 +90,86 @@ impl ConstraintHandler for AppearanceCounterHandler {
             return;
         }
 
-        let count: u64 = {
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_mut(&message.case_id, &self.constraint_id, self.handler_id)
-            {
-                Some(token) => {
-                    let count = token.payload.get_count();
-                    // reset counter while store is locked
-                    if let Some(counter_token) = meta_tokens.get_token_mut(
-                        &message.case_id,
-                        &self.constraint_id,
-                        self.handler_id,
-                    ) {
-                        match self.reset {
-                            AppearanceCounterReset::Keep => {}
-                            AppearanceCounterReset::Subtract => {
-                                counter_token.payload.subtract_counter(self.frequency);
-                            }
-                            AppearanceCounterReset::Zero => {
-                                counter_token.payload.reset_counter();
-                            }
+        let count: u64 = self.get_and_reset_counter(&message.case_id, state.clone());
+        let (info, result) = self.evaluate_counter(count);
+
+        emit_result(
+            &message.case_id,
+            &self.constraint_id,
+            ConstraintType::Appearance,
+            result,
+            info,
+            state.clone(),
+        )
+        .await;
+    }
+
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "appearance counter handler: received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if !result_exists {
+            // produce result because none was emitted yet
+            let count: u64 = self.get_and_reset_counter(case_id, state.clone());
+            let (info, result) = self.evaluate_counter(count);
+
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::Appearance,
+                result,
+                info,
+                state.clone(),
+            )
+            .await;
+        }
+    }
+
+    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+        log::info!(
+            "appearance counter handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+    }
+}
+
+impl AppearanceCounterHandler {
+    fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> u64 {
+        let mut meta_tokens = state.meta_token_store.lock().unwrap();
+        match meta_tokens.get_token_mut(case_id, &self.constraint_id, self.handler_id) {
+            Some(token) => {
+                let count = token.payload.get_count();
+                // reset counter while store is locked
+                if let Some(counter_token) =
+                    meta_tokens.get_token_mut(case_id, &self.constraint_id, self.handler_id)
+                {
+                    match self.reset {
+                        AppearanceCounterReset::Keep => {}
+                        AppearanceCounterReset::Subtract => {
+                            counter_token.payload.subtract_counter(self.frequency);
+                        }
+                        AppearanceCounterReset::Zero => {
+                            counter_token.payload.reset_counter();
                         }
                     }
-                    count
                 }
-                None => 0,
+                count
             }
-        };
-
-        // evaluate count
-        let (info, result) = match self.mode {
+            None => 0,
+        }
+    }
+    fn evaluate_counter(&self, count: u64) -> (String, ConstraintResultType) {
+        match self.mode {
             MinMaxMode::Min => {
                 if count >= self.frequency {
                     (
@@ -158,32 +208,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
                     )
                 }
             }
-        };
-        emit_result(
-            &message.case_id,
-            &self.constraint_id,
-            ConstraintType::Appearance,
-            result,
-            info,
-            state.clone(),
-        )
-        .await;
-    }
-
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "appearance counter handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
-    }
-
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "appearance counter handler: clean up state for ({}/{})",
-            case_id,
-            self.constraint_id
-        );
+        }
     }
 }
 
@@ -225,14 +250,6 @@ impl ConstraintHandler for AppearanceTriggerHandler {
                 );
             }
         }
-    }
-
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "appearance trigger handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {

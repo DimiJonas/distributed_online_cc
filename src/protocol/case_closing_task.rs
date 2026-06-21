@@ -12,7 +12,6 @@ use crate::{state::app_state::AppState, types::CaseId};
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
     for handler in state.handlers.all() {
         // TODO: implement where needed
-        // handle late events for response after case end: they emit a result
         handler.handle_case_end(&case_id, state.clone()).await;
     }
 

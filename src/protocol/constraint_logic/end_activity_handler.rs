@@ -23,6 +23,8 @@ impl ConstraintHandler for EndActivityHandler {
         );
 
         let case_id = event.case_id.clone();
+
+        // TODO: consider not spawning here to keep event processing order
         // spawn case closing task
         let handle = tokio::spawn(case_closing_task(state.clone(), case_id.clone()));
 

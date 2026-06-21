@@ -202,12 +202,31 @@ impl ConstraintHandler for SensorCollectorHandler {
         .await;
     }
 
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "sensor collector handler: received case end signal for constraint {}; case={}",
             self.constraint_id,
             case_id
         );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if !result_exists {
+            // produce result because none was emitted yet
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::Sensor,
+                ConstraintResultType::Satisfied,
+                "sensor trigger event never happened".to_string(),
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
@@ -271,14 +290,6 @@ impl ConstraintHandler for SensorTriggerHandler {
                 );
             }
         }
-    }
-
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "sensor trigger handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {

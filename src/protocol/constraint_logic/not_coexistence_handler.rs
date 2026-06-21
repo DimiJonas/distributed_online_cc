@@ -324,12 +324,32 @@ impl ConstraintHandler for NotCoexistenceAHandler {
     }
 
     /// emit a result if none of the events happened
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "not coexistence a handler: received case end signal for constraint {}; case={}",
             self.constraint_id,
             case_id
         );
+
+        let claim_token_exists = {
+            let meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens
+                .get_token_cloned(case_id, &self.constraint_id, self.handler_id)
+                .is_some()
+        };
+
+        if !claim_token_exists {
+            // produce positive result because none was emitted yet and both handlers did not receive any events
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::NotCoexistence,
+                ConstraintResultType::Satisfied,
+                "none of the not coexistence events happened until case end".to_string(),
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     /// remove execute/block token
@@ -645,15 +665,6 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
         }
-    }
-
-    /// emit a result if none of the events happened
-    async fn handle_case_end(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "not coexistence b handler: received case end signal for constraint {}; case={}",
-            self.constraint_id,
-            case_id
-        );
     }
 
     /// remove execute/block token

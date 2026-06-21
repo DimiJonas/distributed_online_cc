@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::types::CaseId;
 
+/// case lifecycle: open -> ended -> closed
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
 pub enum CaseState {
     Open,
@@ -22,6 +23,10 @@ impl CaseStateMap {
 
     pub fn has_case(&self, case_id: &CaseId) -> bool {
         self.case_state.contains_key(case_id)
+    }
+
+    pub fn is_ended(&self, case_id: &CaseId) -> bool {
+        self.case_state.get(case_id) == Some(&CaseState::Ended)
     }
 
     pub fn is_closed(&self, case_id: &CaseId) -> bool {
