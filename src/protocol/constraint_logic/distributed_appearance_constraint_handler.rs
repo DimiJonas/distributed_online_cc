@@ -155,12 +155,18 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         }
     }
 
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "distributed appearance counter handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // delete counter token
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -233,14 +239,6 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             )
             .await;
         }
-    }
-
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "distributed appearance trigger handler: clean up state for ({}/{})",
-            case_id,
-            self.constraint_id
-        );
     }
 }
 

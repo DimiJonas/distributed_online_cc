@@ -67,9 +67,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                 }
             },
             None => {
-                // TODO: maybe emit a violated result
                 log::error!(
-                    "sensor constraint handler: event {} does not contain a value for attribute {}",
+                    "sensor constraint handler: event {} does not contain a value for attribute {}. ignoring",
                     event,
                     self.attribute_key
                 );
@@ -177,29 +176,18 @@ impl ConstraintHandler for SensorCollectorHandler {
         };
 
         // evaluate value and produce result result
-        let (info, constraint_result) = if self.mode.evaluate(attribute_value, self.value) {
-            // produce positive result
-            (
-                format!("{} {} {} is true", attribute_value, self.mode, self.value),
-                ConstraintResultType::Satisfied,
-            )
-        } else {
+        if !self.mode.evaluate_condition(attribute_value, self.value) {
             // produce negative result
-            (
-                format!("{} {} {} is false", attribute_value, self.mode, self.value),
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::Sensor,
                 ConstraintResultType::Violated,
+                format!("{} {} {} is false", attribute_value, self.mode, self.value),
+                state.clone(),
             )
+            .await;
         };
-
-        emit_result(
-            &message.case_id,
-            &self.constraint_id,
-            ConstraintType::Sensor,
-            constraint_result,
-            info,
-            state.clone(),
-        )
-        .await;
     }
 
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
@@ -229,12 +217,18 @@ impl ConstraintHandler for SensorCollectorHandler {
         }
     }
 
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "sensor collector handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // remove sensor events
+        {
+            let mut sensor_events = state.sensor_events.lock().unwrap();
+            sensor_events.remove_case(case_id);
+        }
     }
 }
 
@@ -290,13 +284,5 @@ impl ConstraintHandler for SensorTriggerHandler {
                 );
             }
         }
-    }
-
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "sensor trigger handler: clean up state for ({}/{})",
-            case_id,
-            self.constraint_id
-        );
     }
 }

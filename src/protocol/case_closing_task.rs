@@ -11,7 +11,6 @@ use crate::{state::app_state::AppState, types::CaseId};
 /// then forgets about the case by removing it from case state
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
     for handler in state.handlers.all() {
-        // TODO: implement where needed
         handler.handle_case_end(&case_id, state.clone()).await;
     }
 

@@ -352,14 +352,18 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         }
     }
 
-    /// remove execute/block token
-    /// possibly also clear claim token?
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "not coexistence a handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // delete claim token
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -667,13 +671,17 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         }
     }
 
-    /// remove execute/block token
-    /// possibly also clear claim token?
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "not coexistence b handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // delete claim token
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }

@@ -30,7 +30,7 @@ impl ConstraintHandler for OrderFirstHandler {
     impl_constraint_handler_fields!(OrderFirstHandler);
 
     /// record event execution (remember last execution (or all executions) of event before receiving the message from order second for later check with timestamp)
-    /// check if the token from order second is existent
+    /// check if the token from order second exists
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
             "order first handler: received configured event for constraint {}; event={}",
@@ -73,7 +73,7 @@ impl ConstraintHandler for OrderFirstHandler {
             if order_first_event_time >= order_second_event_time {
                 // produce negative result
                 let info = format!(
-                    "order first event happened at {} before order second event that happened at {}",
+                    "order first event happened at {} after order second event at {}",
                     order_first_event_time, order_second_event_time
                 );
                 emit_result(
@@ -81,21 +81,6 @@ impl ConstraintHandler for OrderFirstHandler {
                     &self.constraint_id,
                     ConstraintType::Order,
                     ConstraintResultType::Violated,
-                    info,
-                    state.clone(),
-                )
-                .await;
-            } else {
-                // produce positive result
-                let info = format!(
-                    "all executions of event {} happened before the first execution of the order second event for constraint {} for case {}",
-                    &self.event_id, &self.constraint_id, event.case_id
-                );
-                emit_result(
-                    &event.case_id,
-                    &self.constraint_id,
-                    ConstraintType::Order,
-                    ConstraintResultType::Satisfied,
                     info,
                     state.clone(),
                 )
@@ -202,42 +187,22 @@ impl ConstraintHandler for OrderFirstHandler {
             // check all recorded event times until now
             let order_first_executions: Vec<EventTime> = token.payload.timestamps().to_vec();
 
-            let mut violation_happened = false;
-
             for order_first_time in order_first_executions {
                 if order_first_time >= order_second_event_time {
-                    violation_happened = true;
                     // produce negative result
-                    let info = format!(
-                        "order first event happened at {} before order second event that happened at {}",
-                        order_first_time, order_second_event_time
-                    );
                     emit_result(
                         &message.case_id,
                         &self.constraint_id,
                         ConstraintType::Order,
-                        ConstraintResultType::Satisfied,
-                        info,
+                        ConstraintResultType::Violated,
+                        format!(
+                            "order first event happened at {} after order second event at {}",
+                            order_first_time, order_second_event_time
+                        ),
                         state.clone(),
                     )
                     .await;
                 }
-            }
-            if !violation_happened {
-                // produce positive result
-                let info = format!(
-                    "all executions of event {} happened before the first execution of the order second event for constraint {} for case {}",
-                    &self.event_id, &self.constraint_id, message.case_id
-                );
-                emit_result(
-                    &message.case_id,
-                    &self.constraint_id,
-                    ConstraintType::Order,
-                    ConstraintResultType::Satisfied,
-                    info,
-                    state.clone(),
-                )
-                .await;
             }
         }
     }
@@ -269,17 +234,20 @@ impl ConstraintHandler for OrderFirstHandler {
         }
     }
 
-    // remove the blocking token
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "order first handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // remove the blocking token
         {
             let mut token_in = state.token_in.lock().unwrap();
             token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
         }
+
+        // remove recording token
         {
             let mut token_out = state.token_out.lock().unwrap();
             token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
@@ -368,10 +336,7 @@ impl ConstraintHandler for OrderSecondHandler {
             case_id,
             self.constraint_id
         );
-        {
-            let mut token_in = state.token_in.lock().unwrap();
-            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
-        }
+        // remove remembering token
         {
             let mut token_out = state.token_out.lock().unwrap();
             token_out.remove_out(case_id, &self.constraint_id, self.handler_id);

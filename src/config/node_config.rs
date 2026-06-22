@@ -156,7 +156,7 @@ pub enum SensorConstraintMode {
 }
 
 impl SensorConstraintMode {
-    pub fn evaluate(&self, a: f64, b: f64) -> bool {
+    pub fn evaluate_condition(&self, a: f64, b: f64) -> bool {
         match self {
             Self::Lt => a < b,
             Self::Gt => a > b,

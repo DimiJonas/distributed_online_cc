@@ -217,6 +217,7 @@ impl ConstraintHandler for TimeStartHandler {
             case_id,
             self.constraint_id
         );
+        // remove timer tokens and clear 'seen' flag
         {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             timer_store.clear_timer_state(case_id, &self.constraint_id);
@@ -225,7 +226,6 @@ impl ConstraintHandler for TimeStartHandler {
             let mut watchdog_store = state.watchdog_cancel_tokens.lock().unwrap();
             watchdog_store.remove_constraint(case_id, &self.constraint_id);
         }
-        // TODO: watchdogs?
     }
 }
 

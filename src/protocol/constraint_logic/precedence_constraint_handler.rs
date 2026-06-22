@@ -65,20 +65,20 @@ impl ConstraintHandler for PrecedenceProducerHandler {
                 );
                 return;
             }
-            let token = Token::new(
+            let producer_token = Token::new(
                 event.case_id.clone(),
                 self.constraint_id.clone(),
                 ConstraintType::Precedence,
                 Some(producer_event_time),
                 state.config.node_id,
             );
-            token_out.produce_without_overwrite(token.clone(), self.handler_id);
+            token_out.produce_without_overwrite(producer_token.clone(), self.handler_id);
             log::info!(
                 "precedence producer handler: produced token for case={} constraint={}",
                 event.case_id,
                 self.constraint_id
             );
-            token
+            producer_token
         };
 
         // send token
@@ -94,12 +94,18 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         }
     }
 
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "precedence producer handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // remove producer token
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -155,35 +161,20 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         };
 
         // evaluate timestamps
-        let (result, info) = {
-            if consumer_event_time > producer_event_time {
-                (
-                    ConstraintResultType::Satisfied,
-                    format!(
-                        "consumer event happened after producer event: {} > {}",
-                        consumer_event_time, producer_event_time
-                    ),
-                )
-            } else {
-                (
-                    ConstraintResultType::Violated,
-                    format!(
-                        "consumer event happened before producer event: {} <= {}",
-                        consumer_event_time, producer_event_time
-                    ),
-                )
-            }
-        };
-
-        emit_result(
-            &event.case_id,
-            &self.constraint_id,
-            ConstraintType::Precedence,
-            result,
-            info,
-            state.clone(),
-        )
-        .await;
+        if consumer_event_time <= producer_event_time {
+            emit_result(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::Precedence,
+                ConstraintResultType::Violated,
+                format!(
+                    "consumer event happened before producer event: {} <= {}",
+                    consumer_event_time, producer_event_time
+                ),
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     async fn handle_message(&self, state: AppState, message: CCMessage) {
@@ -203,7 +194,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             return;
         }
 
-        let new_token = {
+        let new_producer_token = {
             match message.token.clone() {
                 Some(token) => token,
                 None => {
@@ -216,7 +207,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             }
         };
 
-        let new_event_time = match new_token.event_time {
+        let new_event_time = match new_producer_token.event_time {
             Some(timestamp) => timestamp,
             None => {
                 log::error!(
@@ -231,10 +222,10 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         {
             let mut token_in = state.token_in.lock().unwrap();
             match token_in.get_in_mut(&message.case_id, &self.constraint_id, self.handler_id) {
-                Some(existing_token) => match existing_token.event_time {
+                Some(existing_producer_token) => match existing_producer_token.event_time {
                     Some(existing_event_time) => {
                         if new_event_time < existing_event_time {
-                            existing_token.event_time = Some(new_event_time);
+                            existing_producer_token.event_time = Some(new_event_time);
                             log::info!(
                                 "precedence consumer handler: received precedence producer token (update)"
                             );
@@ -245,14 +236,14 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                         }
                     }
                     None => {
-                        existing_token.event_time = Some(new_event_time);
+                        existing_producer_token.event_time = Some(new_event_time);
                         log::info!(
                             "precedence consumer handler: received precedence producer token (insert timestamp)"
                         );
                     }
                 },
                 None => {
-                    token_in.receive_without_overwrite(new_token, self.handler_id);
+                    token_in.receive_without_overwrite(new_producer_token, self.handler_id);
                     log::info!(
                         "precedence consumer handler: received precedence producer token (insert)"
                     );
@@ -298,11 +289,17 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         }
     }
 
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "precedence consumer handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // remove producer token
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }

@@ -65,7 +65,7 @@ impl ConstraintHandler for ResponseProducerHandler {
             }
         };
 
-        let token = Token::new(
+        let producer_token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Response,
@@ -74,11 +74,14 @@ impl ConstraintHandler for ResponseProducerHandler {
         );
         {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.produce_with_overwrite(token.clone(), self.handler_id);
+            token_out.produce_with_overwrite(producer_token.clone(), self.handler_id);
         }
 
-        log::info!("response producer handler: produced token: {}", token);
-        log::debug!("token={:?}", token);
+        log::info!(
+            "response producer handler: produced token: {}",
+            producer_token
+        );
+        log::debug!("token={:?}", producer_token);
 
         // produce result if case already ended
         let case_ended = {
@@ -210,10 +213,8 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id,
             self.constraint_id
         );
-        {
-            let mut token_in = state.token_in.lock().unwrap();
-            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
-        }
+
+        // remove producer token
         {
             let mut token_out = state.token_out.lock().unwrap();
             token_out.remove_out(case_id, &self.constraint_id, self.handler_id);

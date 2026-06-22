@@ -134,12 +134,18 @@ impl ConstraintHandler for AppearanceCounterHandler {
         }
     }
 
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "appearance counter handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
         );
+
+        // remove counter token (meta)
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+        }
     }
 }
 
@@ -250,13 +256,5 @@ impl ConstraintHandler for AppearanceTriggerHandler {
                 );
             }
         }
-    }
-
-    async fn clean_up_state(&self, case_id: &CaseId, _state: AppState) {
-        log::info!(
-            "appearance trigger handler: clean up state for ({}/{})",
-            case_id,
-            self.constraint_id
-        );
     }
 }
