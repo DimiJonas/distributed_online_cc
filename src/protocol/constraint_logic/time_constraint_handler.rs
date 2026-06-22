@@ -129,25 +129,6 @@ impl ConstraintHandler for TimeStartHandler {
             timer_store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
         };
 
-        // satisfied if no time start event happened
-        if !timer_data.start_ever_seen && !timer_data.has_tokens() {
-            log::info!(
-                "time start handler: stop event arrived for ({}/{}) but no start event was ever recorded - satisfied immediately",
-                message.case_id,
-                self.constraint_id
-            );
-            emit_result(
-                &message.case_id,
-                &self.constraint_id,
-                ConstraintType::Time,
-                ConstraintResultType::Satisfied,
-                "TimerStop: no start event was ever observed".to_string(),
-                state.clone(),
-            )
-            .await;
-            return;
-        }
-
         log::info!(
             "time start handler: evaluating {} live and {} fired tokens for ({}/{})",
             timer_data.live_tokens.len(),
@@ -420,14 +401,15 @@ mod tests {
         state
     }
 
-    fn read_result(state: &AppState) -> ConstraintResultType {
-        state
-            .cc_results
-            .lock()
-            .unwrap()
-            .get_constraint(&CASE.to_string(), &CID.to_string())
-            .expect("not registered")
-            .constraint_result
+    fn read_result(state: &AppState) -> Option<ConstraintResultType> {
+        Some(
+            state
+                .cc_results
+                .lock()
+                .unwrap()
+                .get_constraint(&CASE.to_string(), &CID.to_string())?
+                .constraint_result,
+        )
     }
 
     fn live_count(state: &AppState) -> usize {
@@ -496,7 +478,7 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Violated
+            Some(ConstraintResultType::Violated)
         ));
         // Immediate policy → finalize runs → fired tokens cleared
         assert_eq!(fired_count(&state), 0);
@@ -514,14 +496,14 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Satisfied
+            Some(ConstraintResultType::Satisfied)
         ));
     }
 
     // ── handle_message: no start ever → satisfied immediately ────────────
 
     #[tokio::test]
-    async fn message_with_no_start_ever_is_satisfied_immediately() {
+    async fn message_with_no_start_ever_is_no_violation() {
         let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
         let handler = make_handler(10, MinMaxMode::Max);
 
@@ -529,10 +511,7 @@ mod tests {
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
         handler.handle_message(state.clone(), msg).await;
 
-        assert!(matches!(
-            read_result(&state),
-            ConstraintResultType::Satisfied
-        ));
+        assert!(read_result(&state).is_none(),);
     }
 
     // ── live evaluation: Max in time / out of time ───────────────────────
@@ -551,7 +530,7 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Satisfied
+            Some(ConstraintResultType::Satisfied)
         ));
         // live token was consumed
         assert_eq!(live_count(&state), 0);
@@ -572,7 +551,7 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Violated
+            Some(ConstraintResultType::Violated)
         ));
     }
 
@@ -591,7 +570,7 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Satisfied
+            Some(ConstraintResultType::Satisfied)
         ));
     }
 
@@ -608,7 +587,7 @@ mod tests {
 
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Violated
+            Some(ConstraintResultType::Violated)
         ));
     }
 
@@ -638,7 +617,7 @@ mod tests {
         // Tentative result is Violated; the fired token is preserved for correction.
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Violated
+            Some(ConstraintResultType::Violated)
         ));
         assert_eq!(fired_count(&state), 1);
         assert_eq!(live_count(&state), 0);
@@ -651,7 +630,7 @@ mod tests {
         // cc_results corrected to Satisfied immediately.
         assert!(matches!(
             read_result(&state),
-            ConstraintResultType::Satisfied
+            Some(ConstraintResultType::Satisfied)
         ));
         // The fired-tokens collection was drained for evaluation.
         assert_eq!(fired_count(&state), 0);

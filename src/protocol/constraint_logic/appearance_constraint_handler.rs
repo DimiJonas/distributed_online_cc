@@ -91,17 +91,17 @@ impl ConstraintHandler for AppearanceCounterHandler {
         }
 
         let count: u64 = self.get_and_reset_counter(&message.case_id, state.clone());
-        let (info, result) = self.evaluate_counter(count);
-
-        emit_result(
-            &message.case_id,
-            &self.constraint_id,
-            ConstraintType::Appearance,
-            result,
-            info,
-            state.clone(),
-        )
-        .await;
+        if let Some((info, result)) = self.evaluate_counter(count) {
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::Appearance,
+                result,
+                info,
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
@@ -171,44 +171,33 @@ impl AppearanceCounterHandler {
             None => 0,
         }
     }
-    fn evaluate_counter(&self, count: u64) -> (String, ConstraintResultType) {
+
+    fn evaluate_counter(&self, count: u64) -> Option<(String, ConstraintResultType)> {
         match self.mode {
             MinMaxMode::Min => {
-                if count >= self.frequency {
-                    (
-                        format!(
-                            "CounterMin: counter {:?} >= limit {:?}",
-                            count, self.frequency
-                        ),
-                        ConstraintResultType::Satisfied,
-                    )
-                } else {
-                    (
+                if count < self.frequency {
+                    Some((
                         format!(
                             "CounterMin: counter {:?} < limit {:?}",
                             count, self.frequency
                         ),
                         ConstraintResultType::Violated,
-                    )
+                    ))
+                } else {
+                    None
                 }
             }
             MinMaxMode::Max => {
-                if count <= self.frequency {
-                    (
-                        format!(
-                            "CounterMax: counter {:?} <= limit {:?}",
-                            count, self.frequency
-                        ),
-                        ConstraintResultType::Satisfied,
-                    )
-                } else {
-                    (
+                if count > self.frequency {
+                    Some((
                         format!(
                             "CounterMax: counter {:?} > limit {:?}",
                             count, self.frequency
                         ),
                         ConstraintResultType::Violated,
-                    )
+                    ))
+                } else {
+                    None
                 }
             }
         }
@@ -348,9 +337,9 @@ mod tests {
         ));
     }
 
-    /// both events, counter satisfies Min frequency → Satisfied.
+    /// both events, counter satisfies Min frequency -> no violation/result.
     #[tokio::test]
-    async fn both_min_satisfied() {
+    async fn both_min_no_violation() {
         let case = "c3";
         let state = counter_state(25020, case, MinMaxMode::Min, 2);
         let h = handler(MinMaxMode::Min, 2);
@@ -359,13 +348,10 @@ mod tests {
         h.handle_event(&make_traced_event(case, EID), state.clone())
             .await;
         h.handle_message(state.clone(), trigger(case)).await;
-        assert!(matches!(
-            result_type(&state, case),
-            Some(ConstraintResultType::Satisfied)
-        ));
+        assert!(result_type(&state, case).is_none());
     }
 
-    /// both events, counter below Min frequency → Violated.
+    /// both events, counter below Min frequency -> Violated.
     #[tokio::test]
     async fn both_min_violated() {
         let case = "c4";

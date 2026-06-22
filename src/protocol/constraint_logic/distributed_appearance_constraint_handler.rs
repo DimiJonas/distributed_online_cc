@@ -198,17 +198,17 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         let distributed_count: u64 = self
             .get_distributed_count(state.clone(), &event.case_id)
             .await;
-        let (info, result) = self.evaluate_count(distributed_count);
-
-        emit_result(
-            &event.case_id,
-            &self.constraint_id,
-            ConstraintType::DistributedAppearance,
-            result,
-            info,
-            state.clone(),
-        )
-        .await;
+        if let Some((info, result)) = self.evaluate_count(distributed_count) {
+            emit_result(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::DistributedAppearance,
+                result,
+                info,
+                state.clone(),
+            )
+            .await;
+        }
     }
 
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
@@ -276,44 +276,32 @@ impl DistributedAppearanceTriggerHandler {
         distributed_count
     }
 
-    fn evaluate_count(&self, distributed_count: u64) -> (String, ConstraintResultType) {
+    fn evaluate_count(&self, distributed_count: u64) -> Option<(String, ConstraintResultType)> {
         match self.mode {
             MinMaxMode::Min => {
-                if distributed_count >= self.frequency {
-                    (
-                        format!(
-                            "CounterMin: counter {:?} >= limit {:?}",
-                            distributed_count, self.frequency
-                        ),
-                        ConstraintResultType::Satisfied,
-                    )
-                } else {
-                    (
+                if distributed_count < self.frequency {
+                    Some((
                         format!(
                             "CounterMin: counter {:?} < limit {:?}",
                             distributed_count, self.frequency
                         ),
                         ConstraintResultType::Violated,
-                    )
+                    ))
+                } else {
+                    None
                 }
             }
             MinMaxMode::Max => {
-                if distributed_count <= self.frequency {
-                    (
-                        format!(
-                            "CounterMax: counter {:?} <= limit {:?}",
-                            distributed_count, self.frequency
-                        ),
-                        ConstraintResultType::Satisfied,
-                    )
-                } else {
-                    (
+                if distributed_count > self.frequency {
+                    Some((
                         format!(
                             "CounterMax: counter {:?} > limit {:?}",
                             distributed_count, self.frequency
                         ),
                         ConstraintResultType::Violated,
-                    )
+                    ))
+                } else {
+                    None
                 }
             }
         }
@@ -431,9 +419,9 @@ mod tests {
         ));
     }
 
-    /// both: distributed count meets Min frequency → Satisfied.
+    /// both: distributed count meets Min frequency -> no violation/result.
     #[tokio::test]
-    async fn both_min_satisfied() {
+    async fn both_min_no_violation() {
         let case = "c3";
         let (state, peers) = trigger_state(26020, Some(26021), case, MinMaxMode::Min, 2);
         let mut mgr_rx = register_manager(&state, peers[0]);
@@ -445,10 +433,7 @@ mod tests {
             answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3));
         tokio::join!(run, mock);
 
-        assert!(matches!(
-            result_type(&state, case),
-            Some(ConstraintResultType::Satisfied)
-        ));
+        assert!(result_type(&state, case).is_none(),);
     }
 
     /// both: distributed count below Min frequency → Violated.

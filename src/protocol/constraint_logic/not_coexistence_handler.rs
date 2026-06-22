@@ -155,19 +155,11 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         }
 
         // evaluate event execution based on the execution permission
-        if claim_token.payload.is_execution_allowed() {
-            let info = format!("execution of event {} is allowed", self.event_id);
-            emit_result(
-                &event.case_id,
-                &self.constraint_id,
-                ConstraintType::NotCoexistence,
-                ConstraintResultType::Satisfied,
-                info,
-                state.clone(),
-            )
-            .await;
-        } else {
-            let info = format!("execution of event {} is forbidden", self.event_id);
+        if !claim_token.payload.is_execution_allowed() {
+            let info = format!(
+                "execution of event {} is forbidden, because not coexistence B event happened first",
+                self.event_id
+            );
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
@@ -503,19 +495,11 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         }
 
         // evaluate event execution based on the execution permission
-        if claim_token.payload.is_execution_allowed() {
-            let info = format!("execution of event {} is allowed", self.event_id);
-            emit_result(
-                &event.case_id,
-                &self.constraint_id,
-                ConstraintType::NotCoexistence,
-                ConstraintResultType::Satisfied,
-                info,
-                state.clone(),
-            )
-            .await;
-        } else {
-            let info = format!("execution of event {} is forbidden", self.event_id);
+        if !claim_token.payload.is_execution_allowed() {
+            let info = format!(
+                "execution of event {} is forbidden, because not coexistence A event happened first",
+                self.event_id
+            );
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
@@ -773,9 +757,9 @@ mod tests {
         ));
     }
 
-    /// only A ran (B never ran → other time None) → A gets execution right → Satisfied.
+    /// only A ran (B never ran -> other time None) -> A gets execution right -> no violation/result.
     #[tokio::test]
-    async fn only_a_event_satisfied() {
+    async fn only_a_event_no_violation() {
         let case = "c2";
         let (state, b_peer) = a_state(24010, 24011, case);
         let mut mgr_rx = register_manager(&state, b_peer);
@@ -787,15 +771,12 @@ mod tests {
             answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, None));
         tokio::join!(run, mock);
 
-        assert!(matches!(
-            result_type(&state, case),
-            Some(ConstraintResultType::Satisfied)
-        ));
+        assert!(result_type(&state, case).is_none());
     }
 
-    /// both ran, A earlier than B → A has execution right → Satisfied on A.
+    /// both ran, A earlier than B -> A has execution right -> Satisfied on A -> no violation/result.
     #[tokio::test]
-    async fn a_earlier_than_b_satisfied() {
+    async fn a_earlier_than_b_no_violation() {
         let case = "c3";
         let (state, b_peer) = a_state(24020, 24021, case);
         let mut mgr_rx = register_manager(&state, b_peer);
@@ -807,10 +788,7 @@ mod tests {
             answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, Some(20)));
         tokio::join!(run, mock);
 
-        assert!(matches!(
-            result_type(&state, case),
-            Some(ConstraintResultType::Satisfied)
-        ));
+        assert!(result_type(&state, case).is_none());
     }
 
     /// both ran, A later than B → B had execution right → Violated on A.
