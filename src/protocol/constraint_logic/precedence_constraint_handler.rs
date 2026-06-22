@@ -280,7 +280,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             emit_result(
                 case_id,
                 &self.constraint_id,
-                ConstraintType::Order,
+                ConstraintType::Precedence,
                 ConstraintResultType::Satisfied,
                 info,
                 state.clone(),

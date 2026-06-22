@@ -223,7 +223,7 @@ impl HandlerRegistry {
                     frequency,
                     counter_peers,
                 } => Box::new(DistributedAppearanceTriggerHandler {
-                    handler_id: ConstraintHandlerId::AppearanceTrigger,
+                    handler_id: ConstraintHandlerId::DistributedAppearanceTrigger,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     counter_peers: counter_peers.clone(),
