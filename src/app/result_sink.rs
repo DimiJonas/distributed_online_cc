@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crate::{config::node_config::ResultSinkConfig, network::message_types::CCResultMessage};
 use rusqlite::Connection;
@@ -39,7 +39,7 @@ impl SinkError {
     }
 }
 
-pub fn init_db(config: &ResultSinkConfig) -> Result<Connection, SinkError> {
+pub fn init_db(config: Arc<ResultSinkConfig>) -> Result<Connection, SinkError> {
     let conn = Connection::open(&config.db_path).map_err(|e| SinkError::Open {
         path: config.db_path.clone(),
         source: e,
@@ -58,6 +58,7 @@ enum SinkEvent {
 }
 
 pub fn spawn_result_sink(config: ResultSinkConfig, mut sink_rx: mpsc::Receiver<CCResultMessage>) {
+    let config = Arc::new(config);
     let db_path = config.db_path.clone();
     let retry_interval = config.retry_interval;
     let retry_buffer_size = config.retry_buffer_size;
@@ -147,13 +148,13 @@ pub fn spawn_result_sink(config: ResultSinkConfig, mut sink_rx: mpsc::Receiver<C
     });
 }
 
-async fn try_connect(config: ResultSinkConfig) -> Option<Connection> {
+async fn try_connect(config: Arc<ResultSinkConfig>) -> Option<Connection> {
     let mut conn = None;
 
     // sql connection is blocking IO
     match tokio::task::spawn_blocking({
         let config = config.clone();
-        move || init_db(&config)
+        move || init_db(config.clone())
     })
     .await
     {
