@@ -5,23 +5,22 @@ use process_mining::core::event_data::case_centric::{
     xes::{XESImportOptions, import_xes_slice},
 };
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use crate::{
     config::node_config::{ConstraintConfig, NodeConfig, ResultBufferConfig, TcpChannelConfig},
     network::{
-        message_types::{CliTestMessage, PeerMessage},
+        message_types::{CCMessage, CliTestMessage, PeerMessage},
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
-    types::{ConstraintType, Token, TracedEvent},
+    types::{ConstraintType, Token, TokenPayload, TracedEvent},
 };
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 pub fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
 }
-
-// TODO: create a builder for NodeConfig
 
 /// Minimal NodeConfig that satisfies AppState::new without touching disk
 fn make_base_config() -> NodeConfig {
@@ -73,6 +72,93 @@ pub fn make_config_with_constraints_and_port(
     config.constraints = constraints;
     config.tcp_listen_address = addr(listen_port);
     config
+}
+
+pub struct NodeConfigBuilder {
+    config: NodeConfig,
+}
+
+impl NodeConfigBuilder {
+    pub fn new() -> Self {
+        Self {
+            config: make_base_config(),
+        }
+    }
+
+    /// Set the TCP listen address from a localhost port.
+    pub fn port(mut self, port: u16) -> Self {
+        self.config.tcp_listen_address = addr(port);
+        self
+    }
+
+    /// Replace the whole constraint list.
+    pub fn constraints(mut self, constraints: Vec<ConstraintConfig>) -> Self {
+        self.config.constraints = constraints;
+        self
+    }
+
+    /// Append a single constraint (chainable).
+    pub fn constraint(mut self, constraint: ConstraintConfig) -> Self {
+        self.config.constraints.push(constraint);
+        self
+    }
+
+    /// Grace period the case-closing task waits before closing the case
+    /// (during which results are still readable).
+    pub fn grace_period(mut self, period: Duration) -> Self {
+        self.config.case_end_grace_period = period;
+        self
+    }
+
+    /// Retention period the case is remembered for after closing.
+    pub fn retention_period(mut self, period: Duration) -> Self {
+        self.config.case_retention_period = period;
+        self
+    }
+
+    /// Default result-buffering policy for constraints without a specific one.
+    pub fn default_buffer(mut self, buffer: ResultBufferConfig) -> Self {
+        self.config.default_result_buffer = buffer;
+        self
+    }
+
+    /// Per-constraint result-buffering policy.
+    pub fn buffer(mut self, constraint_id: impl Into<String>, buffer: ResultBufferConfig) -> Self {
+        self.config
+            .result_buffers
+            .insert(constraint_id.into(), buffer);
+        self
+    }
+
+    pub fn build(self) -> NodeConfig {
+        self.config
+    }
+
+    /// Convenience: build the config and turn it straight into an `AppState`
+    /// (with throwaway loopback/sink channels and an internal event queue).
+    pub fn build_state(self) -> AppState {
+        make_state_from_config(self.config)
+    }
+
+    /// Convenience: build the config into an `AppState` wired to a real event
+    /// queue, returning the receiver so a test can drive the event processor.
+    pub fn build_state_with_event_q(
+        self,
+    ) -> (
+        AppState,
+        mpsc::Sender<TracedEvent>,
+        mpsc::Receiver<TracedEvent>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let state = make_state_with_config_and_event_q(self.config, event_tx.clone());
+        (state, event_tx, event_rx)
+    }
+}
+
+impl Default for NodeConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<TracedEvent>) {
@@ -265,4 +351,101 @@ pub fn make_traced_event_at(case_id: &str, event_name: &str, seconds_offset: i64
         case_id: case_id_val,
         event,
     }
+}
+
+/// Build a TracedEvent that carries a numeric sensor reading as a `<float>`
+/// attribute, so the sensor collector handler can pick it up via
+/// `get_attribute_by_key`. Timestamp is base (2024-01-01) + `seconds_offset`.
+pub fn make_sensor_event(
+    case_id: &str,
+    event_name: &str,
+    attribute_key: &str,
+    value: f64,
+    seconds_offset: i64,
+) -> TracedEvent {
+    use chrono::TimeZone;
+    let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+    let ts = base + chrono::Duration::seconds(seconds_offset);
+    let ts_str = ts.to_rfc3339();
+    let xes = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <trace>
+    <string key="concept:name" value="{case_id}"/>
+    <event>
+      <string key="concept:name" value="{event_name}"/>
+      <float key="{attribute_key}" value="{value}"/>
+      <date key="time:timestamp" value="{ts_str}"/>
+    </event>
+  </trace>
+</log>"#
+    );
+    let buf = BytesMut::from(xes.as_bytes());
+    let opts = XESImportOptions {
+        sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
+        verbose: false,
+        ..XESImportOptions::default()
+    };
+    let log = import_xes_slice(&buf, false, opts).unwrap();
+    let trace = log.traces.into_iter().next().unwrap();
+
+    let case_id_val = trace
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let event = trace.events.into_iter().next().unwrap();
+    TracedEvent {
+        case_id: case_id_val,
+        event,
+    }
+}
+
+/// Build a `Token` carrying a `Counter` payload, used to answer pull-token
+/// requests from a distributed-appearance trigger with a chosen count.
+pub fn make_counter_token(case_id: &str, constraint_id: &str, count: u64) -> Token {
+    Token::new_with_payload(
+        case_id.to_string(),
+        constraint_id.to_string(),
+        ConstraintType::DistributedAppearance,
+        None,
+        1,
+        TokenPayload::Counter(count),
+    )
+}
+
+/// Mock peer: wait for exactly one outbound conformance request on
+/// `manager_rx` (the receiver returned by `register_manager`), then resolve the
+/// matching pending `send_and_receive` future with `response_cc`.
+///
+/// This lets handlers that negotiate over the network (not-coexistence event
+/// path, distributed-appearance trigger) run to completion on a single-threaded
+/// runtime without any real TCP.
+pub async fn answer_one_conformance_request(
+    state: AppState,
+    manager_rx: &mut mpsc::Receiver<PeerManagerMessage>,
+    response_cc: CCMessage,
+) {
+    let outbound = manager_rx
+        .recv()
+        .await
+        .expect("expected one outbound message from handler");
+    let request_id = match outbound {
+        PeerManagerMessage::Outbound(boxed) => boxed
+            .request_id
+            .expect("outbound conformance request must carry a request_id"),
+        _ => Uuid::new_v4(),
+    };
+    let response = PeerMessage::conformance_res(request_id, response_cc);
+    let sender = {
+        let mut pending = state.pending.lock().unwrap();
+        pending
+            .remove(&request_id)
+            .expect("pending request must exist for the outbound request_id")
+    };
+    sender
+        .send(response)
+        .expect("send_and_receive receiver must still be waiting");
 }

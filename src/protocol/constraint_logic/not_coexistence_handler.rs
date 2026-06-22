@@ -685,3 +685,151 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
+
+    use crate::{
+        config::node_config::ConstraintConfig,
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            not_coexistence_handler::NotCoexistenceAHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token},
+        util::test_tools::{
+            addr, answer_one_conformance_request, make_config_with_constraints_and_port,
+            make_state_from_config, make_traced_event_at, register_manager,
+        },
+    };
+
+    const CID: &str = "nc";
+    const EID: &str = "a_event";
+
+    fn at(secs: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, secs).unwrap()
+    }
+
+    fn a_state(node_port: u16, b_port: u16, case: &str) -> (AppState, std::net::SocketAddr) {
+        let b_peer = addr(b_port);
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::NotCoexistenceA {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+                b_peer,
+            }],
+            node_port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        (state, b_peer)
+    }
+
+    fn handler(b_peer: std::net::SocketAddr) -> NotCoexistenceAHandler {
+        NotCoexistenceAHandler {
+            handler_id: ConstraintHandlerId::NotCoexistenceA,
+            event_id: EID.to_string(),
+            constraint_id: CID.to_string(),
+            b_peer,
+        }
+    }
+
+    /// Response token carrying B's event time (or None for "B never ran").
+    fn b_response(case: &str, b_time: Option<u32>) -> CCMessage {
+        let token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::NotCoexistence,
+            b_time.map(at),
+            2,
+        );
+        CCMessage::push_token(token)
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// neither event happened → Satisfied at case end.
+    #[tokio::test]
+    async fn neither_satisfied_at_case_end() {
+        let case = "c1";
+        let (state, b_peer) = a_state(24000, 24001, case);
+        handler(b_peer)
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only A ran (B never ran → other time None) → A gets execution right → Satisfied.
+    #[tokio::test]
+    async fn only_a_event_satisfied() {
+        let case = "c2";
+        let (state, b_peer) = a_state(24010, 24011, case);
+        let mut mgr_rx = register_manager(&state, b_peer);
+
+        let h = handler(b_peer);
+        let ev = make_traced_event_at(case, EID, 10);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, None));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both ran, A earlier than B → A has execution right → Satisfied on A.
+    #[tokio::test]
+    async fn a_earlier_than_b_satisfied() {
+        let case = "c3";
+        let (state, b_peer) = a_state(24020, 24021, case);
+        let mut mgr_rx = register_manager(&state, b_peer);
+
+        let h = handler(b_peer);
+        let ev = make_traced_event_at(case, EID, 10);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, Some(20)));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both ran, A later than B → B had execution right → Violated on A.
+    #[tokio::test]
+    async fn a_later_than_b_violated() {
+        let case = "c4";
+        let (state, b_peer) = a_state(24030, 24031, case);
+        let mut mgr_rx = register_manager(&state, b_peer);
+
+        let h = handler(b_peer);
+        let ev = make_traced_event_at(case, EID, 20);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, Some(10)));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+}

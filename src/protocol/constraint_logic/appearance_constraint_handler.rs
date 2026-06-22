@@ -119,15 +119,12 @@ impl ConstraintHandler for AppearanceCounterHandler {
         };
         if !result_exists {
             // produce result because none was emitted yet
-            let count: u64 = self.get_and_reset_counter(case_id, state.clone());
-            let (info, result) = self.evaluate_counter(count);
-
             emit_result(
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
-                result,
-                info,
+                ConstraintResultType::Satisfied,
+                "counter evaluation was never triggered".to_string(),
                 state.clone(),
             )
             .await;
@@ -256,5 +253,153 @@ impl ConstraintHandler for AppearanceTriggerHandler {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use crate::{
+        config::node_config::{AppearanceCounterReset, ConstraintConfig, MinMaxMode},
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            appearance_constraint_handler::AppearanceCounterHandler,
+            constraint_handler_trait::ConstraintHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType},
+        util::test_tools::{
+            make_config_with_constraints_and_port, make_state_from_config, make_traced_event,
+        },
+    };
+
+    const CID: &str = "app";
+    const EID: &str = "count";
+
+    fn counter_state(port: u16, case: &str, mode: MinMaxMode, frequency: u64) -> AppState {
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::AppearanceCounter {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+                mode,
+                frequency,
+                reset: AppearanceCounterReset::Keep,
+            }],
+            port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        state
+    }
+
+    fn handler(mode: MinMaxMode, frequency: u64) -> AppearanceCounterHandler {
+        AppearanceCounterHandler {
+            handler_id: ConstraintHandlerId::AppearanceCounter,
+            event_id: EID.to_string(),
+            constraint_id: CID.to_string(),
+            mode,
+            frequency,
+            reset: AppearanceCounterReset::Keep,
+        }
+    }
+
+    fn trigger(case: &str) -> CCMessage {
+        CCMessage::trigger_check(case.to_string(), CID.to_string(), Utc::now())
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// none (no counter, no trigger), Max mode → count 0 <= freq → Satisfied at case end.
+    #[tokio::test]
+    async fn none_satisfied_at_case_end_max() {
+        let case = "c1";
+        let state = counter_state(25000, case, MinMaxMode::Max, 2);
+        handler(MinMaxMode::Max, 2)
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only trigger event, no counter events → evaluated against counter 0.
+    /// Min mode, frequency 1: 0 >= 1 is false → Violated.
+    #[tokio::test]
+    async fn only_trigger_evaluated_against_zero() {
+        let case = "c2";
+        let state = counter_state(25010, case, MinMaxMode::Min, 1);
+        handler(MinMaxMode::Min, 1)
+            .handle_message(state.clone(), trigger(case))
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// both events, counter satisfies Min frequency → Satisfied.
+    #[tokio::test]
+    async fn both_min_satisfied() {
+        let case = "c3";
+        let state = counter_state(25020, case, MinMaxMode::Min, 2);
+        let h = handler(MinMaxMode::Min, 2);
+        h.handle_event(&make_traced_event(case, EID), state.clone())
+            .await;
+        h.handle_event(&make_traced_event(case, EID), state.clone())
+            .await;
+        h.handle_message(state.clone(), trigger(case)).await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both events, counter below Min frequency → Violated.
+    #[tokio::test]
+    async fn both_min_violated() {
+        let case = "c4";
+        let state = counter_state(25030, case, MinMaxMode::Min, 3);
+        let h = handler(MinMaxMode::Min, 3);
+        h.handle_event(&make_traced_event(case, EID), state.clone())
+            .await;
+        h.handle_event(&make_traced_event(case, EID), state.clone())
+            .await;
+        h.handle_message(state.clone(), trigger(case)).await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// only counter events (no trigger) → Satisfied, because the
+    /// constraint should only be judged when a trigger checks it.
+    #[tokio::test]
+    async fn only_counter_events_satisfied_desired() {
+        let case = "c5";
+        let state = counter_state(25040, case, MinMaxMode::Max, 2);
+        let h = handler(MinMaxMode::Max, 2);
+        for _ in 0..5 {
+            h.handle_event(&make_traced_event(case, EID), state.clone())
+                .await;
+        }
+        h.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(
+            matches!(
+                result_type(&state, case),
+                Some(ConstraintResultType::Satisfied)
+            ),
+            "counter-only (no trigger) should be Satisfied"
+        );
     }
 }

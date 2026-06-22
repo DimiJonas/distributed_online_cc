@@ -375,3 +375,183 @@ async fn send_push_token_message(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, TimeZone, Utc};
+
+    use crate::{
+        config::node_config::ConstraintConfig,
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            order_constraint_handler::OrderFirstHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token},
+        util::test_tools::{
+            make_config_with_constraints_and_port, make_state_from_config, make_traced_event_at,
+        },
+    };
+
+    const CID: &str = "ord";
+    const EID: &str = "first";
+
+    fn at(secs: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, secs).unwrap()
+    }
+
+    fn first_state(port: u16, case: &str) -> AppState {
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::OrderFirst {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+            }],
+            port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        state
+    }
+
+    fn handler() -> OrderFirstHandler {
+        OrderFirstHandler {
+            handler_id: ConstraintHandlerId::OrderFirst,
+            event_id: EID.to_string(),
+            constraint_id: CID.to_string(),
+        }
+    }
+
+    /// PushToken message from order-second, carrying the second event time.
+    fn second_push(case: &str, secs: u32) -> CCMessage {
+        let token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::Order,
+            Some(at(secs)),
+            1,
+        );
+        CCMessage::push_token(token)
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// neither event → Satisfied at case end.
+    #[tokio::test]
+    async fn neither_satisfied_at_case_end() {
+        let case = "c1";
+        let state = first_state(22000, case);
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only first events → Satisfied at case end.
+    #[tokio::test]
+    async fn only_first_satisfied_at_case_end() {
+        let case = "c2";
+        let state = first_state(22010, case);
+        handler()
+            .handle_event(&make_traced_event_at(case, EID, 10), state.clone())
+            .await;
+        handler()
+            .handle_event(&make_traced_event_at(case, EID, 20), state.clone())
+            .await;
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only second events → Satisfied at case end (blocking token, no firsts).
+    #[tokio::test]
+    async fn only_second_satisfied_at_case_end() {
+        let case = "c3";
+        let state = first_state(22020, case);
+        handler()
+            .handle_message(state.clone(), second_push(case, 10))
+            .await;
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both, all firsts before seconds → Satisfied at case end.
+    #[tokio::test]
+    async fn both_first_before_second_satisfied() {
+        let case = "c4";
+        let state = first_state(22030, case);
+        handler()
+            .handle_event(&make_traced_event_at(case, EID, 10), state.clone())
+            .await;
+        handler()
+            .handle_message(state.clone(), second_push(case, 20))
+            .await;
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both, a first event happens AFTER the second already arrived → Violated
+    /// (second push first creates a blocking token, the late first trips it).
+    #[tokio::test]
+    async fn first_after_second_violated_via_event() {
+        let case = "c5";
+        let state = first_state(22040, case);
+        handler()
+            .handle_message(state.clone(), second_push(case, 10))
+            .await;
+        handler()
+            .handle_event(&make_traced_event_at(case, EID, 20), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// both, a first was recorded then a second arrives that predates it → Violated
+    /// (checked against recorded firsts on message arrival).
+    #[tokio::test]
+    async fn first_after_second_violated_via_message() {
+        let case = "c6";
+        let state = first_state(22050, case);
+        handler()
+            .handle_event(&make_traced_event_at(case, EID, 20), state.clone())
+            .await;
+        handler()
+            .handle_message(state.clone(), second_push(case, 10))
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+}

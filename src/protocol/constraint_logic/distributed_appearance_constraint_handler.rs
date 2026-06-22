@@ -226,15 +226,12 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         };
         if !result_exists {
             // produce result because none was emitted yet
-            let distributed_count: u64 = self.get_distributed_count(state.clone(), case_id).await;
-            let (info, result) = self.evaluate_count(distributed_count);
-
             emit_result(
                 case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
-                result,
-                info,
+                ConstraintResultType::Satisfied,
+                "counter evaluation was never triggered".to_string(),
                 state.clone(),
             )
             .await;
@@ -320,5 +317,173 @@ impl DistributedAppearanceTriggerHandler {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        config::node_config::{ConstraintConfig, MinMaxMode},
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            distributed_appearance_constraint_handler::DistributedAppearanceTriggerHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType},
+        util::test_tools::{
+            addr, answer_one_conformance_request, make_config_with_constraints_and_port,
+            make_counter_token, make_state_from_config, make_traced_event, register_manager,
+        },
+    };
+
+    const CID: &str = "dapp";
+    const EID: &str = "trigger";
+
+    /// Build a trigger-side state. The counter peer (if any) is a remote node we
+    /// mock; the local node only hosts the trigger handler.
+    fn trigger_state(
+        node_port: u16,
+        counter_port: Option<u16>,
+        case: &str,
+        mode: MinMaxMode,
+        frequency: u64,
+    ) -> (AppState, Vec<std::net::SocketAddr>) {
+        let counter_peers: Vec<std::net::SocketAddr> = counter_port.into_iter().map(addr).collect();
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::DistributedAppearanceTrigger {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+                mode,
+                frequency,
+                counter_peers: counter_peers.clone(),
+            }],
+            node_port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        (state, counter_peers)
+    }
+
+    fn handler(
+        mode: MinMaxMode,
+        frequency: u64,
+        counter_peers: Vec<std::net::SocketAddr>,
+    ) -> DistributedAppearanceTriggerHandler {
+        DistributedAppearanceTriggerHandler {
+            handler_id: ConstraintHandlerId::DistributedAppearanceTrigger,
+            event_id: EID.to_string(),
+            constraint_id: CID.to_string(),
+            mode,
+            frequency,
+            counter_peers,
+        }
+    }
+
+    /// A pull-token response from the counter peer carrying `count`.
+    fn counter_response(case: &str, count: u64) -> CCMessage {
+        CCMessage::pull_token_response(make_counter_token(case, CID, count))
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// none: no counter peers, no trigger event → case end pulls 0 → Max 0<=2 → Satisfied.
+    #[tokio::test]
+    async fn none_satisfied_at_case_end_max() {
+        let case = "c1";
+        let (state, peers) = trigger_state(26000, None, case, MinMaxMode::Max, 2);
+        handler(MinMaxMode::Max, 2, peers)
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only trigger event, distributed count 0 → evaluated against 0.
+    /// Min freq 1: 0 >= 1 false → Violated.
+    #[tokio::test]
+    async fn only_trigger_evaluated_against_zero() {
+        let case = "c2";
+        let (state, peers) = trigger_state(26010, Some(26011), case, MinMaxMode::Min, 1);
+        let mut mgr_rx = register_manager(&state, peers[0]);
+
+        let h = handler(MinMaxMode::Min, 1, peers);
+        let ev = make_traced_event(case, EID);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 0));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// both: distributed count meets Min frequency → Satisfied.
+    #[tokio::test]
+    async fn both_min_satisfied() {
+        let case = "c3";
+        let (state, peers) = trigger_state(26020, Some(26021), case, MinMaxMode::Min, 2);
+        let mut mgr_rx = register_manager(&state, peers[0]);
+
+        let h = handler(MinMaxMode::Min, 2, peers);
+        let ev = make_traced_event(case, EID);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both: distributed count below Min frequency → Violated.
+    #[tokio::test]
+    async fn both_min_violated() {
+        let case = "c4";
+        let (state, peers) = trigger_state(26030, Some(26031), case, MinMaxMode::Min, 3);
+        let mut mgr_rx = register_manager(&state, peers[0]);
+
+        let h = handler(MinMaxMode::Min, 3, peers);
+        let ev = make_traced_event(case, EID);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 2));
+        tokio::join!(run, mock);
+
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// only counter events (no trigger) → Satisfied
+    #[tokio::test]
+    async fn only_counter_events_satisfied_desired() {
+        let case = "c5";
+        let (state, peers) = trigger_state(26040, Some(26041), case, MinMaxMode::Max, 2);
+        let h = handler(MinMaxMode::Max, 2, peers);
+        h.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(
+            matches!(
+                result_type(&state, case),
+                Some(ConstraintResultType::Satisfied)
+            ),
+            "counter-only (no trigger) should be Satisfied"
+        );
     }
 }

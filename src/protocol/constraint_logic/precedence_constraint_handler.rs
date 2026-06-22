@@ -303,3 +303,163 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+
+    use crate::{
+        config::node_config::ConstraintConfig,
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            precedence_constraint_handler::PrecedenceConsumerHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TracedEvent},
+        util::test_tools::{make_config_with_constraints_and_port, make_state_from_config},
+    };
+    use chrono::DateTime;
+
+    const CID: &str = "prec";
+    const EID: &str = "consume";
+
+    fn at(secs: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, secs).unwrap()
+    }
+
+    fn consumer_state(port: u16, case: &str) -> AppState {
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::PrecedenceConsumer {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+            }],
+            port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        state
+    }
+
+    fn handler() -> PrecedenceConsumerHandler {
+        PrecedenceConsumerHandler {
+            handler_id: ConstraintHandlerId::PrecedenceConsumer,
+            constraint_id: CID.to_string(),
+            event_id: EID.to_string(),
+        }
+    }
+
+    /// Build a consumer event carrying an explicit timestamp via XES.
+    fn consumer_event(case: &str, secs: i64) -> TracedEvent {
+        crate::util::test_tools::make_traced_event_at(case, EID, secs)
+    }
+
+    /// Push a producer token (as it would arrive over the network) with the
+    /// given event time.
+    fn producer_token(case: &str, secs: u32) -> CCMessage {
+        let token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::Precedence,
+            Some(at(secs)),
+            1,
+        );
+        CCMessage::push_token(token)
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// neither producer nor consumer event → Satisfied at case end.
+    #[tokio::test]
+    async fn neither_event_satisfied_at_case_end() {
+        let case = "c1";
+        let state = consumer_state(21000, case);
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only producer event → Satisfied at case end (token stored, no consumer).
+    #[tokio::test]
+    async fn only_producer_satisfied_at_case_end() {
+        let case = "c2";
+        let state = consumer_state(21010, case);
+        handler()
+            .handle_message(state.clone(), producer_token(case, 10))
+            .await;
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only consumer event (no producer token) → Violated.
+    #[tokio::test]
+    async fn only_consumer_violated() {
+        let case = "c3";
+        let state = consumer_state(21020, case);
+        handler()
+            .handle_event(&consumer_event(case, 10), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// both: producer before consumer → no violation during case, Satisfied at end.
+    #[tokio::test]
+    async fn producer_before_consumer_satisfied() {
+        let case = "c4";
+        let state = consumer_state(21030, case);
+        handler()
+            .handle_message(state.clone(), producer_token(case, 10))
+            .await;
+        handler()
+            .handle_event(&consumer_event(case, 20), state.clone())
+            .await;
+        // no result emitted by the consumer event itself
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both: consumer before producer → Violated.
+    #[tokio::test]
+    async fn consumer_before_producer_violated() {
+        let case = "c5";
+        let state = consumer_state(21040, case);
+        // producer token recorded with a later time than the consumer event
+        handler()
+            .handle_message(state.clone(), producer_token(case, 20))
+            .await;
+        handler()
+            .handle_event(&consumer_event(case, 10), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+}

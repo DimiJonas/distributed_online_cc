@@ -488,6 +488,172 @@ mod tests {
         ));
     }
 
+    // -- Response scenarios (producer-side evaluator) --
+    //
+    // The producer side is where the Response result is emitted: a consumer
+    // event turns into a DeleteToken sent to the producer peer, and the
+    // producer decides Satisfied/Violated at case end based on whether an
+    // unconsumed token remains.
+
+    /// both ran, producer followed by consumer → Satisfied at case end.
+    /// produce@t10, consume(delete)@t20 removes the token, case end → Satisfied.
+    #[tokio::test]
+    async fn producer_followed_by_consumer_is_satisfied() {
+        use crate::util::test_tools::make_traced_event_at;
+        let state = make_producer_state(20080);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c8".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            handler_id: ConstraintHandlerId::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        handler
+            .handle_event(&make_traced_event_at("c8", "produce", 10), state.clone())
+            .await;
+        // consumer event time is strictly after the producer token time.
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 20).unwrap();
+        let delete = CCMessage::delete_token("c8".to_string(), "rp".to_string(), consumer_ts);
+        handler.handle_message(state.clone(), delete).await;
+        handler
+            .handle_case_end(&"c8".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c8".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(
+            matches!(
+                result.constraint_result,
+                crate::types::ConstraintResultType::Satisfied
+            ),
+            "producer followed by consumer should be Satisfied"
+        );
+    }
+
+    /// both ran, but consumer happened BEFORE the producer → the delete does
+    /// not match (token time not earlier than consumer time), token remains,
+    /// case end → Violated. Encodes "a producer must be followed by a consumer".
+    #[tokio::test]
+    async fn consumer_before_producer_is_violated() {
+        use crate::util::test_tools::make_traced_event_at;
+        let state = make_producer_state(20090);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c9".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            handler_id: ConstraintHandlerId::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        // produce at t20, consumer delete carries an earlier time t10.
+        handler
+            .handle_event(&make_traced_event_at("c9", "produce", 20), state.clone())
+            .await;
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
+        let delete = CCMessage::delete_token("c9".to_string(), "rp".to_string(), consumer_ts);
+        handler.handle_message(state.clone(), delete).await;
+        handler
+            .handle_case_end(&"c9".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c9".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(
+            matches!(
+                result.constraint_result,
+                crate::types::ConstraintResultType::Violated
+            ),
+            "a consumer occurring before the producer must not satisfy the response"
+        );
+    }
+
+    /// multiple producers, one later consumer → Satisfied. Two produce events
+    /// (the second overwrites the open token); one delete after both consumes
+    /// the outstanding token; case end → Satisfied.
+    #[tokio::test]
+    async fn multiple_producers_one_consumer_is_satisfied() {
+        use crate::util::test_tools::make_traced_event_at;
+        let state = make_producer_state(20100);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c10".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            handler_id: ConstraintHandlerId::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        handler
+            .handle_event(&make_traced_event_at("c10", "produce", 5), state.clone())
+            .await;
+        handler
+            .handle_event(&make_traced_event_at("c10", "produce", 15), state.clone())
+            .await;
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 30).unwrap();
+        let delete = CCMessage::delete_token("c10".to_string(), "rp".to_string(), consumer_ts);
+        handler.handle_message(state.clone(), delete).await;
+        handler
+            .handle_case_end(&"c10".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c10".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(
+            matches!(
+                result.constraint_result,
+                crate::types::ConstraintResultType::Satisfied
+            ),
+            "multiple producers consumed by one later consumer should be Satisfied"
+        );
+    }
+
+    /// only the consumer ran (no producer token ever created) → at case end the
+    /// producer side reports Satisfied. The stray delete finds no token.
+    #[tokio::test]
+    async fn only_consumer_is_satisfied_at_case_end() {
+        let state = make_producer_state(20110);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c11".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            handler_id: ConstraintHandlerId::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
+        let delete = CCMessage::delete_token("c11".to_string(), "rp".to_string(), consumer_ts);
+        handler.handle_message(state.clone(), delete).await;
+        handler
+            .handle_case_end(&"c11".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c11".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(
+            matches!(
+                result.constraint_result,
+                crate::types::ConstraintResultType::Satisfied
+            ),
+            "only a consumer (no producer) should be Satisfied at case end"
+        );
+    }
+
     // -- ResponseConsumerHandler --
 
     /// handle_event sends a DeleteToken conformance message to each producer peer.

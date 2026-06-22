@@ -286,3 +286,177 @@ impl ConstraintHandler for SensorTriggerHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{TimeZone, Utc};
+
+    use crate::{
+        config::node_config::{ConstraintConfig, SensorConstraintMode},
+        network::message_types::CCMessage,
+        protocol::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            sensor_constraint_handler::SensorCollectorHandler,
+        },
+        state::app_state::AppState,
+        types::{ConstraintHandlerId, ConstraintResultType},
+        util::test_tools::{
+            make_config_with_constraints_and_port, make_sensor_event, make_state_from_config,
+        },
+    };
+
+    const CID: &str = "sens";
+    const EID: &str = "collect";
+    const KEY: &str = "temp";
+    const THRESHOLD: f64 = 50.0;
+
+    fn collector_state(port: u16, case: &str) -> AppState {
+        let config = make_config_with_constraints_and_port(
+            vec![ConstraintConfig::SensorCollector {
+                constraint_id: CID.to_string(),
+                event_id: EID.to_string(),
+                attribute_key: KEY.to_string(),
+                value: THRESHOLD,
+                mode: SensorConstraintMode::Gt,
+                max_value_age: Duration::from_secs(60),
+            }],
+            port,
+        );
+        let state = make_state_from_config(config);
+        state
+            .cc_results
+            .lock()
+            .unwrap()
+            .register_case(case.to_string());
+        state
+    }
+
+    fn handler() -> SensorCollectorHandler {
+        SensorCollectorHandler {
+            handler_id: ConstraintHandlerId::SensorCollector,
+            constraint_id: CID.to_string(),
+            event_id: EID.to_string(),
+            attribute_key: KEY.to_string(),
+            value: THRESHOLD,
+            mode: SensorConstraintMode::Gt,
+            max_value_age: Duration::from_secs(60),
+        }
+    }
+
+    /// TriggerCheck message at the given offset (seconds from 2024-01-01).
+    fn trigger_at(case: &str, secs: i64) -> CCMessage {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let ts = base + chrono::Duration::seconds(secs);
+        CCMessage::trigger_check(case.to_string(), CID.to_string(), ts)
+    }
+
+    fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.constraint_result)
+    }
+
+    /// neither collector nor trigger event → Satisfied at case end.
+    #[tokio::test]
+    async fn neither_satisfied_at_case_end() {
+        let case = "c1";
+        let state = collector_state(23000, case);
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only collector events → Satisfied at case end.
+    #[tokio::test]
+    async fn only_collector_satisfied_at_case_end() {
+        let case = "c2";
+        let state = collector_state(23010, case);
+        handler()
+            .handle_event(&make_sensor_event(case, EID, KEY, 80.0, 0), state.clone())
+            .await;
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// only trigger event, no values → Violated.
+    #[tokio::test]
+    async fn only_trigger_violated_no_values() {
+        let case = "c3";
+        let state = collector_state(23020, case);
+        handler()
+            .handle_message(state.clone(), trigger_at(case, 10))
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// both, condition met (value 80 > 50) → Satisfied at case end.
+    #[tokio::test]
+    async fn both_condition_met_satisfied() {
+        let case = "c4";
+        let state = collector_state(23030, case);
+        handler()
+            .handle_event(&make_sensor_event(case, EID, KEY, 80.0, 0), state.clone())
+            .await;
+        handler()
+            .handle_message(state.clone(), trigger_at(case, 10))
+            .await;
+        assert!(result_type(&state, case).is_none());
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// both, condition not met (value 30 > 50 is false) → Violated.
+    #[tokio::test]
+    async fn both_condition_unmet_violated() {
+        let case = "c5";
+        let state = collector_state(23040, case);
+        handler()
+            .handle_event(&make_sensor_event(case, EID, KEY, 30.0, 0), state.clone())
+            .await;
+        handler()
+            .handle_message(state.clone(), trigger_at(case, 10))
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// value is stale (age 120s > 60s max) at trigger time → treated as no value → Violated.
+    #[tokio::test]
+    async fn stale_value_violated() {
+        let case = "c6";
+        let state = collector_state(23050, case);
+        handler()
+            .handle_event(&make_sensor_event(case, EID, KEY, 80.0, 0), state.clone())
+            .await;
+        handler()
+            .handle_message(state.clone(), trigger_at(case, 120))
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+}
