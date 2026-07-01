@@ -98,7 +98,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::{io::AsyncWriteExt, net::UnixListener, sync::mpsc};
 
-    use crate::protocol::event_input_handler::handle_event;
+    use crate::conformance_checking::event_input_handler::handle_event;
     use crate::types::EventId;
     use crate::util::test_tools::minimal_xes;
 

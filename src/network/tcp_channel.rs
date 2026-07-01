@@ -1,7 +1,7 @@
+use crate::conformance_checking::tcp_handler::*;
 use crate::network::framing::*;
 use crate::network::message_types::{HelloMessage, MessageKind, PeerMessage, PeerMessagePayload};
 use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
-use crate::protocol::tcp_handler::*;
 use crate::state::app_state::AppState;
 use bytes::BytesMut;
 use std::net::SocketAddr;

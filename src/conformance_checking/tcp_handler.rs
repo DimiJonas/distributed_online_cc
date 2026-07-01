@@ -152,15 +152,15 @@ pub async fn handle_overlay_message(
 mod tests {
     use crate::{
         config::node_config::ConstraintConfig,
+        conformance_checking::tcp_handler::{
+            handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
+        },
         network::{
             message_types::{
                 CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessagePayload,
                 TerminationDetectionMessage,
             },
             peer_manager_task::PeerManagerMessage,
-        },
-        protocol::tcp_handler::{
-            handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
         },
         state::app_state::AppState,
         types::{ConstraintHandlerId, MessageId},

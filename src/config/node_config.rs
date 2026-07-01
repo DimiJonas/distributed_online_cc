@@ -44,6 +44,8 @@ pub struct NodeConfig {
         default = "default_case_retention_period"
     )]
     pub case_retention_period: Duration,
+    #[serde(default)]
+    pub overlay: OverlayConfig,
 }
 
 impl NodeConfig {
@@ -144,6 +146,20 @@ pub struct ResultSinkConfig {
     pub retry_interval: Duration,
     #[serde(default = "default_retry_buffer_size")]
     pub retry_buffer_size: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OverlayConfig {
+    pub start_peers: Vec<SocketAddr>,
+    #[serde(
+        default = "default_shuffling_interval",
+        deserialize_with = "deserialize_humantime_duration"
+    )]
+    pub shuffling_interval: Duration,
+    #[serde(default = "default_shuffle_length")]
+    pub shuffle_length: u32,
+    #[serde(default = "default_max_peer_cache_size")]
+    pub max_peer_cache_size: u32,
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
@@ -486,6 +502,18 @@ fn default_case_end_grace_period() -> Duration {
 
 fn default_case_retention_period() -> Duration {
     Duration::from_secs(30)
+}
+
+fn default_shuffling_interval() -> Duration {
+    Duration::from_mins(10)
+}
+
+fn default_shuffle_length() -> u32 {
+    4
+}
+
+fn default_max_peer_cache_size() -> u32 {
+    8
 }
 
 // deserialize a value that can be int or float

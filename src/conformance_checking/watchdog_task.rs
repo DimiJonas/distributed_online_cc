@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::node_config::MinMaxMode,
-    protocol::result_emitter::emit_result,
+    conformance_checking::result_emitter::emit_result,
     state::app_state::AppState,
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, TokenId},
 };

@@ -4,13 +4,13 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
+    conformance_checking::{
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+    },
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_peer,
-    },
-    protocol::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     state::app_state::AppState,
     types::{
@@ -310,11 +310,11 @@ mod tests {
 
     use crate::{
         config::node_config::ConstraintConfig,
-        network::message_types::CCMessage,
-        protocol::constraint_logic::{
+        conformance_checking::constraint_logic::{
             constraint_handler_trait::ConstraintHandler,
             precedence_constraint_handler::PrecedenceConsumerHandler,
         },
+        network::message_types::CCMessage,
         state::app_state::AppState,
         types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TracedEvent},
         util::test_tools::{make_config_with_constraints_and_port, make_state_from_config},

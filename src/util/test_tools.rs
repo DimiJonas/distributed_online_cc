@@ -8,7 +8,9 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
-    config::node_config::{ConstraintConfig, NodeConfig, ResultBufferConfig, TcpChannelConfig},
+    config::node_config::{
+        ConstraintConfig, NodeConfig, OverlayConfig, ResultBufferConfig, TcpChannelConfig,
+    },
     network::{
         message_types::{CCMessage, CliTestMessage, PeerMessage},
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
@@ -47,6 +49,7 @@ fn make_base_config() -> NodeConfig {
         constraints: vec![],
         result_buffers: HashMap::new(),
         default_result_buffer: ResultBufferConfig::Immediate,
+        overlay: OverlayConfig::default(),
     };
     crate::network::message_types::init(config.clone());
     config

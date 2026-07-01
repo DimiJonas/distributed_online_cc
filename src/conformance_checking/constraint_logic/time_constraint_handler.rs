@@ -5,14 +5,14 @@ use chrono::Utc;
 
 use crate::{
     config::node_config::MinMaxMode,
+    conformance_checking::{
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        watchdog_task::watchdog_task,
+    },
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_peer,
-    },
-    protocol::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
-        watchdog_task::watchdog_task,
     },
     state::app_state::AppState,
     types::{

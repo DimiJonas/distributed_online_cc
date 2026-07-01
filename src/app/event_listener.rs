@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::protocol::event_input_handler::handle_event;
+use crate::conformance_checking::event_input_handler::handle_event;
 use crate::state::app_state::AppState;
 use tokio::net::UnixListener;
 

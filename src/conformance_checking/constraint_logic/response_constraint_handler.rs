@@ -25,9 +25,9 @@ use crate::network::tcp_router::send_to_peer;
             producer_peers = ["127.0.0.1:8001"]
 
 */
+use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
+use crate::conformance_checking::result_emitter::emit_result;
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
-use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
-use crate::protocol::result_emitter::emit_result;
 use crate::state::app_state::AppState;
 use crate::types::{
     CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
@@ -308,13 +308,13 @@ mod tests {
 
     use crate::{
         config::node_config::ConstraintConfig,
+        conformance_checking::constraint_logic::{
+            constraint_handler_trait::ConstraintHandler,
+            response_constraint_handler::{ResponseConsumerHandler, ResponseProducerHandler},
+        },
         network::{
             message_types::{CCMessage, PeerMessagePayload},
             peer_manager_task::PeerManagerMessage,
-        },
-        protocol::constraint_logic::{
-            constraint_handler_trait::ConstraintHandler,
-            response_constraint_handler::{ResponseConsumerHandler, ResponseProducerHandler},
         },
         state::app_state::AppState,
         types::ConstraintHandlerId,

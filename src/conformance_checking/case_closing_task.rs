@@ -27,7 +27,6 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
     }
 
     for handler in state.handlers.all() {
-        // TODO: implemented for all handlers
         handler.clean_up_state(&case_id, state.clone()).await;
     }
 
@@ -43,7 +42,7 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
+    use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
     // case_closing_task
     use crate::state::app_state::AppState;
     use crate::types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, TracedEvent};

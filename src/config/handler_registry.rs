@@ -1,28 +1,28 @@
 use crate::config::node_config::{ConstraintConfig, NodeConfig};
-use crate::protocol::constraint_logic::appearance_constraint_handler::{
+use crate::conformance_checking::constraint_logic::appearance_constraint_handler::{
     AppearanceCounterHandler, AppearanceTriggerHandler,
 };
-use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
-use crate::protocol::constraint_logic::distributed_appearance_constraint_handler::{
+use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
+use crate::conformance_checking::constraint_logic::distributed_appearance_constraint_handler::{
     DistributedAppearanceCounterHandler, DistributedAppearanceTriggerHandler,
 };
-use crate::protocol::constraint_logic::end_activity_handler::EndActivityHandler;
-use crate::protocol::constraint_logic::not_coexistence_handler::{
+use crate::conformance_checking::constraint_logic::end_activity_handler::EndActivityHandler;
+use crate::conformance_checking::constraint_logic::not_coexistence_handler::{
     NotCoexistenceAHandler, NotCoexistenceBHandler,
 };
-use crate::protocol::constraint_logic::order_constraint_handler::{
+use crate::conformance_checking::constraint_logic::order_constraint_handler::{
     OrderFirstHandler, OrderSecondHandler,
 };
-use crate::protocol::constraint_logic::precedence_constraint_handler::{
+use crate::conformance_checking::constraint_logic::precedence_constraint_handler::{
     PrecedenceConsumerHandler, PrecedenceProducerHandler,
 };
-use crate::protocol::constraint_logic::response_constraint_handler::{
+use crate::conformance_checking::constraint_logic::response_constraint_handler::{
     ResponseConsumerHandler, ResponseProducerHandler,
 };
-use crate::protocol::constraint_logic::sensor_constraint_handler::{
+use crate::conformance_checking::constraint_logic::sensor_constraint_handler::{
     SensorCollectorHandler, SensorTriggerHandler,
 };
-use crate::protocol::constraint_logic::time_constraint_handler::{
+use crate::conformance_checking::constraint_logic::time_constraint_handler::{
     TimeStartHandler, TimeStopHandler,
 };
 use crate::types::{ConstraintHandlerId, ConstraintId, EventId};

@@ -6,13 +6,13 @@ use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
     config::node_config::SensorConstraintMode,
+    conformance_checking::{
+        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+    },
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_peer,
-    },
-    protocol::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     state::app_state::AppState,
     types::{
@@ -295,11 +295,11 @@ mod tests {
 
     use crate::{
         config::node_config::{ConstraintConfig, SensorConstraintMode},
-        network::message_types::CCMessage,
-        protocol::constraint_logic::{
+        conformance_checking::constraint_logic::{
             constraint_handler_trait::ConstraintHandler,
             sensor_constraint_handler::SensorCollectorHandler,
         },
+        network::message_types::CCMessage,
         state::app_state::AppState,
         types::{ConstraintHandlerId, ConstraintResultType},
         util::test_tools::{

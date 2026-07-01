@@ -1,6 +1,6 @@
+use crate::conformance_checking::case_closing_task::case_closing_task;
+use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::impl_constraint_handler_fields;
-use crate::protocol::case_closing_task::case_closing_task;
-use crate::protocol::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::state::app_state::AppState;
 use crate::types::{ConstraintHandlerId, TracedEvent};
 use async_trait::async_trait;
