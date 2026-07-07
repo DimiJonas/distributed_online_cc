@@ -1,11 +1,11 @@
 use crate::network::peer_manager_task::PeerManagerMessage;
+use crate::types::PeerAddress;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use tokio::sync::mpsc;
 
 //maps address -> sender into the peer_manager_task for that peer
 pub struct PeerManagerMap {
-    peer_managers: HashMap<SocketAddr, mpsc::Sender<PeerManagerMessage>>,
+    peer_managers: HashMap<PeerAddress, mpsc::Sender<PeerManagerMessage>>,
 }
 
 impl PeerManagerMap {
@@ -15,7 +15,7 @@ impl PeerManagerMap {
         }
     }
 
-    pub fn insert(&mut self, peer_address: SocketAddr, sender: mpsc::Sender<PeerManagerMessage>) {
+    pub fn insert(&mut self, peer_address: PeerAddress, sender: mpsc::Sender<PeerManagerMessage>) {
         if self.peer_managers.contains_key(&peer_address) {
             log::warn!(
                 "peer manager for {} already exists, ignoring insert",
@@ -26,11 +26,11 @@ impl PeerManagerMap {
         self.peer_managers.insert(peer_address, sender);
     }
 
-    pub fn get(&self, peer_address: &SocketAddr) -> Option<mpsc::Sender<PeerManagerMessage>> {
+    pub fn get(&self, peer_address: &PeerAddress) -> Option<mpsc::Sender<PeerManagerMessage>> {
         self.peer_managers.get(peer_address).cloned()
     }
 
-    pub fn has_manager(&self, peer_address: &SocketAddr) -> bool {
+    pub fn has_manager(&self, peer_address: &PeerAddress) -> bool {
         self.peer_managers.contains_key(peer_address)
     }
 }
@@ -45,8 +45,8 @@ impl Default for PeerManagerMap {
 mod tests {
     use super::*;
 
-    fn addr(port: u16) -> SocketAddr {
-        format!("127.0.0.1:{}", port).parse().unwrap()
+    fn addr(port: u16) -> PeerAddress {
+        PeerAddress::new_conformance_address(format!("127.0.0.1:{}", port).parse().unwrap())
     }
 
     fn make_sender() -> mpsc::Sender<PeerManagerMessage> {

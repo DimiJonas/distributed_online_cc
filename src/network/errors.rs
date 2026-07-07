@@ -1,5 +1,3 @@
-use std::net::SocketAddr;
-
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 
@@ -8,7 +6,7 @@ use crate::{
         message_types::{MessageKind, PeerMessage},
         peer_manager_task::PeerManagerMessage,
     },
-    types::RequestId,
+    types::{PeerAddress, RequestId},
 };
 
 #[derive(Debug, Error)]
@@ -30,7 +28,7 @@ pub enum SendReceiveError {
 
     #[error("failed to send message to {peer_address}: {source}")]
     SendFailed {
-        peer_address: SocketAddr,
+        peer_address: PeerAddress,
         #[source]
         source: SendError<PeerManagerMessage>, // or whatever your send error is
     },

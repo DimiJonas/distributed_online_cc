@@ -11,12 +11,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TokenPayload,
-        TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
+        TokenPayload, TracedEvent,
     },
 };
 
@@ -73,7 +73,12 @@ impl ConstraintHandler for AppearanceCounterHandler {
         log::info!("appearance counter handler: counter is now at {}", count);
     }
 
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "appearance counter handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -234,7 +239,9 @@ impl ConstraintHandler for AppearanceTriggerHandler {
             event.timestamp_utc().unwrap_or(Utc::now()),
         ));
         for &peer_address in self.counter_peers.iter() {
-            if let Err(e) = send_to_peer(peer_address, message.clone(), state.clone()).await {
+            if let Err(e) =
+                send_to_conformance_peer(peer_address, message.clone(), state.clone()).await
+            {
                 log::error!(
                     "appearance trigger handler: error sending cc trigger message to {}: {}",
                     peer_address,
@@ -248,6 +255,7 @@ impl ConstraintHandler for AppearanceTriggerHandler {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use uuid::Uuid;
 
     use crate::{
         config::node_config::{AppearanceCounterReset, ConstraintConfig, MinMaxMode},
@@ -329,7 +337,7 @@ mod tests {
         let case = "c2";
         let state = counter_state(25010, case, MinMaxMode::Min, 1);
         handler(MinMaxMode::Min, 1)
-            .handle_message(state.clone(), trigger(case))
+            .handle_message(state.clone(), trigger(case), Some(Uuid::new_v4()))
             .await;
         assert!(matches!(
             result_type(&state, case),
@@ -347,7 +355,8 @@ mod tests {
             .await;
         h.handle_event(&make_traced_event(case, EID), state.clone())
             .await;
-        h.handle_message(state.clone(), trigger(case)).await;
+        h.handle_message(state.clone(), trigger(case), Some(Uuid::new_v4()))
+            .await;
         assert!(result_type(&state, case).is_none());
     }
 
@@ -361,7 +370,8 @@ mod tests {
             .await;
         h.handle_event(&make_traced_event(case, EID), state.clone())
             .await;
-        h.handle_message(state.clone(), trigger(case)).await;
+        h.handle_message(state.clone(), trigger(case), Some(Uuid::new_v4()))
+            .await;
         assert!(matches!(
             result_type(&state, case),
             Some(ConstraintResultType::Violated)

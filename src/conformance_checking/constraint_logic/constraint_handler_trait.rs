@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use crate::network::message_types::CCMessage;
 use crate::state::app_state::AppState;
-use crate::types::{CaseId, ConstraintHandlerId, TracedEvent};
+use crate::types::{CaseId, ConstraintHandlerId, RequestId, TracedEvent};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -19,7 +19,13 @@ pub trait ConstraintHandler: Send + Sync {
     async fn handle_event(&self, event: &TracedEvent, state: AppState);
 
     /// handle messages addressing the constraint id of the constraint handler
-    async fn handle_message(&self, _state: AppState, _message: CCMessage) {}
+    async fn handle_message(
+        &self,
+        _state: AppState,
+        _message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
+    }
 
     /// do whats needed after the case end signal came in
     async fn handle_case_end(&self, _case_id: &CaseId, _state: AppState) {}

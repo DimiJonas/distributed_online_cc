@@ -10,12 +10,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::app_state::AppState,
     types::{
         CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-        Token, TracedEvent,
+        RequestId, Token, TracedEvent,
     },
 };
 
@@ -120,7 +120,12 @@ impl ConstraintHandler for OrderFirstHandler {
     /// receive token from order second with timestamp of first execution of order second (multiple order seconds possible?)
     /// check check that execution was after order first event(s)
     /// set the received (pushed) token so that all future order first events can be evaluated as a violation
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "order first handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -367,7 +372,7 @@ async fn send_push_token_message(
         "order second handler: sending push token message to {}",
         peer_addr
     );
-    if let Err(e) = send_to_peer(peer_addr, message, state.clone()).await {
+    if let Err(e) = send_to_conformance_peer(peer_addr, message, state.clone()).await {
         log::error!(
             "order second handler: error sending push token message to {}: {}",
             peer_addr,
@@ -379,6 +384,7 @@ async fn send_push_token_message(
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
+    use uuid::Uuid;
 
     use crate::{
         config::node_config::ConstraintConfig,
@@ -486,7 +492,7 @@ mod tests {
         let case = "c3";
         let state = first_state(22020, case);
         handler()
-            .handle_message(state.clone(), second_push(case, 10))
+            .handle_message(state.clone(), second_push(case, 10), Some(Uuid::new_v4()))
             .await;
         assert!(result_type(&state, case).is_none());
         handler()
@@ -507,7 +513,7 @@ mod tests {
             .handle_event(&make_traced_event_at(case, EID, 10), state.clone())
             .await;
         handler()
-            .handle_message(state.clone(), second_push(case, 20))
+            .handle_message(state.clone(), second_push(case, 20), Some(Uuid::new_v4()))
             .await;
         assert!(result_type(&state, case).is_none());
         handler()
@@ -526,7 +532,7 @@ mod tests {
         let case = "c5";
         let state = first_state(22040, case);
         handler()
-            .handle_message(state.clone(), second_push(case, 10))
+            .handle_message(state.clone(), second_push(case, 10), Some(Uuid::new_v4()))
             .await;
         handler()
             .handle_event(&make_traced_event_at(case, EID, 20), state.clone())
@@ -547,7 +553,7 @@ mod tests {
             .handle_event(&make_traced_event_at(case, EID, 20), state.clone())
             .await;
         handler()
-            .handle_message(state.clone(), second_push(case, 10))
+            .handle_message(state.clone(), second_push(case, 10), Some(Uuid::new_v4()))
             .await;
         assert!(matches!(
             result_type(&state, case),

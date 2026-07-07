@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::{
     config::node_config::{DistributedAppearanceCounterReset, MinMaxMode},
@@ -10,12 +11,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
-        tcp_router::{send_and_receive, send_to_peer},
+        tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TokenPayload,
-        TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
+        TokenPayload, TracedEvent,
     },
 };
 
@@ -76,7 +77,12 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
 
     // send counter value to requestor
     // reset counter
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        request_id: Option<RequestId>,
+    ) {
         log::info!(
             "distributed appearance counter handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -93,7 +99,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             return;
         }
 
-        let request_id = match message.request_id {
+        let request_id = match request_id {
             Some(id) => id,
             None => {
                 log::error!(
@@ -144,7 +150,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         );
         let response =
             PeerMessage::conformance_res(request_id, CCMessage::pull_token_response(counter_token));
-        if send_to_peer(sender_address, response, state.clone())
+        if send_to_conformance_peer(sender_address, response, state.clone())
             .await
             .is_err()
         {
@@ -244,11 +250,13 @@ impl DistributedAppearanceTriggerHandler {
     async fn get_distributed_count(&self, state: AppState, case_id: &CaseId) -> u64 {
         let mut distributed_count: u64 = 0;
         for counter_peer in &self.counter_peers {
-            let pull_token_request = PeerMessage::conformance_req(CCMessage::pull_token_request(
-                case_id.clone(),
-                self.constraint_id.clone(),
-            ));
-            match send_and_receive(*counter_peer, pull_token_request, state.clone()).await {
+            let pull_token_request = PeerMessage::conformance_req(
+                Uuid::new_v4(),
+                CCMessage::pull_token_request(case_id.clone(), self.constraint_id.clone()),
+            );
+            match send_and_receive_conformance(*counter_peer, pull_token_request, state.clone())
+                .await
+            {
                 Ok(response) => match response.payload {
                     PeerMessagePayload::Conformance(cc_msg) => {
                         if let Some(token) = cc_msg.token {
@@ -318,7 +326,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType},
+        types::{ConstraintHandlerId, ConstraintResultType, PeerAddress},
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
             make_counter_token, make_state_from_config, make_traced_event, register_manager,
@@ -404,7 +412,7 @@ mod tests {
     async fn only_trigger_evaluated_against_zero() {
         let case = "c2";
         let (state, peers) = trigger_state(26010, Some(26011), case, MinMaxMode::Min, 1);
-        let mut mgr_rx = register_manager(&state, peers[0]);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 1, peers);
         let ev = make_traced_event(case, EID);
@@ -424,7 +432,7 @@ mod tests {
     async fn both_min_no_violation() {
         let case = "c3";
         let (state, peers) = trigger_state(26020, Some(26021), case, MinMaxMode::Min, 2);
-        let mut mgr_rx = register_manager(&state, peers[0]);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 2, peers);
         let ev = make_traced_event(case, EID);
@@ -441,7 +449,7 @@ mod tests {
     async fn both_min_violated() {
         let case = "c4";
         let (state, peers) = trigger_state(26030, Some(26031), case, MinMaxMode::Min, 3);
-        let mut mgr_rx = register_manager(&state, peers[0]);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 3, peers);
         let ev = make_traced_event(case, EID);

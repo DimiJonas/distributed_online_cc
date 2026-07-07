@@ -9,7 +9,7 @@ use crate::{
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
         CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-        MessageId, RequestId, Token,
+        MessageId, PeerBatch, RequestId, Token,
     },
 };
 
@@ -60,10 +60,10 @@ impl PeerMessage {
         }
     }
 
-    pub fn new_request(payload: PeerMessagePayload) -> Self {
+    pub fn new_request(request_id: RequestId, payload: PeerMessagePayload) -> Self {
         Self {
             message_id: MessageId::new_v4(),
-            request_id: Some(RequestId::new_v4()),
+            request_id: Some(request_id),
             message_kind: Request,
             payload,
             deadline: Some(
@@ -72,10 +72,10 @@ impl PeerMessage {
         }
     }
 
-    pub fn new_response(request_id: Option<RequestId>, payload: PeerMessagePayload) -> Self {
+    pub fn new_response(request_id: RequestId, payload: PeerMessagePayload) -> Self {
         Self {
             message_id: MessageId::new_v4(),
-            request_id,
+            request_id: Some(request_id),
             message_kind: Response,
             payload,
             deadline: Some(
@@ -121,28 +121,32 @@ impl PeerMessage {
         Self::new(PeerMessagePayload::Cli(msg))
     }
 
-    pub fn cli_req(msg: CliTestMessage) -> Self {
-        Self::new_request(PeerMessagePayload::Cli(msg))
+    pub fn cli_req(request_id: RequestId, msg: CliTestMessage) -> Self {
+        Self::new_request(request_id, PeerMessagePayload::Cli(msg))
     }
 
     pub fn cli_res(request_id: RequestId, msg: CliTestMessage) -> Self {
-        Self::new_response(Some(request_id), PeerMessagePayload::Cli(msg))
+        Self::new_response(request_id, PeerMessagePayload::Cli(msg))
     }
 
     pub fn conformance(msg: CCMessage) -> Self {
         Self::new(PeerMessagePayload::Conformance(msg))
     }
 
-    pub fn conformance_req(msg: CCMessage) -> Self {
-        Self::new_request(PeerMessagePayload::Conformance(msg))
+    pub fn conformance_req(request_id: RequestId, msg: CCMessage) -> Self {
+        Self::new_request(request_id, PeerMessagePayload::Conformance(msg))
     }
 
     pub fn conformance_res(request_id: RequestId, msg: CCMessage) -> Self {
-        Self::new_response(Some(request_id), PeerMessagePayload::Conformance(msg))
+        Self::new_response(request_id, PeerMessagePayload::Conformance(msg))
     }
 
-    pub fn overlay_gossip(msg: OverlayMessage) -> Self {
-        Self::new(PeerMessagePayload::Overlay(msg))
+    pub fn overlay_req(request_id: RequestId, msg: OverlayMessage) -> Self {
+        Self::new_request(request_id, PeerMessagePayload::Overlay(msg))
+    }
+
+    pub fn overlay_res(request_id: RequestId, msg: OverlayMessage) -> Self {
+        Self::new_response(request_id, PeerMessagePayload::Overlay(msg))
     }
 
     pub fn termination(msg: TerminationDetectionMessage) -> Self {
@@ -319,8 +323,6 @@ impl CCMessage {
             String::new(), // no specific constraint addresses
         )
     }
-
-    // TODO: add more constructors e.g. for pulltokenrequest etc.
 }
 
 impl Display for CCMessage {
@@ -370,12 +372,26 @@ impl Display for CCResultMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayMessage {
-    // TODO
+    pub sender_address: SocketAddr,
+    pub peer_batch: PeerBatch,
 }
 
 impl Display for OverlayMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "OverlayMessage")
+    }
+}
+
+impl OverlayMessage {
+    fn base(sender_address: SocketAddr, peer_batch: PeerBatch) -> Self {
+        Self {
+            sender_address,
+            peer_batch,
+        }
+    }
+
+    pub fn new(sender_address: SocketAddr, peer_batch: PeerBatch) -> Self {
+        Self::base(sender_address, peer_batch)
     }
 }
 

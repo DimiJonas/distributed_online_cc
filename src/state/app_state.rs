@@ -3,6 +3,7 @@ use crate::network::message_types::{CCResultMessage, PeerMessage};
 use crate::state::case_state_map::CaseStateMap;
 use crate::state::cc_result_store::CCResultStore;
 use crate::state::meta_token_store::MetaTokenStore;
+use crate::state::peer_cache::PeerCache;
 use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::result_send_buffer::ConstraintResultSendBuffer;
@@ -33,6 +34,7 @@ pub struct AppState {
     pub sensor_events: Arc<Mutex<SensorEventStore>>,
     pub result_sink_channel: mpsc::Sender<CCResultMessage>,
     pub case_state: Arc<Mutex<CaseStateMap>>,
+    pub peer_cache: Arc<Mutex<PeerCache>>,
 }
 
 impl AppState {
@@ -60,6 +62,7 @@ impl AppState {
             sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
             result_sink_channel,
             case_state: Arc::new(Mutex::new(CaseStateMap::new())),
+            peer_cache: Arc::new(Mutex::new(PeerCache::new())),
         }
     }
 }

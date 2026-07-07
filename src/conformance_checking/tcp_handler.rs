@@ -3,11 +3,13 @@
     this is needed to break a cycle that would emerge when tcp handlers would call tcp channel methods since tcp channels also call the tcp handlers when receiving a message
 */
 
+use std::net::SocketAddr;
+
 use crate::network::message_types::{
     CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessage,
     TerminationDetectionMessage,
 };
-use crate::network::tcp_router::send_to_peer;
+use crate::network::tcp_router::{send_to_conformance_peer, send_to_overlay_peer};
 use crate::state::app_state::AppState;
 use crate::types::{MessageId, RequestId};
 
@@ -53,7 +55,7 @@ pub async fn handle_cli_message(
                 },
             );
 
-            match send_to_peer(dest_peer, response, state.clone()).await {
+            match send_to_conformance_peer(dest_peer, response, state.clone()).await {
                 Ok(()) => log::info!("handle_cli_message: sent response to {}", dest_peer),
                 Err(e) => log::error!(
                     "handle_cli_message: error sending response to peer {}: {}",
@@ -71,7 +73,12 @@ pub async fn handle_cli_message(
     }
 }
 
-pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageId) {
+pub async fn handle_cc_message(
+    msg: CCMessage,
+    state: AppState,
+    msg_id: MessageId,
+    request_id: Option<RequestId>,
+) {
     log::debug!(
         "handle_cc_message: handling conformance message with id={} msg={}",
         &msg_id,
@@ -113,7 +120,9 @@ pub async fn handle_cc_message(msg: CCMessage, state: AppState, msg_id: MessageI
     } else {
         // dispatch case to the handlers
         for handler in constraint_handler {
-            handler.handle_message(state.clone(), msg.clone()).await;
+            handler
+                .handle_message(state.clone(), msg.clone(), request_id)
+                .await;
         }
     }
 }
@@ -135,17 +144,69 @@ pub async fn handle_td_message(
 
 pub async fn handle_overlay_message(
     msg: OverlayMessage,
-    _state: AppState,
+    state: AppState,
     msg_id: MessageId,
-    _kind: MessageKind,
-    _request_id: Option<RequestId>,
+    kind: MessageKind,
+    request_id: Option<RequestId>,
 ) {
     log::debug!(
         "handle_overlay_message: handling overlay message with id={} msg={}",
         &msg_id,
         msg
     );
-    // TODO
+
+    if kind != MessageKind::Request {
+        log::error!(
+            "handle_overlay_message: received wrong message kind {:?}, expected {:?}. ignoring message",
+            kind,
+            MessageKind::Request
+        );
+        return;
+    }
+
+    // received a shuffle request
+
+    // pick random subset from peer cache
+    let subset = {
+        let mut peer_cache = state.peer_cache.lock().unwrap();
+        let subset =
+            peer_cache.select_random_subset(state.config.overlay.shuffle_length, &mut rand::rng());
+        let sent: Vec<SocketAddr> = subset.keys().copied().collect();
+
+        // update peer cache with received cache entries
+        peer_cache.update(
+            state.config.overlay.listen_address,
+            &sent,
+            msg.peer_batch,
+            state.config.overlay.max_peer_cache_size,
+        );
+        subset
+    };
+
+    let request_id = match request_id {
+        Some(id) => id,
+        None => {
+            log::error!(
+                "handle_overlay_message: received request without request id. cannot respond to it"
+            );
+            return;
+        }
+    };
+
+    // build response
+    let response = PeerMessage::overlay_res(
+        request_id,
+        OverlayMessage::new(state.config.overlay.listen_address, subset),
+    );
+
+    // respond to request
+    if let Err(e) = send_to_overlay_peer(msg.sender_address, response, state.clone()).await {
+        log::error!(
+            "cyclon overlay: error responding to shuffle request from {}: {}",
+            msg.sender_address,
+            e
+        );
+    }
 }
 
 #[cfg(test)]
@@ -153,19 +214,19 @@ mod tests {
     use crate::{
         config::node_config::ConstraintConfig,
         conformance_checking::tcp_handler::{
-            handle_cc_message, handle_cli_message, handle_overlay_message, handle_td_message,
+            handle_cc_message, handle_cli_message, handle_td_message,
         },
         network::{
             message_types::{
-                CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessagePayload,
+                CCMessage, CliTestMessage, MessageKind, PeerMessagePayload,
                 TerminationDetectionMessage,
             },
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, MessageId},
+        types::{ConstraintHandlerId, MessageId, RequestId},
         util::test_tools::{
-            addr, make_config_with_constraints_and_port, make_state, register_manager,
+            addr, make_config_with_constraints_and_port, make_state, peer_addr, register_manager,
         },
     };
     use chrono::Utc;
@@ -179,13 +240,13 @@ mod tests {
     #[tokio::test]
     async fn cli_request_sends_ack_to_peer_manager() {
         let state = make_state(21000);
-        let sender_addr = addr(21001);
+        let sender_addr = peer_addr(21001);
         let mut mgr_rx = register_manager(&state, sender_addr);
         let request_id = Uuid::new_v4();
 
         let msg = CliTestMessage {
             message: "hello".to_string(),
-            sender_addr,
+            sender_addr: sender_addr.address,
         };
         handle_cli_message(
             msg,
@@ -220,12 +281,12 @@ mod tests {
     #[tokio::test]
     async fn cli_request_missing_request_id_does_not_send() {
         let state = make_state(21010);
-        let sender_addr = addr(21011);
+        let sender_addr = peer_addr(21011);
         let mut mgr_rx = register_manager(&state, sender_addr);
 
         let msg = CliTestMessage {
             message: "hello".to_string(),
-            sender_addr,
+            sender_addr: sender_addr.address,
         };
         handle_cli_message(
             msg,
@@ -267,13 +328,13 @@ mod tests {
     #[tokio::test]
     async fn cli_request_response_contains_original_request_id() {
         let state = make_state(21030);
-        let sender_addr = addr(21031);
+        let sender_addr = peer_addr(21031);
         let mut mgr_rx = register_manager(&state, sender_addr);
         let request_id = Uuid::new_v4();
 
         let msg = CliTestMessage {
             message: "ping".to_string(),
-            sender_addr,
+            sender_addr: sender_addr.address,
         };
         handle_cli_message(
             msg,
@@ -308,12 +369,12 @@ mod tests {
     #[tokio::test]
     async fn cli_response_is_noop_in_handler() {
         let state = make_state(21040);
-        let sender_addr = addr(21041);
+        let sender_addr = peer_addr(21041);
         let mut mgr_rx = register_manager(&state, sender_addr);
 
         let msg = CliTestMessage {
             message: "ACK 'hello'".to_string(),
-            sender_addr,
+            sender_addr: sender_addr.address,
         };
         handle_cli_message(
             msg,
@@ -340,12 +401,12 @@ mod tests {
     #[tokio::test]
     async fn cli_fire_and_forget_is_noop_in_handler() {
         let state = make_state(21050);
-        let sender_addr = addr(21051);
+        let sender_addr = peer_addr(21051);
         let mut mgr_rx = register_manager(&state, sender_addr);
 
         let msg = CliTestMessage {
             message: "broadcast".to_string(),
-            sender_addr,
+            sender_addr: sender_addr.address,
         };
         handle_cli_message(
             msg,
@@ -373,7 +434,13 @@ mod tests {
     async fn cc_message_registers_new_case() {
         let state = make_state(21060);
         let msg = CCMessage::delete_token("new-case".to_string(), "rp".to_string(), Utc::now());
-        handle_cc_message(msg, state.clone(), MessageId::new_v4()).await;
+        handle_cc_message(
+            msg,
+            state.clone(),
+            MessageId::new_v4(),
+            Some(RequestId::new_v4()),
+        )
+        .await;
 
         let store = state.cc_results.lock().unwrap();
         assert!(
@@ -418,7 +485,13 @@ mod tests {
         }
 
         let delete_msg = CCMessage::delete_token("c1".to_string(), "rp".to_string(), Utc::now());
-        handle_cc_message(delete_msg, state.clone(), Uuid::new_v4()).await;
+        handle_cc_message(
+            delete_msg,
+            state.clone(),
+            MessageId::new_v4(),
+            Some(RequestId::new_v4()),
+        )
+        .await;
 
         assert!(
             !state.token_out.lock().unwrap().has_open_token(
@@ -435,7 +508,7 @@ mod tests {
     async fn cc_message_unknown_constraint_does_not_panic() {
         let state = make_state(21080);
         let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), Utc::now());
-        handle_cc_message(msg, state, Uuid::new_v4()).await;
+        handle_cc_message(msg, state, MessageId::new_v4(), Some(RequestId::new_v4())).await;
     }
 
     // ----------------------------------------------------------------
@@ -444,19 +517,11 @@ mod tests {
 
     /// Stub handlers must not panic regardless of kind.
     #[tokio::test]
-    async fn td_and_overlay_handlers_do_not_panic() {
+    async fn td_handler_does_not_panic() {
         let state = make_state(21090);
         handle_td_message(
             TerminationDetectionMessage {},
             state.clone(),
-            Uuid::new_v4(),
-            MessageKind::FireAndForget,
-            None,
-        )
-        .await;
-        handle_overlay_message(
-            OverlayMessage {},
-            state,
             Uuid::new_v4(),
             MessageKind::FireAndForget,
             None,

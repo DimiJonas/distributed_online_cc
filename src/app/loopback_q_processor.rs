@@ -1,7 +1,13 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    network::{message_types::PeerMessage, tcp_channel::dispatch_message},
+    network::{
+        message_types::{
+            PeerMessage,
+            PeerMessagePayload::{Cli, Conformance, Hello, Overlay, Result, TerminationDetection},
+        },
+        tcp_channel::dispatch_message,
+    },
     state::app_state::AppState,
 };
 
@@ -11,7 +17,20 @@ use crate::{
 pub fn spawn_loopback_q_processor(state: AppState, mut loopback_q: mpsc::Receiver<PeerMessage>) {
     tokio::spawn(async move {
         while let Some(msg) = loopback_q.recv().await {
-            dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
+            match msg.payload {
+                Cli(_) | Conformance(_) | Result(_) => {
+                    dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
+                }
+                Overlay(_) | TerminationDetection(_) => {
+                    dispatch_message(msg, state.config.overlay.listen_address, state.clone()).await;
+                }
+                Hello(_) => {
+                    log::error!(
+                        "loopback queue: hello message in loopback queue. this should never happen"
+                    );
+                    continue;
+                }
+            }
         }
     });
 }

@@ -12,12 +12,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::app_state::AppState,
     types::{
         CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
-        TracedEvent,
+        RequestId, TracedEvent,
     },
 };
 
@@ -95,7 +95,12 @@ impl ConstraintHandler for SensorCollectorHandler {
         }
     }
 
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "sensor collector handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -276,7 +281,9 @@ impl ConstraintHandler for SensorTriggerHandler {
             trigger_event_time,
         ));
         for &peer_address in self.collector_peers.iter() {
-            if let Err(e) = send_to_peer(peer_address, message.clone(), state.clone()).await {
+            if let Err(e) =
+                send_to_conformance_peer(peer_address, message.clone(), state.clone()).await
+            {
                 log::error!(
                     "sensor trigger handler: error sending cc trigger message to {}: {}",
                     peer_address,
@@ -397,7 +404,7 @@ mod tests {
         let case = "c3";
         let state = collector_state(23020, case);
         handler()
-            .handle_message(state.clone(), trigger_at(case, 10))
+            .handle_message(state.clone(), trigger_at(case, 10), None)
             .await;
         assert!(matches!(
             result_type(&state, case),
@@ -414,7 +421,7 @@ mod tests {
             .handle_event(&make_sensor_event(case, EID, KEY, 80.0, 0), state.clone())
             .await;
         handler()
-            .handle_message(state.clone(), trigger_at(case, 10))
+            .handle_message(state.clone(), trigger_at(case, 10), None)
             .await;
         assert!(result_type(&state, case).is_none());
         handler()
@@ -435,7 +442,7 @@ mod tests {
             .handle_event(&make_sensor_event(case, EID, KEY, 30.0, 0), state.clone())
             .await;
         handler()
-            .handle_message(state.clone(), trigger_at(case, 10))
+            .handle_message(state.clone(), trigger_at(case, 10), None)
             .await;
         assert!(matches!(
             result_type(&state, case),
@@ -452,7 +459,7 @@ mod tests {
             .handle_event(&make_sensor_event(case, EID, KEY, 80.0, 0), state.clone())
             .await;
         handler()
-            .handle_message(state.clone(), trigger_at(case, 120))
+            .handle_message(state.clone(), trigger_at(case, 120), None)
             .await;
         assert!(matches!(
             result_type(&state, case),

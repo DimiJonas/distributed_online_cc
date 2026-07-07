@@ -44,7 +44,6 @@ pub struct NodeConfig {
         default = "default_case_retention_period"
     )]
     pub case_retention_period: Duration,
-    #[serde(default)]
     pub overlay: OverlayConfig,
 }
 
@@ -148,18 +147,19 @@ pub struct ResultSinkConfig {
     pub retry_buffer_size: usize,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OverlayConfig {
-    pub start_peers: Vec<SocketAddr>,
+    pub listen_address: SocketAddr,
+    pub initial_peers: Vec<SocketAddr>,
     #[serde(
         default = "default_shuffling_interval",
         deserialize_with = "deserialize_humantime_duration"
     )]
     pub shuffling_interval: Duration,
     #[serde(default = "default_shuffle_length")]
-    pub shuffle_length: u32,
+    pub shuffle_length: usize,
     #[serde(default = "default_max_peer_cache_size")]
-    pub max_peer_cache_size: u32,
+    pub max_peer_cache_size: usize,
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
@@ -508,11 +508,11 @@ fn default_shuffling_interval() -> Duration {
     Duration::from_mins(10)
 }
 
-fn default_shuffle_length() -> u32 {
+fn default_shuffle_length() -> usize {
     4
 }
 
-fn default_max_peer_cache_size() -> u32 {
+fn default_max_peer_cache_size() -> usize {
     8
 }
 

@@ -52,3 +52,6 @@ thiserror = "2.0.18"
 
 # database for result sink
 rusqlite = {version = "0.39.0", features = ["bundled"] }
+
+# RNG
+rand = "0.10.2"

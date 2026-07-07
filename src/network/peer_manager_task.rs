@@ -1,10 +1,14 @@
-use std::{collections::VecDeque, net::SocketAddr, pin::Pin, time::Duration};
+use std::{collections::VecDeque, pin::Pin, time::Duration};
 
 use tokio::{net::TcpStream, sync::mpsc, time::sleep};
 
 use crate::{
-    network::{message_types::PeerMessage, tcp_channel::initiate_tcp_connection},
+    network::{
+        message_types::{PeerMessage, PeerMessagePayload},
+        tcp_channel::initiate_tcp_connection,
+    },
     state::app_state::AppState,
+    types::PeerAddress,
 };
 
 // enum with messages to a peer manager
@@ -22,7 +26,7 @@ pub enum PeerManagerMessage {
 
 // the peer manager task routine
 pub fn peer_manager_task(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     mut manager_receiver: mpsc::Receiver<PeerManagerMessage>,
     state: AppState,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
@@ -129,8 +133,13 @@ fn enqueue(
     state: AppState,
     queue: &mut VecDeque<PeerMessage>,
     msg: PeerMessage,
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
 ) {
+    // cyclon overlay messages are not retried on purpose
+    if let PeerMessagePayload::Overlay(_) = msg.payload {
+        return;
+    }
+
     if queue.len() >= state.config.tcp_channels.message_queue_size {
         log::warn!(
             "message queue full for {}, dropping oldest message",
@@ -142,7 +151,7 @@ fn enqueue(
     log::debug!("{} messages queued for {}", queue.len(), peer_address);
 }
 
-fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: Duration) {
+fn schedule_reconnect(peer_address: PeerAddress, state: AppState, delay_secs: Duration) {
     log::debug!(
         "scheduling reconnect to {} in {} seconds",
         peer_address,
@@ -155,12 +164,12 @@ fn schedule_reconnect(peer_address: SocketAddr, state: AppState, delay_secs: Dur
 }
 
 fn do_connect(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     state: AppState,
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         log::debug!("connecting to peer {}", peer_address);
-        match TcpStream::connect(&peer_address).await {
+        match TcpStream::connect(&peer_address.address).await {
             Ok(stream) => {
                 let (tcp_channel_sender, tcp_channel_receiver) =
                     mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
@@ -188,7 +197,7 @@ fn do_connect(
 }
 
 /// signals the peer manager task that corresponds to the peer_address to create a tcp channel if needed
-pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
+pub async fn attempt_connect(peer_address: PeerAddress, state: AppState) {
     log::debug!("attempting to connect to peer {}", peer_address);
     let manager_sender = {
         let managers = state.peer_managers.lock().unwrap();
@@ -203,7 +212,9 @@ pub async fn attempt_connect(peer_address: SocketAddr, state: AppState) {
 mod tests {
     use super::*;
     use crate::network::message_types::{CliTestMessage, PeerMessage, PeerMessagePayload};
-    use crate::util::test_tools::{addr, cli_msg, make_state_and_event_q, spawn_manager};
+    use crate::util::test_tools::{
+        addr, cli_msg, make_state_and_event_q, peer_addr, spawn_manager,
+    };
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::{Instant, timeout};
@@ -216,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn task_exits_when_sender_dropped() {
         let (state, _eq) = make_state_and_event_q(19100);
-        let peer = addr(19101);
+        let peer = peer_addr(19101);
         let tx = spawn_manager(peer, state);
 
         // Give the task time to start, then drop the only sender.
@@ -238,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn queued_messages_are_flushed_on_connection_ready() {
         let (state, _eq) = make_state_and_event_q(19110);
-        let peer = addr(19111);
+        let peer = peer_addr(19111);
         let manager_tx = spawn_manager(peer, state);
 
         // Send two outbound messages before any tcp channel exists.
@@ -281,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn outbound_message_forwarded_immediately_when_connected() {
         let (state, _eq) = make_state_and_event_q(19120);
-        let peer = addr(19121);
+        let peer = peer_addr(19121);
         let manager_tx = spawn_manager(peer, state);
 
         let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
@@ -309,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn expired_outbound_message_is_dropped() {
         let (state, _eq) = make_state_and_event_q(19130);
-        let peer = addr(19131);
+        let peer = peer_addr(19131);
         let manager_tx = spawn_manager(peer, state);
 
         let (tcp_tx, mut tcp_rx) = mpsc::channel::<PeerMessage>(16);
@@ -344,7 +355,7 @@ mod tests {
     #[tokio::test]
     async fn connection_lost_clears_sender_and_re_queues() {
         let (state, _eq) = make_state_and_event_q(19140);
-        let peer = addr(19141);
+        let peer = peer_addr(19141);
         let manager_tx = spawn_manager(peer, state);
 
         // Establish a connection.
@@ -407,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn task_remains_responsive_after_multiple_connection_losses() {
         let (state, _eq) = make_state_and_event_q(19150);
-        let peer = addr(19151);
+        let peer = peer_addr(19151);
         let manager_tx = spawn_manager(peer, state);
 
         for _ in 0..5 {
@@ -444,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn queue_overflow_drops_oldest_message() {
         let (state, _eq) = make_state_and_event_q(19160);
-        let peer = addr(19161);
+        let peer = peer_addr(19161);
         let manager_tx = spawn_manager(peer, state.clone());
 
         // Send tcp_message_queue_size + 10 messages with no tcp channel.
@@ -489,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn connection_ready_resets_reconnect_delay() {
         let (state, _eq) = make_state_and_event_q(19170);
-        let peer = addr(19171);
+        let peer = peer_addr(19171);
         let manager_tx = spawn_manager(peer, state);
 
         // Lose connection a few times to ramp up the delay.
@@ -559,10 +570,10 @@ mod self_connection_tests {
 
         // Bind our own listener — this is the node's tcp_listen_address.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let own_addr = listener.local_addr().unwrap();
+        let own_addr = PeerAddress::new_conformance_address(listener.local_addr().unwrap());
 
         // State where tcp_listen_address == own_addr, so the guard triggers.
-        let state = make_state(own_addr.port());
+        let state = make_state(own_addr.address.port());
         let mut manager_rx = register_manager(&state, own_addr);
 
         // Spawn the accept side — same as the real tcp_listener loop.
@@ -571,7 +582,7 @@ mod self_connection_tests {
             // In a real self-connection scenario nobody connects, so this
             // just sits waiting — which is exactly what we want to verify.
             if let Ok((stream, _)) = listener.accept().await {
-                accept_incoming_tcp_connection(stream, accept_state).await;
+                accept_incoming_tcp_connection(stream, own_addr.network, accept_state).await;
             }
         });
 
@@ -595,16 +606,16 @@ mod self_connection_tests {
 
         // Our listener.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let own_addr = listener.local_addr().unwrap();
+        let own_addr = PeerAddress::new_conformance_address(listener.local_addr().unwrap());
 
-        let state = make_state(own_addr.port());
+        let state = make_state(own_addr.address.port());
         let mut manager_rx = register_manager(&state, own_addr);
 
         // Accept side running, same as real tcp_listener.
         let accept_state = state.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, accept_state).await;
+            accept_incoming_tcp_connection(stream, own_addr.network, accept_state).await;
         });
 
         // B side: create the manager via connect_peer (guard fires, no outbound connect).
@@ -613,9 +624,11 @@ mod self_connection_tests {
         // Simulate the remote peer (B role on another node, or loopback)
         // connecting to us and sending a Hello — this is what triggers ConnectionReady.
         tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(own_addr).await.unwrap();
+            let mut stream = tokio::net::TcpStream::connect(own_addr.address)
+                .await
+                .unwrap();
             let hello = PeerMessage::hello(HelloMessage {
-                listening_address: own_addr,
+                listening_address: own_addr.address,
             });
             stream.write_all(&encode(&hello).unwrap()).await.unwrap();
             tokio::time::sleep(Duration::from_millis(300)).await;
@@ -648,9 +661,9 @@ mod self_connection_tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        let own_addr = server_addr;
+        let own_addr = PeerAddress::new_conformance_address(server_addr);
 
-        let state = make_state(own_addr.port());
+        let state = make_state(own_addr.address.port());
         let mut manager_rx = register_manager(&state, own_addr);
 
         // Raw-reading accept side — captures what arrives on the wire.
@@ -671,7 +684,9 @@ mod self_connection_tests {
             messages
         });
 
-        let stream = tokio::net::TcpStream::connect(own_addr).await.unwrap();
+        let stream = tokio::net::TcpStream::connect(own_addr.address)
+            .await
+            .unwrap();
         let (tcp_tx, tcp_rx) = mpsc::channel::<PeerMessage>(16);
 
         tokio::spawn(initiate_tcp_connection(
@@ -688,7 +703,7 @@ mod self_connection_tests {
             .expect("timed out waiting for ConnectionReady");
 
         tcp_tx
-            .send(cli_msg(own_addr.port()))
+            .send(cli_msg(own_addr.address.port()))
             .await
             .expect("failed to send self-addressed message");
 
@@ -714,19 +729,21 @@ mod self_connection_tests {
     async fn self_connection_notifies_connection_lost_on_close() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        let own_addr = server_addr;
+        let own_addr = PeerAddress::new_conformance_address(server_addr);
 
-        let state = make_state(own_addr.port());
+        let state = make_state(own_addr.address.port());
         let mut manager_rx = register_manager(&state, own_addr);
 
         let accept_state = state.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, accept_state).await;
+            accept_incoming_tcp_connection(stream, own_addr.network, accept_state).await;
         });
 
         // Initiate, then immediately drop the stream to trigger EOF.
-        let stream = tokio::net::TcpStream::connect(own_addr).await.unwrap();
+        let stream = tokio::net::TcpStream::connect(own_addr.address)
+            .await
+            .unwrap();
         let (tcp_tx, tcp_rx) = mpsc::channel::<PeerMessage>(16);
         let handle = tokio::spawn(initiate_tcp_connection(
             own_addr, stream, tcp_tx, tcp_rx, state,
@@ -771,22 +788,22 @@ mod self_connection_tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        let own_addr = server_addr;
+        let own_addr = PeerAddress::new_conformance_address(server_addr);
 
-        let state = make_state(own_addr.port());
+        let state = make_state(own_addr.address.port());
         // Use the full peer manager so the queue logic is exercised.
         let manager_tx = spawn_manager(own_addr, state.clone());
 
         // Enqueue two messages before the connection is up.
         manager_tx
             .send(PeerManagerMessage::Outbound(Box::new(cli_msg(
-                own_addr.port(),
+                own_addr.address.port(),
             ))))
             .await
             .unwrap();
         manager_tx
             .send(PeerManagerMessage::Outbound(Box::new(cli_msg(
-                own_addr.port(),
+                own_addr.address.port(),
             ))))
             .await
             .unwrap();
@@ -795,10 +812,12 @@ mod self_connection_tests {
         let accept_state = state.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, accept_state).await;
+            accept_incoming_tcp_connection(stream, own_addr.network, accept_state).await;
         });
 
-        let stream = tokio::net::TcpStream::connect(own_addr).await.unwrap();
+        let stream = tokio::net::TcpStream::connect(own_addr.address)
+            .await
+            .unwrap();
         let (tcp_tx, tcp_rx) = mpsc::channel::<PeerMessage>(16);
         tokio::spawn(initiate_tcp_connection(
             own_addr, stream, tcp_tx, tcp_rx, state,

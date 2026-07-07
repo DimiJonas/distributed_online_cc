@@ -2,6 +2,7 @@ use clap::Parser;
 use distributed_online_cc::config::node_config::NodeConfig;
 use distributed_online_cc::network::tcp_router::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
+use distributed_online_cc::types::PeerAddress;
 use log::LevelFilter;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
@@ -39,9 +40,13 @@ async fn main() {
 
     setup_tcp_channels(state.clone()).await;
 
-    distributed_online_cc::app::tcp_listener::spawn_listener(
+    distributed_online_cc::app::tcp_listener::spawn_conformance_network_listener(
         state.clone(),
         state.config.tcp_listen_address,
+    );
+    distributed_online_cc::app::tcp_listener::spawn_overlay_network_listener(
+        state.clone(),
+        state.config.overlay.listen_address,
     );
     distributed_online_cc::app::cli::spawn_cli(state.clone());
     distributed_online_cc::app::event_listener::spawn_event_listener(state.clone());
@@ -62,6 +67,8 @@ async fn main() {
             sink_rx,
         );
     }
+
+    distributed_online_cc::app::overlay_manager::spawn_overlay_task(state.clone());
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();
@@ -84,8 +91,8 @@ async fn setup_tcp_channels(state: AppState) {
     log::info!("creating tcp channels to configured constraint check peers");
     log::debug!("configured constraint check peers: {:?}", constraint_peers);
 
-    for peer_address in constraint_peers {
-        connect_peer(peer_address, state.clone()).await;
+    for address in constraint_peers {
+        connect_peer(PeerAddress::new_conformance_address(address), state.clone()).await;
     }
 }
 

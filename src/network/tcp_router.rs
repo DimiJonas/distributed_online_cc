@@ -1,6 +1,7 @@
 use crate::network::errors::SendReceiveError;
 use crate::network::message_types::MessageKind;
 use crate::network::peer_manager_task::{PeerManagerMessage, attempt_connect, peer_manager_task};
+use crate::types::PeerAddress;
 use crate::{network::message_types::PeerMessage, state::app_state::AppState};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
@@ -9,17 +10,35 @@ use tokio::sync::{mpsc, oneshot};
 */
 
 // build a tcp channel to another peer
-pub async fn connect_peer(peer_address: SocketAddr, state: AppState) {
-    if peer_address == state.config.tcp_listen_address {
+pub async fn connect_peer(peer_address: PeerAddress, state: AppState) {
+    if peer_address.address == state.config.tcp_listen_address
+        || peer_address.address == state.config.overlay.listen_address
+    {
         log::info!("connect_peer: skipping self-connect to {}", peer_address);
         return;
     }
     get_or_create_manager(peer_address, state.clone()).await;
 }
 
+pub async fn send_to_conformance_peer(
+    address: SocketAddr,
+    msg: PeerMessage,
+    state: AppState,
+) -> Result<(), SendReceiveError> {
+    send_to_peer(PeerAddress::new_conformance_address(address), msg, state).await
+}
+
+pub async fn send_to_overlay_peer(
+    address: SocketAddr,
+    msg: PeerMessage,
+    state: AppState,
+) -> Result<(), SendReceiveError> {
+    send_to_peer(PeerAddress::new_overlay_address(address), msg, state).await
+}
+
 // send to another peer via tcp
 pub async fn send_to_peer(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     msg: PeerMessage,
     state: AppState,
 ) -> Result<(), SendReceiveError> {
@@ -28,7 +47,10 @@ pub async fn send_to_peer(
         msg.payload,
         peer_address
     );
-    if peer_address == state.config.tcp_listen_address {
+    if peer_address.address == state.config.tcp_listen_address // conformance checking tcp address
+        || peer_address.address == state.config.overlay.listen_address
+    // overlay tcp address
+    {
         log::debug!("send_to_peer: short-circuiting self-addressed message");
         deliver_to_self(msg, state).await;
         Ok(())
@@ -51,8 +73,29 @@ pub async fn send_to_peer(
     }
 }
 
+pub async fn send_and_receive_conformance(
+    address: SocketAddr,
+    message: PeerMessage,
+    state: AppState,
+) -> Result<PeerMessage, SendReceiveError> {
+    send_and_receive(
+        PeerAddress::new_conformance_address(address),
+        message,
+        state,
+    )
+    .await
+}
+
+pub async fn send_and_receive_overlay(
+    address: SocketAddr,
+    message: PeerMessage,
+    state: AppState,
+) -> Result<PeerMessage, SendReceiveError> {
+    send_and_receive(PeerAddress::new_overlay_address(address), message, state).await
+}
+
 pub async fn send_and_receive(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     message: PeerMessage,
     state: AppState,
 ) -> Result<PeerMessage, SendReceiveError> {
@@ -125,7 +168,7 @@ async fn deliver_to_self(msg: PeerMessage, state: AppState) {
 }
 
 async fn get_or_create_manager(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     state: AppState,
 ) -> mpsc::Sender<PeerManagerMessage> {
     let manager_sender = {
@@ -162,14 +205,15 @@ mod tests {
             peer_manager_task::PeerManagerMessage,
             tcp_router::{connect_peer, send_to_peer},
         },
-        util::test_tools::{addr, make_state, register_manager},
+        types::PeerAddress,
+        util::test_tools::{addr, make_state, peer_addr, register_manager},
     };
 
     /// send_to_peer delivers to an already-registered peer manager.
     #[tokio::test]
     async fn send_to_peer_reaches_existing_manager() {
         let state = make_state(19900);
-        let peer = addr(19901);
+        let peer = peer_addr(19901);
 
         let mut rx = register_manager(&state, peer);
 
@@ -192,7 +236,7 @@ mod tests {
     #[tokio::test]
     async fn send_to_peer_creates_manager_for_unknown_peer() {
         let state = make_state(19910);
-        let peer = addr(19911);
+        let peer = peer_addr(19911);
 
         let _ = send_to_peer(
             peer,
@@ -215,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn connect_peer_registers_manager() {
         let state = make_state(19920);
-        let peer = addr(19921);
+        let peer = PeerAddress::new_conformance_address(addr(19921));
 
         connect_peer(peer, state.clone()).await;
 
@@ -227,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn connect_peer_idempotent() {
         let state = make_state(19930);
-        let peer = addr(19931);
+        let peer = PeerAddress::new_conformance_address(addr(19931));
 
         connect_peer(peer, state.clone()).await;
         connect_peer(peer, state.clone()).await;

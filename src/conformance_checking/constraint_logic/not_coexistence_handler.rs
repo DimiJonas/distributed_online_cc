@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use uuid::Uuid;
 
 use crate::{
     conformance_checking::{
@@ -10,12 +11,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
-        tcp_router::{send_and_receive, send_to_peer},
+        tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TokenPayload,
-        TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
+        TokenPayload, TracedEvent,
     },
 };
 
@@ -87,11 +88,16 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         if claim_token.payload == TokenPayload::None {
             // negotiate execution permission
 
-            let message = PeerMessage::conformance_req(CCMessage::push_claim_token(
-                claim_token.clone(),
-                self.handler_id,
-            ));
-            let other_event_time = match send_and_receive(self.b_peer, message, state.clone()).await
+            let message = PeerMessage::conformance_req(
+                Uuid::new_v4(),
+                CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+            );
+            let other_event_time = match send_and_receive_conformance(
+                self.b_peer,
+                message,
+                state.clone(),
+            )
+            .await
             {
                 Ok(response) => match response.payload {
                     PeerMessagePayload::Conformance(cc_message) => match cc_message.token {
@@ -173,7 +179,12 @@ impl ConstraintHandler for NotCoexistenceAHandler {
     }
 
     /// receive a claim token negotiation request and negotiate
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        request_id: Option<RequestId>,
+    ) {
         if message.creating_handler == Some(self.handler_id) {
             // silently dropping message from self
             return;
@@ -195,7 +206,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             return;
         }
 
-        let request_id = match message.request_id {
+        let request_id = match request_id {
             Some(id) => id,
             None => {
                 log::error!(
@@ -267,7 +278,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             request_id,
             CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
         );
-        if send_to_peer(self.b_peer, response, state.clone())
+        if send_to_conformance_peer(self.b_peer, response, state.clone())
             .await
             .is_err()
         {
@@ -427,11 +438,16 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         if claim_token.payload == TokenPayload::None {
             // negotiate execution permission
 
-            let message = PeerMessage::conformance_req(CCMessage::push_claim_token(
-                claim_token.clone(),
-                self.handler_id,
-            ));
-            let other_event_time = match send_and_receive(self.a_peer, message, state.clone()).await
+            let message = PeerMessage::conformance_req(
+                Uuid::new_v4(),
+                CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+            );
+            let other_event_time = match send_and_receive_conformance(
+                self.a_peer,
+                message,
+                state.clone(),
+            )
+            .await
             {
                 Ok(response) => match response.payload {
                     PeerMessagePayload::Conformance(cc_message) => match cc_message.token {
@@ -513,7 +529,12 @@ impl ConstraintHandler for NotCoexistenceBHandler {
     }
 
     /// receive a claim token negotiation request and negotiate
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        request_id: Option<RequestId>,
+    ) {
         if message.creating_handler == Some(self.handler_id) {
             // silently dropping message from self
             return;
@@ -535,7 +556,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             return;
         }
 
-        let request_id = match message.request_id {
+        let request_id = match request_id {
             Some(id) => id,
             None => {
                 log::error!(
@@ -607,7 +628,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             request_id,
             CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
         );
-        if send_to_peer(self.a_peer, response, state.clone())
+        if send_to_conformance_peer(self.a_peer, response, state.clone())
             .await
             .is_err()
         {
@@ -682,7 +703,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token},
+        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, PeerAddress, Token},
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
             make_state_from_config, make_traced_event_at, register_manager,
@@ -762,7 +783,7 @@ mod tests {
     async fn only_a_event_no_violation() {
         let case = "c2";
         let (state, b_peer) = a_state(24010, 24011, case);
-        let mut mgr_rx = register_manager(&state, b_peer);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
 
         let h = handler(b_peer);
         let ev = make_traced_event_at(case, EID, 10);
@@ -779,7 +800,7 @@ mod tests {
     async fn a_earlier_than_b_no_violation() {
         let case = "c3";
         let (state, b_peer) = a_state(24020, 24021, case);
-        let mut mgr_rx = register_manager(&state, b_peer);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
 
         let h = handler(b_peer);
         let ev = make_traced_event_at(case, EID, 10);
@@ -796,7 +817,7 @@ mod tests {
     async fn a_later_than_b_violated() {
         let case = "c4";
         let (state, b_peer) = a_state(24030, 24031, case);
-        let mut mgr_rx = register_manager(&state, b_peer);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
 
         let h = handler(b_peer);
         let ev = make_traced_event_at(case, EID, 20);

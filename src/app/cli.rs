@@ -1,11 +1,12 @@
 use std::net::SocketAddr;
 
 use crate::network::message_types::{CliTestMessage, PeerMessage, PeerMessagePayload};
-use crate::network::tcp_router::{connect_peer, send_and_receive};
+use crate::network::tcp_router::{connect_peer, send_and_receive_conformance};
 use crate::state::app_state::AppState;
-use crate::types::CliCommand;
+use crate::types::{CliCommand, PeerAddress};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 pub fn spawn_cli(state: AppState) {
     let stdin = BufReader::new(tokio::io::stdin());
@@ -62,14 +63,17 @@ pub fn spawn_cli(state: AppState) {
         while let Some(command) = cmd_rx.recv().await {
             match command {
                 CliCommand::Send { peer_address, msg } => {
-                    let message = PeerMessage::cli_req(CliTestMessage {
-                        message: msg.clone(),
-                        sender_addr: cmd_interpreter_state.config.tcp_listen_address,
-                    });
+                    let message = PeerMessage::cli_req(
+                        Uuid::new_v4(),
+                        CliTestMessage {
+                            message: msg.clone(),
+                            sender_addr: cmd_interpreter_state.config.tcp_listen_address,
+                        },
+                    );
 
                     log::info!("sending cli message to {}", &peer_address);
 
-                    match send_and_receive(peer_address, message, state.clone()).await {
+                    match send_and_receive_conformance(peer_address, message, state.clone()).await {
                         Ok(response) => {
                             log::info!("got response: {}", response);
                             if let PeerMessagePayload::Cli(cli_message) = response.payload {
@@ -89,7 +93,11 @@ pub fn spawn_cli(state: AppState) {
                         log::error!("cannot connect to self");
                         continue;
                     }
-                    connect_peer(peer_address, state.clone()).await;
+                    connect_peer(
+                        PeerAddress::new_conformance_address(peer_address),
+                        state.clone(),
+                    )
+                    .await;
                 }
             }
         }
@@ -102,7 +110,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use crate::{network::tcp_router::send_to_peer, types::CliCommand};
+    use crate::{
+        network::tcp_router::send_to_peer,
+        types::{CliCommand, PeerAddress},
+    };
 
     /// Parsing "send <addr> <msg>" produces the expected CliCommand.
     #[test]
@@ -181,18 +192,18 @@ mod tests {
         use crate::{
             network::peer_manager_task::PeerManagerMessage,
             types::CliCommand,
-            util::test_tools::{addr, make_state, register_manager},
+            util::test_tools::{make_state, peer_addr, register_manager},
         };
         use tokio::sync::mpsc;
 
         let state = make_state(22000);
-        let peer = addr(22001);
+        let peer = peer_addr(22001);
         let mut mgr_rx = register_manager(&state, peer);
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
         cmd_tx
             .send(CliCommand::Send {
-                peer_address: peer,
+                peer_address: peer.address,
                 msg: "test".to_string(),
             })
             .await
@@ -212,7 +223,12 @@ mod tests {
                         });
                         let (tx, _rx) = tokio::sync::oneshot::channel();
                         state_clone.pending.lock().unwrap().insert(request_id, tx);
-                        let _ = send_to_peer(peer_address, message, state_clone.clone()).await;
+                        let _ = send_to_peer(
+                            PeerAddress::new_conformance_address(peer_address),
+                            message,
+                            state_clone.clone(),
+                        )
+                        .await;
                     }
                     CliCommand::Connect { .. } => {}
                 }

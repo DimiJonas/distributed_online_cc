@@ -10,12 +10,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, Token,
-        TracedEvent,
+        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, RequestId,
+        Token, TracedEvent,
     },
 };
 
@@ -84,7 +84,9 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         // send token
         let message = PeerMessage::conformance(CCMessage::push_token(token));
         for peer_address in self.consumer_peers.iter() {
-            if let Err(e) = send_to_peer(*peer_address, message.clone(), state.clone()).await {
+            if let Err(e) =
+                send_to_conformance_peer(*peer_address, message.clone(), state.clone()).await
+            {
                 log::error!(
                     "precedence producer handler: error sending push token message to {}: {}",
                     peer_address,
@@ -177,7 +179,12 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         }
     }
 
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "precedence consumer handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -398,7 +405,7 @@ mod tests {
         let case = "c2";
         let state = consumer_state(21010, case);
         handler()
-            .handle_message(state.clone(), producer_token(case, 10))
+            .handle_message(state.clone(), producer_token(case, 10), None)
             .await;
         handler()
             .handle_case_end(&case.to_string(), state.clone())
@@ -429,7 +436,7 @@ mod tests {
         let case = "c4";
         let state = consumer_state(21030, case);
         handler()
-            .handle_message(state.clone(), producer_token(case, 10))
+            .handle_message(state.clone(), producer_token(case, 10), None)
             .await;
         handler()
             .handle_event(&consumer_event(case, 20), state.clone())
@@ -452,7 +459,7 @@ mod tests {
         let state = consumer_state(21040, case);
         // producer token recorded with a later time than the consumer event
         handler()
-            .handle_message(state.clone(), producer_token(case, 20))
+            .handle_message(state.clone(), producer_token(case, 20), None)
             .await;
         handler()
             .handle_event(&consumer_event(case, 10), state.clone())

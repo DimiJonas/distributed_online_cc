@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     network::{
         message_types::{CCResultMessage, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::{app_state::AppState, result_send_buffer::ResultBufferPolicy},
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType},
@@ -243,7 +243,8 @@ async fn send_result_outbound(
                     result_message,
                     address,
                 );
-                if let Err(e) = send_to_peer(*address, result_message.clone(), state.clone()).await
+                if let Err(e) =
+                    send_to_conformance_peer(*address, result_message.clone(), state.clone()).await
                 {
                     log::error!(
                         "send_result_outbound: error sending result message {} to {} (result sink): {}",

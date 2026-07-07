@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::impl_constraint_handler_fields;
-use crate::network::tcp_router::send_to_peer;
+use crate::network::tcp_router::send_to_conformance_peer;
 /*
     a Response constraint defines that after Event/Activity A happened, Event/Activity B must also happen at some point after that
 
@@ -31,7 +31,7 @@ use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::state::app_state::AppState;
 use crate::types::{
     CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-    Token, TracedEvent,
+    RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -106,7 +106,12 @@ impl ConstraintHandler for ResponseProducerHandler {
     }
 
     // delete produced token of events that happened before the timestamp contained in the message
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "response producer handler: received message for constraint {}; message={}",
             self.constraint_id,
@@ -293,7 +298,7 @@ async fn send_delete_token(
         peer_addr
     );
 
-    if let Err(e) = send_to_peer(peer_addr, message, state.clone()).await {
+    if let Err(e) = send_to_conformance_peer(peer_addr, message, state.clone()).await {
         log::error!(
             "response consumer handler: error sending cc trigger message to {}: {}",
             peer_addr,
@@ -319,7 +324,8 @@ mod tests {
         state::app_state::AppState,
         types::ConstraintHandlerId,
         util::test_tools::{
-            addr, make_config_with_constraints_and_port, make_state_from_config, register_manager,
+            addr, make_config_with_constraints_and_port, make_state_from_config, peer_addr,
+            register_manager,
         },
     };
 
@@ -388,7 +394,9 @@ mod tests {
         ));
 
         let delete_msg = CCMessage::delete_token("c2".to_string(), "rp".to_string(), Utc::now());
-        handler.handle_message(state.clone(), delete_msg).await;
+        handler
+            .handle_message(state.clone(), delete_msg, None)
+            .await;
 
         assert!(!state.token_out.lock().unwrap().has_open_token(
             &"c2".to_string(),
@@ -479,7 +487,7 @@ mod tests {
             .await;
 
         let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
-        handler.handle_message(state.clone(), trigger).await;
+        handler.handle_message(state.clone(), trigger, None).await;
 
         assert!(state.token_out.lock().unwrap().has_open_token(
             &"c5".to_string(),
@@ -517,7 +525,7 @@ mod tests {
         // consumer event time is strictly after the producer token time.
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 20).unwrap();
         let delete = CCMessage::delete_token("c8".to_string(), "rp".to_string(), consumer_ts);
-        handler.handle_message(state.clone(), delete).await;
+        handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c8".to_string(), state.clone())
             .await;
@@ -558,7 +566,7 @@ mod tests {
             .await;
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
         let delete = CCMessage::delete_token("c9".to_string(), "rp".to_string(), consumer_ts);
-        handler.handle_message(state.clone(), delete).await;
+        handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c9".to_string(), state.clone())
             .await;
@@ -601,7 +609,7 @@ mod tests {
             .await;
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 30).unwrap();
         let delete = CCMessage::delete_token("c10".to_string(), "rp".to_string(), consumer_ts);
-        handler.handle_message(state.clone(), delete).await;
+        handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c10".to_string(), state.clone())
             .await;
@@ -636,7 +644,7 @@ mod tests {
 
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
         let delete = CCMessage::delete_token("c11".to_string(), "rp".to_string(), consumer_ts);
-        handler.handle_message(state.clone(), delete).await;
+        handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c11".to_string(), state.clone())
             .await;
@@ -659,12 +667,12 @@ mod tests {
     /// handle_event sends a DeleteToken conformance message to each producer peer.
     #[tokio::test]
     async fn consumer_handle_event_sends_delete_token_to_producers() {
-        let producer_addr = addr(20051);
+        let producer_addr = peer_addr(20051);
         let config = make_config_with_constraints_and_port(
             vec![ConstraintConfig::ResponseConsumer {
                 constraint_id: "rp".to_string(),
                 event_id: "consume".to_string(),
-                producer_peers: vec![producer_addr],
+                producer_peers: vec![producer_addr.address],
             }],
             20050,
         );
@@ -679,7 +687,7 @@ mod tests {
             handler_id: ConstraintHandlerId::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "consume".to_string(),
-            producer_peers: vec![producer_addr],
+            producer_peers: vec![producer_addr.address],
         };
 
         handler
@@ -704,14 +712,14 @@ mod tests {
     /// When multiple producer peers are configured, a message is sent to each.
     #[tokio::test]
     async fn consumer_sends_to_all_producer_peers() {
-        let p1 = addr(20060);
-        let p2 = addr(20061);
+        let p1 = peer_addr(20060);
+        let p2 = peer_addr(20061);
 
         let config = make_config_with_constraints_and_port(
             vec![ConstraintConfig::ResponseConsumer {
                 constraint_id: "rp".to_string(),
                 event_id: "consume".to_string(),
-                producer_peers: vec![p1, p2],
+                producer_peers: vec![p1.address, p2.address],
             }],
             20062,
         );
@@ -727,7 +735,7 @@ mod tests {
             handler_id: ConstraintHandlerId::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "consume".to_string(),
-            producer_peers: vec![p1, p2],
+            producer_peers: vec![p1.address, p2.address],
         };
 
         handler

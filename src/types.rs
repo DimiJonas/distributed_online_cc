@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 
 use chrono::{DateTime, FixedOffset, Utc};
 use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
@@ -16,6 +16,8 @@ pub type MessageId = Uuid;
 pub type EventTime = DateTime<Utc>;
 pub type SensorEventKey = String;
 pub type SensorEventValue = f64;
+pub type Age = u64;
+pub type PeerBatch = HashMap<SocketAddr, Age>;
 
 #[derive(Debug)]
 pub enum CliCommand {
@@ -26,6 +28,38 @@ pub enum CliCommand {
     Connect {
         peer_address: SocketAddr,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Copy, Hash, Eq)]
+pub enum NetworkType {
+    Overlay,
+    Conformance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
+pub struct PeerAddress {
+    pub address: SocketAddr,
+    pub network: NetworkType,
+}
+
+impl PeerAddress {
+    pub fn new(address: SocketAddr, network: NetworkType) -> Self {
+        Self { address, network }
+    }
+
+    pub fn new_overlay_address(address: SocketAddr) -> Self {
+        Self::new(address, NetworkType::Overlay)
+    }
+
+    pub fn new_conformance_address(address: SocketAddr) -> Self {
+        Self::new(address, NetworkType::Conformance)
+    }
+}
+
+impl Display for PeerAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({:?} network)", self.address, self.network)
+    }
 }
 
 // augmenting the Event struct from rust4pm with a trace id

@@ -12,12 +12,12 @@ use crate::{
     impl_constraint_handler_fields,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
-        tcp_router::send_to_peer,
+        tcp_router::send_to_conformance_peer,
     },
     state::app_state::AppState,
     types::{
         CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
-        EventTime, Token, TracedEvent,
+        EventTime, RequestId, Token, TracedEvent,
     },
 };
 
@@ -88,7 +88,12 @@ impl ConstraintHandler for TimeStartHandler {
     ///     - no timer start events happened -> satisfied
     ///     - all timers already fired -> the timers already emitted their results
     ///     - there are still running watchdog tasks -> cancel them and evaluate
-    async fn handle_message(&self, state: AppState, message: CCMessage) {
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
         log::info!(
             "received message for constraint {}; message={}",
             self.constraint_id,
@@ -340,7 +345,7 @@ async fn send_cc_trigger_message(
         peer_address
     );
 
-    if let Err(e) = send_to_peer(peer_address, message, state.clone()).await {
+    if let Err(e) = send_to_conformance_peer(peer_address, message, state.clone()).await {
         log::error!(
             "time stop handler: error sending cc trigger message to {}: {}",
             peer_address,
@@ -509,7 +514,7 @@ mod tests {
 
         let stop_time = base_time() + chrono::Duration::seconds(5);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         assert!(read_result(&state).is_none(),);
     }
@@ -526,7 +531,7 @@ mod tests {
         // Stop event happened at base + 3s (well within 10s limit)
         let stop_time = base_time() + chrono::Duration::seconds(3);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         assert!(matches!(
             read_result(&state),
@@ -547,7 +552,7 @@ mod tests {
         // (we don't advance time), so the token is still live.
         let stop_time = base_time() + chrono::Duration::seconds(20);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         assert!(matches!(
             read_result(&state),
@@ -566,7 +571,7 @@ mod tests {
 
         let stop_time = base_time() + chrono::Duration::seconds(7);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         assert!(matches!(
             read_result(&state),
@@ -583,7 +588,7 @@ mod tests {
 
         let stop_time = base_time() + chrono::Duration::seconds(3);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         assert!(matches!(
             read_result(&state),
@@ -625,7 +630,7 @@ mod tests {
         // Late stop arrives carrying an in-time timestamp (start + 2s).
         let stop_time = base_time() + chrono::Duration::seconds(2);
         let msg = CCMessage::trigger_check(CASE.into(), CID.into(), stop_time);
-        handler.handle_message(state.clone(), msg).await;
+        handler.handle_message(state.clone(), msg, None).await;
 
         // cc_results corrected to Satisfied immediately.
         assert!(matches!(

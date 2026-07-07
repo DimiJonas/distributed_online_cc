@@ -16,12 +16,16 @@ use crate::{
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
-    types::{ConstraintType, Token, TokenPayload, TracedEvent},
+    types::{ConstraintType, PeerAddress, Token, TokenPayload, TracedEvent},
 };
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 pub fn addr(port: u16) -> SocketAddr {
     format!("127.0.0.1:{}", port).parse().unwrap()
+}
+
+pub fn peer_addr(port: u16) -> PeerAddress {
+    PeerAddress::new_conformance_address(format!("127.0.0.1:{}", port).parse().unwrap())
 }
 
 /// Minimal NodeConfig that satisfies AppState::new without touching disk
@@ -49,7 +53,13 @@ fn make_base_config() -> NodeConfig {
         constraints: vec![],
         result_buffers: HashMap::new(),
         default_result_buffer: ResultBufferConfig::Immediate,
-        overlay: OverlayConfig::default(),
+        overlay: OverlayConfig {
+            initial_peers: vec![],
+            listen_address: "127.0.0.1:10000".parse().unwrap(),
+            max_peer_cache_size: 8,
+            shuffle_length: 4,
+            shuffling_interval: Duration::from_mins(10),
+        },
     };
     crate::network::message_types::init(config.clone());
     config
@@ -211,7 +221,7 @@ pub fn make_state(listen_port: u16) -> AppState {
     )
 }
 
-pub fn spawn_manager(peer_addr: SocketAddr, state: AppState) -> mpsc::Sender<PeerManagerMessage> {
+pub fn spawn_manager(peer_addr: PeerAddress, state: AppState) -> mpsc::Sender<PeerManagerMessage> {
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(peer_manager_task(peer_addr, rx, state));
     tx
@@ -219,7 +229,7 @@ pub fn spawn_manager(peer_addr: SocketAddr, state: AppState) -> mpsc::Sender<Pee
 
 /// Register a peer manager in state and return a receiver so the test can
 /// observe what the manager gets told.
-pub fn register_manager(state: &AppState, peer: SocketAddr) -> mpsc::Receiver<PeerManagerMessage> {
+pub fn register_manager(state: &AppState, peer: PeerAddress) -> mpsc::Receiver<PeerManagerMessage> {
     let (tx, rx) = mpsc::channel(64);
     state.peer_managers.lock().unwrap().insert(peer, tx);
     rx

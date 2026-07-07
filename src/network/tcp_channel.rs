@@ -3,6 +3,7 @@ use crate::network::framing::*;
 use crate::network::message_types::{HelloMessage, MessageKind, PeerMessage, PeerMessagePayload};
 use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
 use crate::state::app_state::AppState;
+use crate::types::{NetworkType, PeerAddress};
 use bytes::BytesMut;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,7 +13,7 @@ use tokio::sync::mpsc;
 // initiate a tcp channel to another peer
 // performs the minimal handshake - sends hello
 pub async fn initiate_tcp_connection(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     mut stream: TcpStream,
     tcp_channel_sender: mpsc::Sender<PeerMessage>,
     tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
@@ -87,7 +88,11 @@ pub async fn initiate_tcp_connection(
 
 // accept a tcp channel from another peer
 // performs the minimal handshake - receives hello
-pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppState) {
+pub async fn accept_incoming_tcp_connection(
+    mut stream: TcpStream,
+    network_type: NetworkType,
+    state: AppState,
+) {
     let mut read_buf = BytesMut::with_capacity(1024);
 
     // receive hello message
@@ -125,7 +130,9 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
         };
 
         match msg.payload {
-            PeerMessagePayload::Hello(hello_msg) => break hello_msg.listening_address,
+            PeerMessagePayload::Hello(hello_msg) => {
+                break PeerAddress::new(hello_msg.listening_address, network_type);
+            }
             _ => {
                 log::error!(
                     "acept_incoming_tcp_connection: expected Hello as the first message, dropping connection"
@@ -160,7 +167,7 @@ pub async fn accept_incoming_tcp_connection(mut stream: TcpStream, state: AppSta
 
 // communicate with a certain peer (send/receive tcp)
 async fn tcp_channel(
-    peer_address: SocketAddr,
+    peer_address: PeerAddress,
     mut stream: TcpStream,
     mut tcp_channel_receiver: mpsc::Receiver<PeerMessage>,
     state: AppState,
@@ -222,7 +229,7 @@ async fn tcp_channel(
                                 msg
                             );
 
-                           dispatch_message(msg, peer_address, state.clone()).await;
+                           dispatch_message(msg, peer_address.address, state.clone()).await;
                         }
                     }
                     Err(e) => {
@@ -243,7 +250,7 @@ async fn tcp_channel(
     .await;
 }
 
-async fn notify_manager(state: AppState, peer_address: SocketAddr, msg: PeerManagerMessage) {
+async fn notify_manager(state: AppState, peer_address: PeerAddress, msg: PeerManagerMessage) {
     let manager_sender_opt = {
         let managers = state.peer_managers.lock().unwrap();
         managers.get(&peer_address)
@@ -264,7 +271,7 @@ async fn notify_manager(state: AppState, peer_address: SocketAddr, msg: PeerMana
     }
 }
 
-fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
+fn ensure_manager_exists(state: AppState, peer_address: PeerAddress) {
     let mut managers = state.peer_managers.lock().unwrap();
     if managers.has_manager(&peer_address) {
         return;
@@ -284,11 +291,11 @@ fn ensure_manager_exists(state: AppState, peer_address: SocketAddr) {
     );
 }
 
-pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
+pub async fn dispatch_message(msg: PeerMessage, address: SocketAddr, state: AppState) {
     match msg.message_kind {
         MessageKind::FireAndForget => {
             // regular message that does not wait for a response
-            dispatch_to_handler(msg, peer_address, state).await;
+            dispatch_to_handler(msg, address, state).await;
         }
         MessageKind::Request => {
             // check that a request id is included before dispatching it
@@ -300,7 +307,7 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
                 return;
             };
 
-            dispatch_to_handler(msg, peer_address, state).await;
+            dispatch_to_handler(msg, address, state).await;
         }
         MessageKind::Response => {
             // receive response and pass it to the requestor
@@ -343,13 +350,13 @@ pub async fn dispatch_message(msg: PeerMessage, peer_address: SocketAddr, state:
     }
 }
 
-pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, state: AppState) {
+pub async fn dispatch_to_handler(msg: PeerMessage, address: SocketAddr, state: AppState) {
     // dispatch message based on payload type of the peer message
     match msg.payload {
         PeerMessagePayload::Hello(_) => {
             log::warn!(
                 "dispatch_to_handler: unexpected Hello from peer {} (connection is already established)",
-                peer_address
+                address
             );
         }
         PeerMessagePayload::Cli(cli_msg) => {
@@ -362,11 +369,14 @@ pub async fn dispatch_to_handler(msg: PeerMessage, peer_address: SocketAddr, sta
             ));
         }
         PeerMessagePayload::Conformance(mut cc_msg) => {
-            // put the request id from the outer peer message into the cc message for the constraint handlers
-            cc_msg.request_id = msg.request_id;
             // add the sender address to respond to the sender
-            cc_msg.sender_address = Some(peer_address);
-            tokio::spawn(handle_cc_message(cc_msg, state.clone(), msg.message_id));
+            cc_msg.sender_address = Some(address);
+            tokio::spawn(handle_cc_message(
+                cc_msg,
+                state.clone(),
+                msg.message_id,
+                msg.request_id,
+            ));
         }
         PeerMessagePayload::Overlay(overlay_msg) => {
             tokio::spawn(handle_overlay_message(
@@ -428,7 +438,7 @@ mod tests {
 
         let listen_port = 19200u16;
         let state = make_state(listen_port);
-        let peer_addr = server_addr;
+        let peer_addr = PeerAddress::new_conformance_address(server_addr);
         let mut manager_rx = register_manager(&state, peer_addr);
 
         // Accept side: just reads one message (the Hello) from the raw stream.
@@ -494,14 +504,14 @@ mod tests {
         let state = make_state(19211);
 
         // The peer address the initiator claims to listen on.
-        let peer_listen_addr = addr(initiator_listen_port);
+        let peer_listen_addr = PeerAddress::new_conformance_address(addr(initiator_listen_port));
         let mut manager_rx = register_manager(&state, peer_listen_addr);
 
         // Accept task.
         let accept_state = state.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, accept_state).await;
+            accept_incoming_tcp_connection(stream, NetworkType::Conformance, accept_state).await;
         });
 
         // Initiator side: just sends a Hello and then idles.
@@ -510,7 +520,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
             let hello = PeerMessage::hello(HelloMessage {
-                listening_address: peer_listen_addr,
+                listening_address: peer_listen_addr.address,
             });
             let encoded = encode(&hello).unwrap();
             stream.write_all(&encoded).await.unwrap();
@@ -547,7 +557,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, state).await;
+            accept_incoming_tcp_connection(stream, NetworkType::Conformance, state).await;
         });
 
         tokio::spawn(async move {
@@ -579,7 +589,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, state).await;
+            accept_incoming_tcp_connection(stream, NetworkType::Conformance, state).await;
         });
 
         // Connect and immediately close.
@@ -604,14 +614,14 @@ mod tests {
 
         let peer_listen_port = 19240u16;
         let state = make_state(19241);
-        let peer_listen_addr = addr(peer_listen_port);
+        let peer_listen_addr = PeerAddress::new_conformance_address(addr(peer_listen_port));
         let mut manager_rx = register_manager(&state, peer_listen_addr);
 
         // Server: accept and run accept_incoming_tcp_connection.
         let accept_state = state.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            accept_incoming_tcp_connection(stream, accept_state).await;
+            accept_incoming_tcp_connection(stream, NetworkType::Conformance, accept_state).await;
         });
 
         // Initiator: send Hello then immediately drop the stream (EOF).
@@ -620,7 +630,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             let mut stream = tokio::net::TcpStream::connect(server_addr).await.unwrap();
             let hello = PeerMessage::hello(HelloMessage {
-                listening_address: peer_listen_addr,
+                listening_address: peer_listen_addr.address,
             });
             stream.write_all(&encode(&hello).unwrap()).await.unwrap();
             // Close the stream to trigger EOF on the server side.
@@ -684,7 +694,7 @@ mod tests {
             messages
         });
 
-        let peer_addr = server_addr;
+        let peer_addr = PeerAddress::new_conformance_address(server_addr);
         let listen_port = 19250u16;
         let state = make_state(listen_port);
         let _manager_rx = register_manager(&state, peer_addr);

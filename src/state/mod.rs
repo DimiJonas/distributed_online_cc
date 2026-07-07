@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod case_state_map;
 pub mod cc_result_store;
 pub mod meta_token_store;
+pub mod peer_cache;
 pub mod peer_manager_map;
 pub mod pending_requests;
 pub mod result_send_buffer;
