@@ -99,8 +99,6 @@ pub async fn send_and_receive(
     message: PeerMessage,
     state: AppState,
 ) -> Result<PeerMessage, SendReceiveError> {
-    let timeout = state.config.tcp_channels.wait_for_response_timeout;
-
     let request_id = match message.request_id {
         Some(id) => id,
         None => {
@@ -130,7 +128,7 @@ pub async fn send_and_receive(
     );
 
     tokio::select! {
-        _ = tokio::time::sleep(timeout) => {
+        _ = tokio::time::sleep(state.config.tcp_channels.wait_for_response_timeout) => {
             // clean up the pending channel
             {
                 let mut pending = state.pending.lock().unwrap();
@@ -173,12 +171,12 @@ async fn get_or_create_manager(
 ) -> mpsc::Sender<PeerManagerMessage> {
     let manager_sender = {
         let mut managers = state.peer_managers.lock().unwrap();
-        if let Some(manager_sender) = managers.get(&peer_address) {
+        if let Some(manager_sender) = managers.get(&peer_address.address) {
             return manager_sender;
         }
         let (manager_sender, manager_receiver) =
             mpsc::channel(state.config.tcp_channels.peer_manager_mpsc_channel_size);
-        managers.insert(peer_address, manager_sender.clone());
+        managers.insert(peer_address.address, manager_sender.clone());
         tokio::spawn(peer_manager_task(
             peer_address,
             manager_receiver,
@@ -250,7 +248,7 @@ mod tests {
 
         let managers = state.peer_managers.lock().unwrap();
         assert!(
-            managers.get(&peer).is_some(),
+            managers.get(&peer.address).is_some(),
             "manager should be registered"
         );
     }
@@ -264,7 +262,7 @@ mod tests {
         connect_peer(peer, state.clone()).await;
 
         let managers = state.peer_managers.lock().unwrap();
-        assert!(managers.get(&peer).is_some());
+        assert!(managers.get(&peer.address).is_some());
     }
 
     /// Calling connect_peer twice for the same address must not create two managers.
@@ -278,6 +276,6 @@ mod tests {
 
         // PeerManagerMap::get returns a clone; just verify the key is present.
         let managers = state.peer_managers.lock().unwrap();
-        assert!(managers.get(&peer).is_some());
+        assert!(managers.get(&peer.address).is_some());
     }
 }

@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 
 // initiate a tcp channel to another peer
 // performs the minimal handshake - sends hello
@@ -26,7 +27,10 @@ pub async fn initiate_tcp_connection(
 
     // create hello message
     let hello = PeerMessage::hello(HelloMessage {
-        listening_address: state.config.tcp_listen_address,
+        listening_address: match peer_address.network {
+            NetworkType::Conformance => state.config.tcp_listen_address,
+            NetworkType::Overlay => state.config.overlay.listen_address,
+        },
     });
 
     // encode hello message
@@ -100,14 +104,14 @@ pub async fn accept_incoming_tcp_connection(
         match stream.read_buf(&mut read_buf).await {
             Ok(0) => {
                 log::error!(
-                    "acept_incoming_tcp_connection: peer disconnected before sending Hello"
+                    "accept_incoming_tcp_connection: peer disconnected before sending Hello"
                 );
                 return;
             }
             Ok(_) => {}
             Err(e) => {
                 log::error!(
-                    "acept_incoming_tcp_connection: read error while waiting for Hello: {}",
+                    "accept_incoming_tcp_connection: read error while waiting for Hello: {}",
                     e
                 );
                 return;
@@ -122,7 +126,7 @@ pub async fn accept_incoming_tcp_connection(
             Ok(m) => m,
             Err(e) => {
                 log::error!(
-                    "acept_incoming_tcp_connection: failed to decode Hello frame: {}",
+                    "accept_incoming_tcp_connection: failed to decode Hello frame: {}",
                     e
                 );
                 return;
@@ -135,7 +139,7 @@ pub async fn accept_incoming_tcp_connection(
             }
             _ => {
                 log::error!(
-                    "acept_incoming_tcp_connection: expected Hello as the first message, dropping connection"
+                    "accept_incoming_tcp_connection: expected Hello as the first message, dropping connection"
                 );
                 return;
             }
@@ -143,7 +147,7 @@ pub async fn accept_incoming_tcp_connection(
     };
 
     log::info!(
-        "acept_incoming_tcp_connection: accepted tcp connection from peer {}",
+        "accept_incoming_tcp_connection: accepted tcp connection from peer {}",
         peer_address
     );
 
@@ -173,6 +177,13 @@ async fn tcp_channel(
     state: AppState,
     mut read_buf: BytesMut,
 ) {
+    let idle_timeout = match peer_address.network {
+        NetworkType::Overlay => state.config.overlay.idle_timeout,
+        NetworkType::Conformance => None,
+    };
+    let idle_enabled = idle_timeout.is_some();
+    let idle_duration = idle_timeout.unwrap_or_default();
+
     loop {
         tokio::select! {
             // send msg
@@ -238,6 +249,11 @@ async fn tcp_channel(
                     }
                 }
             }
+            // idle: if an idle timeout is configured, the channel will be torn down if no messages were sent or received for a configured timeout duration
+            _ = sleep(idle_duration), if idle_enabled => {
+                log::info!("tcp_channel: channel to {} has been in idle for {}. closing channel", peer_address, humantime::format_duration(idle_duration));
+                break;
+            }
         }
     }
 
@@ -253,7 +269,7 @@ async fn tcp_channel(
 async fn notify_manager(state: AppState, peer_address: PeerAddress, msg: PeerManagerMessage) {
     let manager_sender_opt = {
         let managers = state.peer_managers.lock().unwrap();
-        managers.get(&peer_address)
+        managers.get(&peer_address.address)
     };
     match manager_sender_opt {
         Some(manager_sender) => {
@@ -273,13 +289,12 @@ async fn notify_manager(state: AppState, peer_address: PeerAddress, msg: PeerMan
 
 fn ensure_manager_exists(state: AppState, peer_address: PeerAddress) {
     let mut managers = state.peer_managers.lock().unwrap();
-    if managers.has_manager(&peer_address) {
+    if managers.has_manager(&peer_address.address) {
         return;
     }
-    // TODO: configurable channel size?
     let (manager_sender, manager_receiver) =
         mpsc::channel(state.config.tcp_channels.peer_manager_mpsc_channel_size);
-    managers.insert(peer_address, manager_sender);
+    managers.insert(peer_address.address, manager_sender);
     tokio::spawn(peer_manager_task(
         peer_address,
         manager_receiver,

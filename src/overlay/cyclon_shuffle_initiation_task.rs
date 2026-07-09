@@ -31,7 +31,7 @@ use crate::{
 ///     age is only increased when shuffling is initiated on its own
 pub async fn cyclon_shuffle_initiation_task(state: AppState) {
     loop {
-        sleep(state.config.overlay.shuffling_interval).await;
+        sleep(state.config.overlay.shuffle_interval).await;
         initiate_shuffle(state.clone()).await;
     }
 }

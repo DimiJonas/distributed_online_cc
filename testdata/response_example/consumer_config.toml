@@ -3,6 +3,12 @@ tcp_listen_address = "127.0.0.1:8002"
 unix_socket = "/tmp/event_listener_c.sock"
 log_file = "response-consumer.log"
 
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = ["127.0.0.1:9001"]
+shuffle_interval = "50s"
+
+
 [[constraints]]
 constraint_role = "ResponseConsumer"
 constraint_id = "response_test"

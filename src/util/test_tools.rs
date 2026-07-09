@@ -49,6 +49,8 @@ fn make_base_config() -> NodeConfig {
             reconnect_start_delay: Duration::from_secs(1),
             reconnect_max_delay: Duration::from_secs(30),
             wait_for_response_timeout: Duration::from_secs(20),
+            max_reconnect_attempts: None,
+            connect_timeout: Duration::from_secs(10),
         },
         constraints: vec![],
         result_buffers: HashMap::new(),
@@ -58,7 +60,8 @@ fn make_base_config() -> NodeConfig {
             listen_address: "127.0.0.1:10000".parse().unwrap(),
             max_peer_cache_size: 8,
             shuffle_length: 4,
-            shuffling_interval: Duration::from_mins(10),
+            shuffle_interval: Duration::from_mins(10),
+            idle_timeout: None,
         },
     };
     crate::network::message_types::init(config.clone());
@@ -231,7 +234,7 @@ pub fn spawn_manager(peer_addr: PeerAddress, state: AppState) -> mpsc::Sender<Pe
 /// observe what the manager gets told.
 pub fn register_manager(state: &AppState, peer: PeerAddress) -> mpsc::Receiver<PeerManagerMessage> {
     let (tx, rx) = mpsc::channel(64);
-    state.peer_managers.lock().unwrap().insert(peer, tx);
+    state.peer_managers.lock().unwrap().insert(peer.address, tx);
     rx
 }
 

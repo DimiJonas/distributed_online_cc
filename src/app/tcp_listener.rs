@@ -1,16 +1,16 @@
-use std::net::SocketAddr;
-
 use crate::network::tcp_channel::accept_incoming_tcp_connection;
 use crate::state::app_state::AppState;
 use crate::types::NetworkType;
 use tokio::net::TcpListener;
 
-pub fn spawn_conformance_network_listener(state: AppState, host_address: SocketAddr) {
+pub fn spawn_conformance_network_listener(state: AppState) {
     tokio::spawn(async move {
-        let listener = TcpListener::bind(&host_address).await.unwrap();
+        let listener = TcpListener::bind(&state.config.tcp_listen_address)
+            .await
+            .unwrap();
         log::info!(
             "listening in conformance network for peer messages on {}",
-            host_address
+            state.config.tcp_listen_address
         );
 
         loop {
@@ -25,12 +25,14 @@ pub fn spawn_conformance_network_listener(state: AppState, host_address: SocketA
     });
 }
 
-pub fn spawn_overlay_network_listener(state: AppState, host_address: SocketAddr) {
+pub fn spawn_overlay_network_listener(state: AppState) {
     tokio::spawn(async move {
-        let listener = TcpListener::bind(&host_address).await.unwrap();
+        let listener = TcpListener::bind(&state.config.overlay.listen_address)
+            .await
+            .unwrap();
         log::info!(
             "listening in overlay network for peer messages on {}",
-            host_address
+            state.config.overlay.listen_address
         );
 
         loop {

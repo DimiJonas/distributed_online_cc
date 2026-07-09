@@ -40,14 +40,8 @@ async fn main() {
 
     setup_tcp_channels(state.clone()).await;
 
-    distributed_online_cc::app::tcp_listener::spawn_conformance_network_listener(
-        state.clone(),
-        state.config.tcp_listen_address,
-    );
-    distributed_online_cc::app::tcp_listener::spawn_overlay_network_listener(
-        state.clone(),
-        state.config.overlay.listen_address,
-    );
+    distributed_online_cc::app::tcp_listener::spawn_conformance_network_listener(state.clone());
+    distributed_online_cc::app::tcp_listener::spawn_overlay_network_listener(state.clone());
     distributed_online_cc::app::cli::spawn_cli(state.clone());
     distributed_online_cc::app::event_listener::spawn_event_listener(state.clone());
     distributed_online_cc::app::event_q_processor::spawn_event_processor(

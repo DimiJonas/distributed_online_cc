@@ -46,6 +46,7 @@ fern = { version = "0.7.1", features = ["colored"] }
 
 # duration format in config file
 humantime = "2.3.0"
+humantime-serde = "1.1.1"
 
 # create custom errors
 thiserror = "2.0.18"

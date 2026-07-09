@@ -1,6 +1,10 @@
 use std::{collections::VecDeque, pin::Pin, time::Duration};
 
-use tokio::{net::TcpStream, sync::mpsc, time::sleep};
+use tokio::{
+    net::TcpStream,
+    sync::mpsc,
+    time::{sleep, timeout},
+};
 
 use crate::{
     network::{
@@ -8,7 +12,7 @@ use crate::{
         tcp_channel::initiate_tcp_connection,
     },
     state::app_state::AppState,
-    types::PeerAddress,
+    types::{NetworkType, PeerAddress},
 };
 
 // enum with messages to a peer manager
@@ -24,6 +28,13 @@ pub enum PeerManagerMessage {
     ConnectIfNeeded,
 }
 
+pub enum ConnectionState {
+    Idle,
+    Connecting,
+    WaitingReconnect,
+    Connected(mpsc::Sender<PeerMessage>),
+}
+
 // the peer manager task routine
 pub fn peer_manager_task(
     peer_address: PeerAddress,
@@ -32,8 +43,9 @@ pub fn peer_manager_task(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         let mut queue: VecDeque<PeerMessage> = VecDeque::new();
-        let mut tcp_channel_sender: Option<mpsc::Sender<PeerMessage>> = None;
+        let mut conn = ConnectionState::Idle;
         let mut reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
+        let mut attempts: u32 = 0;
 
         loop {
             let manager_msg = match manager_receiver.recv().await {
@@ -54,36 +66,81 @@ pub fn peer_manager_task(
                         );
                         continue;
                     }
-                    match &tcp_channel_sender {
-                        Some(sender) => {
+                    match &conn {
+                        ConnectionState::Connected(sender) => {
                             if let Err(e) = sender.send(*peer_msg.clone()).await {
                                 log::error!(
                                     "send to tcp_channel failed for {}: {}",
                                     peer_address,
                                     e
                                 );
-                                tcp_channel_sender = None;
+                                conn = ConnectionState::Idle;
                                 // channel closed unexpectedly; re-queue so it isn't lost
                                 // ConnectionLost will arrive shortly from tcp_channel
+                                // cyclon overlay messages are not retried on purpose
+                                if let PeerMessagePayload::Overlay(_) = peer_msg.payload {
+                                    continue;
+                                }
                                 enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
                             }
                         }
-                        None => {
+                        ConnectionState::Connecting | ConnectionState::WaitingReconnect => {
                             enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
+                        }
+                        ConnectionState::Idle => {
+                            conn = ConnectionState::Connecting;
+                            enqueue(state.clone(), &mut queue, *peer_msg, peer_address);
+                            do_connect(peer_address, state.clone()).await;
                         }
                     }
                 }
 
                 PeerManagerMessage::ConnectionLost => {
-                    log::warn!(
-                        "connection to {} lost, reconnecting in {}",
-                        peer_address,
-                        humantime::format_duration(reconnect_delay)
-                    );
-                    tcp_channel_sender = None;
-                    schedule_reconnect(peer_address, state.clone(), reconnect_delay);
-                    reconnect_delay =
-                        (reconnect_delay * 2).min(state.config.tcp_channels.reconnect_max_delay);
+                    match peer_address.network {
+                        NetworkType::Overlay => {
+                            // in cyclon an unreachable peer is dropped and not retried
+                            log::info!(
+                                "cyclon overlay: peer {} is unreachable or the channel closed. dropping peer manager",
+                                peer_address.address
+                            );
+                            {
+                                let mut managers = state.peer_managers.lock().unwrap();
+                                managers.remove(&peer_address.address);
+                            }
+                            break; // task returns
+                        }
+                        NetworkType::Conformance => {
+                            attempts += 1;
+
+                            // stop retrying if max attempts are configured and reached
+                            if let Some(max_attempts) =
+                                state.config.tcp_channels.max_reconnect_attempts
+                                && attempts > max_attempts
+                            {
+                                log::warn!(
+                                    "giving up on peer {} after {} attempts",
+                                    peer_address,
+                                    attempts
+                                );
+                                {
+                                    let mut managers = state.peer_managers.lock().unwrap();
+                                    managers.remove(&peer_address.address);
+                                }
+                                break; // task returns
+                            }
+
+                            // schedule reconnect
+                            log::warn!(
+                                "connection to {} lost, reconnecting in {}",
+                                peer_address,
+                                humantime::format_duration(reconnect_delay)
+                            );
+                            conn = ConnectionState::WaitingReconnect;
+                            schedule_reconnect(peer_address, state.clone(), reconnect_delay);
+                            reconnect_delay = (reconnect_delay * 2)
+                                .min(state.config.tcp_channels.reconnect_max_delay);
+                        }
+                    }
                 }
 
                 PeerManagerMessage::ConnectionReady(sender) => {
@@ -92,9 +149,9 @@ pub fn peer_manager_task(
                         peer_address,
                         queue.len()
                     );
-                    tcp_channel_sender = Some(sender.clone());
                     // reset reconnect delay
                     reconnect_delay = state.config.tcp_channels.reconnect_start_delay;
+                    attempts = 0;
 
                     // flush messages
                     while let Some(queued_msg) = queue.pop_front() {
@@ -111,16 +168,16 @@ pub fn peer_manager_task(
                             break;
                         }
                     }
+                    conn = ConnectionState::Connected(sender);
                 }
 
                 PeerManagerMessage::ConnectIfNeeded => {
-                    if tcp_channel_sender.is_some() {
-                        log::debug!(
-                            "connect requested for {} but already connected, ignoring",
-                            peer_address
-                        );
-                    } else {
+                    if matches!(
+                        conn,
+                        ConnectionState::Idle | ConnectionState::WaitingReconnect
+                    ) {
                         log::info!("connect requested for {}, attempting", peer_address);
+                        conn = ConnectionState::Connecting;
                         do_connect(peer_address, state.clone()).await;
                     }
                 }
@@ -135,11 +192,6 @@ fn enqueue(
     msg: PeerMessage,
     peer_address: PeerAddress,
 ) {
-    // cyclon overlay messages are not retried on purpose
-    if let PeerMessagePayload::Overlay(_) = msg.payload {
-        return;
-    }
-
     if queue.len() >= state.config.tcp_channels.message_queue_size {
         log::warn!(
             "message queue full for {}, dropping oldest message",
@@ -169,8 +221,13 @@ fn do_connect(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     Box::pin(async move {
         log::debug!("connecting to peer {}", peer_address);
-        match TcpStream::connect(&peer_address.address).await {
-            Ok(stream) => {
+        match timeout(
+            state.config.tcp_channels.connect_timeout,
+            TcpStream::connect(&peer_address.address),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => {
                 let (tcp_channel_sender, tcp_channel_receiver) =
                     mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
                 tokio::spawn(initiate_tcp_connection(
@@ -181,12 +238,23 @@ fn do_connect(
                     state,
                 ));
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 log::error!("could not connect to {}: {}", peer_address, e);
                 // signal back to manager task loop
                 let manager_sender = {
                     let managers = state.peer_managers.lock().unwrap();
-                    managers.get(&peer_address)
+                    managers.get(&peer_address.address)
+                };
+                if let Some(sender) = manager_sender {
+                    let _ = sender.send(PeerManagerMessage::ConnectionLost).await;
+                }
+            }
+            Err(_) => {
+                log::error!("timed out when trying to connect to {}", peer_address);
+                // signal back to manager task loop
+                let manager_sender = {
+                    let managers = state.peer_managers.lock().unwrap();
+                    managers.get(&peer_address.address)
                 };
                 if let Some(sender) = manager_sender {
                     let _ = sender.send(PeerManagerMessage::ConnectionLost).await;
@@ -201,7 +269,7 @@ pub async fn attempt_connect(peer_address: PeerAddress, state: AppState) {
     log::debug!("attempting to connect to peer {}", peer_address);
     let manager_sender = {
         let managers = state.peer_managers.lock().unwrap();
-        managers.get(&peer_address)
+        managers.get(&peer_address.address)
     };
     if let Some(sender) = manager_sender {
         let _ = sender.send(PeerManagerMessage::ConnectIfNeeded).await;

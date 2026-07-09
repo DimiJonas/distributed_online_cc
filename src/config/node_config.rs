@@ -16,10 +16,7 @@ pub struct NodeConfig {
     pub unix_socket: String,
     #[serde(default = "default_log_file")]
     pub log_file: String,
-    #[serde(
-        deserialize_with = "deserialize_humantime_duration",
-        default = "default_message_ttl"
-    )]
+    #[serde(with = "humantime_serde", default = "default_message_ttl")]
     pub message_ttl: Duration,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
@@ -34,15 +31,9 @@ pub struct NodeConfig {
     pub default_result_buffer: ResultBufferConfig,
     pub result_sink_addresses: Option<Vec<SocketAddr>>,
     pub result_sink: Option<ResultSinkConfig>,
-    #[serde(
-        deserialize_with = "deserialize_humantime_duration",
-        default = "default_case_end_grace_period"
-    )]
+    #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
     pub case_end_grace_period: Duration,
-    #[serde(
-        deserialize_with = "deserialize_humantime_duration",
-        default = "default_case_retention_period"
-    )]
+    #[serde(with = "humantime_serde", default = "default_case_retention_period")]
     pub case_retention_period: Duration,
     pub overlay: OverlayConfig,
 }
@@ -105,19 +96,20 @@ pub struct TcpChannelConfig {
     pub message_queue_size: usize,
     #[serde(
         default = "default_tcp_reconnect_start_delay",
-        deserialize_with = "deserialize_humantime_duration"
+        with = "humantime_serde"
     )]
     pub reconnect_start_delay: Duration,
-    #[serde(
-        default = "default_tcp_reconnect_max_delay",
-        deserialize_with = "deserialize_humantime_duration"
-    )]
+    #[serde(default = "default_tcp_reconnect_max_delay", with = "humantime_serde")]
     pub reconnect_max_delay: Duration,
     #[serde(
         default = "default_wait_for_response_timeout",
-        deserialize_with = "deserialize_humantime_duration"
+        with = "humantime_serde"
     )]
     pub wait_for_response_timeout: Duration,
+    #[serde(default = "default_max_reconnect_attempts")]
+    pub max_reconnect_attempts: Option<u32>,
+    #[serde(default = "default_connect_timeout", with = "humantime_serde")]
+    pub connect_timeout: Duration,
 }
 
 impl Default for TcpChannelConfig {
@@ -129,6 +121,8 @@ impl Default for TcpChannelConfig {
             reconnect_start_delay: default_tcp_reconnect_start_delay(),
             reconnect_max_delay: default_tcp_reconnect_max_delay(),
             wait_for_response_timeout: default_wait_for_response_timeout(),
+            max_reconnect_attempts: default_max_reconnect_attempts(),
+            connect_timeout: default_connect_timeout(),
         }
     }
 }
@@ -138,10 +132,7 @@ pub struct ResultSinkConfig {
     pub db_path: String,
     #[serde(default = "default_result_sink_mpsc_channel_size")]
     pub mpsc_channel_size: usize,
-    #[serde(
-        default = "default_retry_interval",
-        deserialize_with = "deserialize_humantime_duration"
-    )]
+    #[serde(default = "default_retry_interval", with = "humantime_serde")]
     pub retry_interval: Duration,
     #[serde(default = "default_retry_buffer_size")]
     pub retry_buffer_size: usize,
@@ -151,15 +142,14 @@ pub struct ResultSinkConfig {
 pub struct OverlayConfig {
     pub listen_address: SocketAddr,
     pub initial_peers: Vec<SocketAddr>,
-    #[serde(
-        default = "default_shuffling_interval",
-        deserialize_with = "deserialize_humantime_duration"
-    )]
-    pub shuffling_interval: Duration,
+    #[serde(default = "default_shuffle_interval", with = "humantime_serde")]
+    pub shuffle_interval: Duration,
     #[serde(default = "default_shuffle_length")]
     pub shuffle_length: usize,
     #[serde(default = "default_max_peer_cache_size")]
     pub max_peer_cache_size: usize,
+    #[serde(default = "default_idle_timeout", with = "humantime_serde")]
+    pub idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
@@ -245,11 +235,11 @@ pub enum ResultBufferConfig {
     #[default]
     Immediate,
     GracePeriod {
-        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        #[serde(with = "humantime_serde")]
         duration: Duration,
     },
     Revocable {
-        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        #[serde(with = "humantime_serde")]
         duration: Duration,
     },
 }
@@ -312,7 +302,7 @@ pub enum ConstraintConfig {
         #[serde(deserialize_with = "deserialize_f64")]
         value: f64,
         mode: SensorConstraintMode,
-        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        #[serde(with = "humantime_serde")]
         max_value_age: Duration,
     },
     SensorTrigger {
@@ -323,7 +313,7 @@ pub enum ConstraintConfig {
     TimeStart {
         constraint_id: ConstraintId,
         event_id: EventId,
-        #[serde(deserialize_with = "deserialize_humantime_duration")]
+        #[serde(with = "humantime_serde")]
         duration: Duration,
         mode: MinMaxMode,
     },
@@ -468,6 +458,10 @@ fn default_tcp_message_queue_size() -> usize {
     256
 }
 
+fn default_max_reconnect_attempts() -> Option<u32> {
+    None
+}
+
 fn default_tcp_reconnect_start_delay() -> Duration {
     Duration::from_secs(1)
 }
@@ -482,6 +476,10 @@ fn default_peer_manager_mpsc_channel_size() -> usize {
 
 fn default_wait_for_response_timeout() -> Duration {
     Duration::from_secs(20)
+}
+
+fn default_connect_timeout() -> Duration {
+    Duration::from_secs(10)
 }
 
 fn default_result_sink_mpsc_channel_size() -> usize {
@@ -504,7 +502,7 @@ fn default_case_retention_period() -> Duration {
     Duration::from_secs(30)
 }
 
-fn default_shuffling_interval() -> Duration {
+fn default_shuffle_interval() -> Duration {
     Duration::from_mins(10)
 }
 
@@ -514,6 +512,10 @@ fn default_shuffle_length() -> usize {
 
 fn default_max_peer_cache_size() -> usize {
     8
+}
+
+fn default_idle_timeout() -> Option<Duration> {
+    Some(Duration::from_mins(2))
 }
 
 // deserialize a value that can be int or float
@@ -537,6 +539,18 @@ fn deserialize_humantime_duration<'de, D: de::Deserializer<'de>>(
 ) -> Result<Duration, D::Error> {
     let s = String::deserialize(deserializer)?;
     humantime::parse_duration(&s).map_err(de::Error::custom)
+}
+
+// deserialize durations if they are wrapped in an Option
+fn deserialize_humantime_duration_option<'de, D: de::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    match Option::<String>::deserialize(deserializer)? {
+        Some(s) => humantime::parse_duration(&s)
+            .map(Some)
+            .map_err(de::Error::custom),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
