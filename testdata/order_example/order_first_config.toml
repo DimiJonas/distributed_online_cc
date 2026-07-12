@@ -12,3 +12,8 @@ event_id = "order_first_event"
 constraint_role = "EndActivity"
 constraint_id = "end_activity"
 event_id = "dummy_end_activity"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = []
+shuffle_interval = "1h"

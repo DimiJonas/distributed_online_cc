@@ -533,26 +533,6 @@ fn deserialize_f64<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<f64
     }
 }
 
-// deserialize durations in format 1h30m or 30s using humantime crate
-fn deserialize_humantime_duration<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Duration, D::Error> {
-    let s = String::deserialize(deserializer)?;
-    humantime::parse_duration(&s).map_err(de::Error::custom)
-}
-
-// deserialize durations if they are wrapped in an Option
-fn deserialize_humantime_duration_option<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Option<Duration>, D::Error> {
-    match Option::<String>::deserialize(deserializer)? {
-        Some(s) => humantime::parse_duration(&s)
-            .map(Some)
-            .map_err(de::Error::custom),
-        None => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

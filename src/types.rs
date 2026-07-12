@@ -5,7 +5,7 @@ use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESE
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub type PeerId = u8;
+pub type PeerId = u64;
 pub type RequestId = Uuid;
 pub type CaseId = String;
 pub type ConstraintId = String;

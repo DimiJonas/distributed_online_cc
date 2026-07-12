@@ -8,3 +8,8 @@ constraint_role = "DistributedAppearanceCounter"
 constraint_id = "distributed_appearance_test"
 event_id = "distributed_appearance_counter1_event"
 reset = "Zero"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = []
+shuffle_interval = "1h"

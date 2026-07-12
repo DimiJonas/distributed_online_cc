@@ -13,3 +13,8 @@ constraint_role = "PrecedenceProducer"
 constraint_id = "precedence_test"
 event_id = "precedence_producer_event"
 consumer_peers = ["127.0.0.1:8003"]
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

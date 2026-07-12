@@ -8,3 +8,8 @@ constraint_role = "NotCoexistenceB"
 constraint_id = "not_coexistence_test"
 event_id = "not_coexistence_b_event"
 a_peer = "127.0.0.1:8001"
+
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = []
+shuffle_interval = "1h"

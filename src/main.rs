@@ -5,6 +5,7 @@ use distributed_online_cc::state::app_state::AppState;
 use distributed_online_cc::types::PeerAddress;
 use log::LevelFilter;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 // parse command line arguments
@@ -12,6 +13,8 @@ use tokio::sync::mpsc;
 struct Input {
     #[arg(short, long, default_value = "config.toml")]
     pub config_path: String,
+    #[arg(short, long)]
+    pub log_dir: Option<String>,
 }
 
 #[tokio::main]
@@ -19,7 +22,26 @@ async fn main() {
     let args = Input::parse();
     let config: NodeConfig = NodeConfig::load_config(&args.config_path);
 
-    setup_logging(&config.log_file).expect("failed to initialize logging");
+    // config owns the filename; --log-dir (if it exists) owns the directory
+    let log_path: PathBuf = match &args.log_dir {
+        Some(dir) => {
+            let file_name = Path::new(&config.log_file)
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("app.log"));
+            Path::new(dir).join(file_name)
+        }
+        None => PathBuf::from(&config.log_file),
+    };
+
+    // ensure the directory exists so logging init can't fail on a missing path
+    if let Some(parent) = log_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("failed to create log directory");
+    }
+
+    let log_path_str = log_path.to_string_lossy().into_owned();
+    setup_logging(&log_path_str).expect("failed to initialize logging");
     log::info!("starting node");
     log::debug!("configuration: {:?}", config);
 

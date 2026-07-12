@@ -8,3 +8,8 @@ constraint_role = "AppearanceTrigger"
 constraint_id = "appearance_test"
 event_id = "appearance_trigger_event"
 counter_peers = ["127.0.0.1:8001"]
+
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = []
+shuffle_interval = "1h"

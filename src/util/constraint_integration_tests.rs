@@ -4,11 +4,15 @@ mod tests {
 
     use crate::{
         app::event_q_processor::spawn_event_processor,
-        config::node_config::{
-            AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset, MinMaxMode,
+        config::{
+            config_builder::NodeConfigBuilder,
+            node_config::{
+                AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset,
+                MinMaxMode,
+            },
         },
         types::ConstraintHandlerId,
-        util::test_tools::{NodeConfigBuilder, make_traced_event},
+        util::test_tools::make_traced_event,
     };
 
     /// Test A — with seven constraints all configured on the SAME event_id, the
@@ -20,7 +24,7 @@ mod tests {
         const EVENT: &str = "shared";
         const CASE: &str = "caseA";
 
-        let (state, event_tx, event_rx) = NodeConfigBuilder::new()
+        let (state, event_tx, event_rx) = NodeConfigBuilder::new_base_config()
             .port(31000)
             .constraints(vec![
                 ConstraintConfig::ResponseProducer {
@@ -134,7 +138,7 @@ mod tests {
 
         let constraint_ids = ["r1", "r2", "r3", "a1", "a2", "o1"];
 
-        let (state, event_tx, event_rx) = NodeConfigBuilder::new()
+        let (state, event_tx, event_rx) = NodeConfigBuilder::new_base_config()
             .port(31010)
             // long grace so results are still readable when we assert; the test
             // returns well before it elapses (the background task is dropped).

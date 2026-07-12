@@ -7,3 +7,8 @@ log_file = "precedence-consumer.log"
 constraint_role = "PrecedenceConsumer"
 constraint_id = "precedence_test"
 event_id = "precedence_consumer_event"
+
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = []
+shuffle_interval = "1h"

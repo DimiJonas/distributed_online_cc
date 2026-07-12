@@ -1,0 +1,12 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_1.sock"
+log_file = "node-1.log"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = ["127.0.0.1:9002"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 8
+idle_timeout = "1h"

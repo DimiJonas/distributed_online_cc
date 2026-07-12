@@ -47,3 +47,8 @@ attribute_key = "eq_value"
 mode = "=="
 value = 10
 max_value_age = "10s"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = []
+shuffle_interval = "1h"

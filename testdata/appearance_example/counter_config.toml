@@ -10,3 +10,8 @@ event_id = "appearance_counter_event"
 mode = "Max"
 frequency = 3
 reset = "Zero"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = []
+shuffle_interval = "1h"

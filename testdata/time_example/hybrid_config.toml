@@ -19,3 +19,8 @@ time_start_peers = ["127.0.0.1:8003"]
 [default_result_buffer]
 policy = "GracePeriod"
 duration = "10s"
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

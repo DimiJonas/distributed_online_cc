@@ -98,3 +98,8 @@ constraint_role = "SensorTrigger"
 constraint_id = "sensor_eq_test"
 event_id = "sensor_trigger_event"
 collector_peers = ["127.0.0.1:8003"]
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

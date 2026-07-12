@@ -18,3 +18,8 @@ constraint_role = "OrderSecond"
 constraint_id = "order_test"
 event_id = "order_second_event"
 order_first_peers = ["127.0.0.1:8003"]
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

@@ -5,8 +5,8 @@ log_file = "response-consumer.log"
 
 [overlay]
 listen_address = "127.0.0.1:9002"
-initial_peers = ["127.0.0.1:9001"]
-shuffle_interval = "50s"
+initial_peers = []
+shuffle_interval = "1h"
 
 
 [[constraints]]

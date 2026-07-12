@@ -18,3 +18,8 @@ producer_peers = ["127.0.0.1:8003"]
 constraint_role = "EndActivity"
 constraint_id = "end_activity"
 event_id = "dummy_end_activity"
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

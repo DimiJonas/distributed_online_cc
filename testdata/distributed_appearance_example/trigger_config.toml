@@ -10,3 +10,8 @@ event_id = "distributed_appearance_trigger_event"
 counter_peers = ["127.0.0.1:8001", "127.0.0.1:8002"]
 mode = "Min"
 frequency = 5
+
+[overlay]
+listen_address = "127.0.0.1:9003"
+initial_peers = []
+shuffle_interval = "1h"

@@ -1,0 +1,12 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_p.sock"
+log_file = "response-producer.log"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = ["127.0.0.1:9002"]
+shuffle_interval = "20s"
+
+[tcp_channels]
+wait_for_response_timeout = "40s"
