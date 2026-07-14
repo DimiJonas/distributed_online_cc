@@ -72,8 +72,6 @@ pub async fn emit_result(
                 result_receive_time,
             )
             .await;
-
-            call_finalizers(case_id, constraint_id, state.clone()).await;
         }
 
         ResultBufferPolicy::GracePeriod { duration } => {
@@ -173,8 +171,6 @@ async fn grace_period_timer(
                     created_at,
                 ).await;
             }
-
-            call_finalizers(&case_id, &constraint_id, state.clone()).await;
         }
         _ = cancel_token.cancelled() => {
             log::debug!(
@@ -203,9 +199,6 @@ async fn revocable_result_timer(
                 "revocable window expired for ({}/{}): result is now final",
                 case_id, constraint_id
             );
-
-            call_finalizers(&case_id, &constraint_id, state.clone()).await;
-            // TODO: optionally send a "finalised" signal via TCP.
         }
         _ = cancel_token.cancelled() => {
             log::debug!(
@@ -265,21 +258,6 @@ async fn send_result_outbound(
                 info
             );
         }
-    }
-}
-
-/// call finalize on the corresponding constraint handlers to clean up state
-async fn call_finalizers(case_id: &CaseId, constraint_id: &ConstraintId, state: AppState) {
-    log::info!(
-        "finalizing constraint {} for case {}",
-        constraint_id,
-        case_id
-    );
-
-    let handlers = state.handlers.clone();
-    let handler_refs = handlers.get_by_constraint_id(constraint_id);
-    for handler in handler_refs {
-        handler.clean_up_state(case_id, state.clone()).await;
     }
 }
 

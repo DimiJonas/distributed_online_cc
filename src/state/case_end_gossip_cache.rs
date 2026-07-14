@@ -5,12 +5,14 @@ use std::hash::{Hash, Hasher};
 
 use crate::types::{CaseId, EventTime};
 
+#[derive(Debug)]
 pub enum CaseEndOutcome {
     New,
     Updated,
     Unchanged,
 }
 
+#[derive(Debug)]
 pub struct MergeResult {
     pub new: Vec<(CaseId, EventTime)>,
     pub updated: Vec<(CaseId, EventTime)>,

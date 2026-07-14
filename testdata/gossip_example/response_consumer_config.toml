@@ -1,0 +1,20 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:8002"
+unix_socket = "/tmp/event_listener_c.sock"
+log_file = "response-consumer.log"
+
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = ["127.0.0.1:9001", "127.0.0.1:9003"]
+shuffle_interval = "1h"
+
+[[constraints]]
+constraint_role = "ResponseConsumer"
+constraint_id = "response_test"
+event_id = "response_consumer_event"
+producer_peers = ["127.0.0.1:8001"]
+
+[case_end_gossip]
+anti_entropy_interval = "5s"
+case_end_propagation_ttl = "50s"
+fanout = 1

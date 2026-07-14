@@ -1,0 +1,23 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_p.sock"
+log_file = "response-producer.log"
+
+[overlay]
+listen_address = "127.0.0.1:9001"
+initial_peers = ["127.0.0.1:9002", "127.0.0.1:9003"]
+shuffle_interval = "1h"
+
+[[constraints]]
+constraint_role = "ResponseProducer"
+constraint_id = "response_test"
+event_id = "response_producer_event"
+
+[default_result_buffer]
+policy = "GracePeriod"
+duration = "10s"
+
+[case_end_gossip]
+anti_entropy_interval = "5s"
+case_end_propagation_ttl = "50s"
+fanout = 1

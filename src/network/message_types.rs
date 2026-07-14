@@ -410,6 +410,16 @@ pub enum CEGossipPayload {
     AeSet(Vec<(CaseId, EventTime)>),
 }
 
+impl CEGossipPayload {
+    pub fn name(&self) -> String {
+        match self {
+            CEGossipPayload::AeDigest(_) => "AeDigest".to_string(),
+            CEGossipPayload::AeSet(_) => "AeSet".to_string(),
+            CEGossipPayload::Push(_) => "Push".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CEGossipMessage {
     pub sender_address: SocketAddr,
