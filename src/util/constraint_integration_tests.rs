@@ -143,7 +143,7 @@ mod tests {
             // long grace so results are still readable when we assert; the test
             // returns well before it elapses (the background task is dropped).
             .grace_period(Duration::from_secs(5))
-            .retention_period(Duration::from_millis(50))
+            .case_end_gossip_ttl(Duration::from_millis(50))
             .constraints(vec![
                 ConstraintConfig::ResponseProducer {
                     constraint_id: "r1".to_string(),

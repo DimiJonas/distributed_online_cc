@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod case_end_gossip_cache;
 pub mod case_state_map;
 pub mod cc_result_store;
 pub mod meta_token_store;

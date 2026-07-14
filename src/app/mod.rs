@@ -1,3 +1,4 @@
+pub mod case_end_gossip;
 pub mod cli;
 pub mod event_listener;
 pub mod event_q_processor;

@@ -5,8 +5,8 @@ use crate::{state::app_state::AppState, types::CaseId};
 /// this task handles case end
 ///
 /// calls case end on constraint handlers which makes sure each constraint emitted at least 1 result
-/// then sleeps for a configured amount of time in case late events stil come in
-/// then closes the case (which blocks further reult emitting) and calls clean up state methods on constraint handlers
+/// then sleeps for a configured amount of time if case late events still come in
+/// then closes the case (which blocks further result emitting) and calls clean up state methods on constraint handlers
 /// sleeps for another period (this period resembles the time the case is still remembered for so an even later event does not open it again)
 /// then forgets about the case by removing it from case state
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
@@ -30,7 +30,7 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
         handler.clean_up_state(&case_id, state.clone()).await;
     }
 
-    sleep(state.config.case_retention_period).await;
+    sleep(state.config.case_end_gossip.case_end_propagation_ttl).await;
 
     log::debug!("forgetting case {}", case_id);
     {
@@ -95,12 +95,12 @@ mod tests {
     /// inspect call order after running the task.
     fn make_state_with_recording_handler(
         grace_period: Duration,
-        retention_period: Duration,
+        propagation_ttl: Duration,
         calls: Arc<Mutex<Vec<String>>>,
     ) -> AppState {
         let mut config = make_config_with_port(0);
         config.case_end_grace_period = grace_period;
-        config.case_retention_period = retention_period;
+        config.case_end_gossip.case_end_propagation_ttl = propagation_ttl;
         // No ConstraintConfig variant maps to a test mock, so build the
         // base state from config (empty handler registry)...
         let mut state = make_state_from_config(config);

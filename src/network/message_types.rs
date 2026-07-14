@@ -149,8 +149,8 @@ impl PeerMessage {
         Self::new_response(request_id, PeerMessagePayload::Overlay(msg))
     }
 
-    pub fn termination(msg: TerminationDetectionMessage) -> Self {
-        Self::new(PeerMessagePayload::TerminationDetection(msg))
+    pub fn ce_gossip(msg: CEGossipMessage) -> Self {
+        Self::new(PeerMessagePayload::CEGossip(msg))
     }
 
     pub fn result(msg: CCResultMessage) -> Self {
@@ -170,7 +170,7 @@ pub enum PeerMessagePayload {
     Cli(CliTestMessage),
     Conformance(CCMessage),
     Overlay(OverlayMessage),
-    TerminationDetection(TerminationDetectionMessage),
+    CEGossip(CEGossipMessage),
     Result(CCResultMessage),
 }
 
@@ -181,7 +181,7 @@ impl Display for PeerMessagePayload {
             PeerMessagePayload::Cli(_) => write!(f, "cli"),
             PeerMessagePayload::Conformance(_) => write!(f, "conformance"),
             PeerMessagePayload::Overlay(_) => write!(f, "overlay"),
-            PeerMessagePayload::TerminationDetection(_) => write!(f, "termination detection"),
+            PeerMessagePayload::CEGossip(_) => write!(f, "case-end-gossip"),
             PeerMessagePayload::Result(_) => write!(f, "result"),
         }
     }
@@ -210,7 +210,7 @@ impl Display for CliTestMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CCMessageType {
     // push token into token-in area of another node
     PushToken,
@@ -378,7 +378,12 @@ pub struct OverlayMessage {
 
 impl Display for OverlayMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "OverlayMessage")
+        write!(
+            f,
+            "OverlayMessage from {} containing a subset of {}",
+            self.sender_address,
+            self.peer_batch.len()
+        )
     }
 }
 
@@ -396,13 +401,45 @@ impl OverlayMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TerminationDetectionMessage {
-    // TODO
+pub enum CEGossipPayload {
+    // eagerly push of freshly learned case ends
+    Push(Vec<(CaseId, EventTime)>),
+    // anti entropy: initiators digest of its live set
+    AeDigest(u64),
+    /// anti entropy: responders live set (sent only on digest mismatch)
+    AeSet(Vec<(CaseId, EventTime)>),
 }
 
-impl Display for TerminationDetectionMessage {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CEGossipMessage {
+    pub sender_address: SocketAddr,
+    pub payload: CEGossipPayload,
+}
+
+impl CEGossipMessage {
+    fn new(sender_address: SocketAddr, payload: CEGossipPayload) -> Self {
+        Self {
+            sender_address,
+            payload,
+        }
+    }
+
+    pub fn new_push(sender_address: SocketAddr, data: Vec<(CaseId, EventTime)>) -> Self {
+        Self::new(sender_address, CEGossipPayload::Push(data))
+    }
+
+    pub fn new_ae_digest(sender_address: SocketAddr, digest: u64) -> Self {
+        Self::new(sender_address, CEGossipPayload::AeDigest(digest))
+    }
+
+    pub fn new_ae_set(sender_address: SocketAddr, data: Vec<(CaseId, EventTime)>) -> Self {
+        Self::new(sender_address, CEGossipPayload::AeSet(data))
+    }
+}
+
+impl Display for CEGossipMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TerminationDetectionMessage")
+        write!(f, "CEGossipMessage")
     }
 }
 

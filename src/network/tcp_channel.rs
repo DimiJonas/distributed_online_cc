@@ -402,13 +402,11 @@ pub async fn dispatch_to_handler(msg: PeerMessage, address: SocketAddr, state: A
                 msg.request_id,
             ));
         }
-        PeerMessagePayload::TerminationDetection(td_msg) => {
-            tokio::spawn(handle_td_message(
+        PeerMessagePayload::CEGossip(td_msg) => {
+            tokio::spawn(handle_ce_gossip_message(
                 td_msg,
                 state.clone(),
                 msg.message_id,
-                msg.message_kind,
-                msg.request_id,
             ));
         }
         PeerMessagePayload::Result(res_msg) => {

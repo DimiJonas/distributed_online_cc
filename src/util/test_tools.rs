@@ -55,11 +55,15 @@ pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<Tra
     let (event_tx, event_rx) = mpsc::channel(16);
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
+    let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
     let state = AppState::new(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,
         sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
     );
     (state, event_rx)
 }
@@ -67,7 +71,16 @@ pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<Tra
 pub fn make_state_with_event_q(event_tx: mpsc::Sender<TracedEvent>) -> AppState {
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
-    AppState::new(make_base_config(), event_tx, loopback_tx, sink_tx)
+    let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
+    AppState::new(
+        make_base_config(),
+        event_tx,
+        loopback_tx,
+        sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
+    )
 }
 
 pub fn make_state_with_config_and_event_q(
@@ -76,25 +89,47 @@ pub fn make_state_with_config_and_event_q(
 ) -> AppState {
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
-    AppState::new(config, event_tx, loopback_tx, sink_tx)
+    let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
+    AppState::new(
+        config,
+        event_tx,
+        loopback_tx,
+        sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
+    )
 }
 
 pub fn make_state_from_config(config: NodeConfig) -> AppState {
     let (event_tx, _event_rx) = mpsc::channel(16);
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
-    AppState::new(config, event_tx, loopback_tx, sink_tx)
+    let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
+    AppState::new(
+        config,
+        event_tx,
+        loopback_tx,
+        sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
+    )
 }
 
 pub fn make_state(listen_port: u16) -> AppState {
     let (event_tx, _event_rx) = mpsc::channel(16);
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
+    let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
     AppState::new(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,
         sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
     )
 }
 

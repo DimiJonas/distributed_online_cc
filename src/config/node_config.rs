@@ -31,9 +31,9 @@ pub struct NodeConfig {
     pub result_sink: Option<ResultSinkConfig>,
     #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
     pub case_end_grace_period: Duration,
-    #[serde(with = "humantime_serde", default = "default_case_retention_period")]
-    pub case_retention_period: Duration,
     pub overlay: OverlayConfig,
+    #[serde(default)]
+    pub case_end_gossip: CEGossipConfig,
 }
 
 impl NodeConfig {
@@ -151,6 +151,32 @@ pub struct OverlayConfig {
     pub max_peer_cache_size: usize,
     #[serde(default = "default_idle_timeout", with = "humantime_serde")]
     pub idle_timeout: Option<Duration>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CEGossipConfig {
+    #[serde(with = "humantime_serde", default = "default_anti_entropy_interval")]
+    pub anti_entropy_interval: Duration,
+    #[serde(with = "humantime_serde", default = "default_case_end_propagation_ttl")]
+    pub case_end_propagation_ttl: Duration,
+    #[serde(default = "default_fanout")]
+    pub fanout: usize,
+    #[serde(default = "default_local_end_signal_mpsc_channel_size")]
+    pub local_end_signal_mpsc_channel_size: usize,
+    #[serde(default = "default_gossip_message_queue_size")]
+    pub gossip_message_queue_size: usize,
+}
+
+impl Default for CEGossipConfig {
+    fn default() -> Self {
+        Self {
+            anti_entropy_interval: default_anti_entropy_interval(),
+            case_end_propagation_ttl: default_case_end_propagation_ttl(),
+            fanout: default_fanout(),
+            gossip_message_queue_size: default_gossip_message_queue_size(),
+            local_end_signal_mpsc_channel_size: default_local_end_signal_mpsc_channel_size(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone)]
@@ -499,7 +525,7 @@ fn default_case_end_grace_period() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_case_retention_period() -> Duration {
+fn default_case_end_propagation_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
@@ -517,6 +543,22 @@ fn default_max_peer_cache_size() -> usize {
 
 fn default_idle_timeout() -> Option<Duration> {
     Some(Duration::from_mins(2))
+}
+
+fn default_anti_entropy_interval() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_fanout() -> usize {
+    4
+}
+
+fn default_local_end_signal_mpsc_channel_size() -> usize {
+    64
+}
+
+fn default_gossip_message_queue_size() -> usize {
+    1024
 }
 
 // deserialize a value that can be int or float

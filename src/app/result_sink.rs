@@ -3,7 +3,7 @@ use std::{collections::VecDeque, sync::Arc};
 use crate::{config::node_config::ResultSinkConfig, network::message_types::CCResultMessage};
 use rusqlite::Connection;
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{sync::mpsc, time::MissedTickBehavior};
 
 #[derive(Debug, Error)]
 pub enum SinkError {
@@ -60,13 +60,14 @@ enum SinkEvent {
 pub fn spawn_result_sink(config: ResultSinkConfig, mut sink_rx: mpsc::Receiver<CCResultMessage>) {
     let config = Arc::new(config);
     let db_path = config.db_path.clone();
-    let retry_interval = config.retry_interval;
     let retry_buffer_size = config.retry_buffer_size;
 
     tokio::spawn(async move {
         log::info!("result sink configured. writing results to {}", db_path);
 
         let mut buffer: VecDeque<CCResultMessage> = VecDeque::new();
+        let mut retry_interval = tokio::time::interval(config.retry_interval);
+        retry_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // inital database connect
         log::info!("connecting to database");
         let mut conn: Option<Connection> = try_connect(config.clone()).await;
@@ -77,7 +78,7 @@ pub fn spawn_result_sink(config: ResultSinkConfig, mut sink_rx: mpsc::Receiver<C
                     Some(m) => SinkEvent::Result(m),
                     None => SinkEvent::ChannelClosed,
                 },
-                _ = sleep(retry_interval) => SinkEvent::RetryTick,
+                _ = retry_interval.tick() => SinkEvent::RetryTick,
             };
 
             match event {

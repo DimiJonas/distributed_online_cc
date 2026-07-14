@@ -6,8 +6,7 @@
 use std::net::SocketAddr;
 
 use crate::network::message_types::{
-    CCMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessage,
-    TerminationDetectionMessage,
+    CCMessage, CEGossipMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessage,
 };
 use crate::network::tcp_router::{send_to_conformance_peer, send_to_overlay_peer};
 use crate::state::app_state::AppState;
@@ -127,19 +126,23 @@ pub async fn handle_cc_message(
     }
 }
 
-pub async fn handle_td_message(
-    msg: TerminationDetectionMessage,
-    _state: AppState,
-    msg_id: MessageId,
-    _kind: MessageKind,
-    _request_id: Option<RequestId>,
-) {
+pub async fn handle_ce_gossip_message(msg: CEGossipMessage, state: AppState, msg_id: MessageId) {
     log::debug!(
-        "handle_td_message: handling termination detection message message with id={} msg={}",
+        "handle_ce_gossip_message: handling case end gossip message message with id={} msg={}",
         &msg_id,
         msg
     );
-    // TODO
+
+    // pass message to case end gossip manager
+    match state.gossip_msg_q.send(msg).await {
+        Ok(()) => {}
+        Err(e) => {
+            log::error!(
+                "handle_ce_gossip_message: unable to pass case end gossip message to case end gossip manager: {}",
+                e
+            );
+        }
+    }
 }
 
 pub async fn handle_overlay_message(
@@ -229,14 +232,9 @@ pub async fn handle_overlay_message(
 mod tests {
     use crate::{
         config::node_config::ConstraintConfig,
-        conformance_checking::tcp_handler::{
-            handle_cc_message, handle_cli_message, handle_td_message,
-        },
+        conformance_checking::tcp_handler::{handle_cc_message, handle_cli_message},
         network::{
-            message_types::{
-                CCMessage, CliTestMessage, MessageKind, PeerMessagePayload,
-                TerminationDetectionMessage,
-            },
+            message_types::{CCMessage, CliTestMessage, MessageKind, PeerMessagePayload},
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
@@ -478,7 +476,9 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
         let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2, tx3);
+        let (tx4, _rx4) = tokio::sync::mpsc::channel(16);
+        let (tx5, _rx5) = tokio::sync::mpsc::channel(16);
+        let state = AppState::new(config, tx, tx2, tx3, tx4, tx5);
 
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -525,23 +525,5 @@ mod tests {
         let state = make_state(21080);
         let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), Utc::now());
         handle_cc_message(msg, state, MessageId::new_v4(), Some(RequestId::new_v4())).await;
-    }
-
-    // ----------------------------------------------------------------
-    // stub handlers
-    // ----------------------------------------------------------------
-
-    /// Stub handlers must not panic regardless of kind.
-    #[tokio::test]
-    async fn td_handler_does_not_panic() {
-        let state = make_state(21090);
-        handle_td_message(
-            TerminationDetectionMessage {},
-            state.clone(),
-            Uuid::new_v4(),
-            MessageKind::FireAndForget,
-            None,
-        )
-        .await;
     }
 }

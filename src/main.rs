@@ -57,8 +57,20 @@ async fn main() {
         }
     };
     let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
+    // create local end signal channel
+    let (local_end_signal_tx, local_end_signal_rx) =
+        mpsc::channel(config.case_end_gossip.local_end_signal_mpsc_channel_size);
+    let (gossip_msg_q_tx, gossip_msg_q_rx) =
+        mpsc::channel(config.case_end_gossip.gossip_message_queue_size);
 
-    let state = AppState::new(config, event_q_tx, loopback_q_tx, sink_tx);
+    let state = AppState::new(
+        config,
+        event_q_tx,
+        loopback_q_tx,
+        sink_tx,
+        local_end_signal_tx,
+        gossip_msg_q_tx,
+    );
 
     setup_tcp_channels(state.clone()).await;
 
@@ -85,6 +97,11 @@ async fn main() {
     }
 
     distributed_online_cc::app::overlay_manager::spawn_overlay_task(state.clone());
+    distributed_online_cc::app::case_end_gossip::spawn_case_end_gossip_manager(
+        state.clone(),
+        local_end_signal_rx,
+        gossip_msg_q_rx,
+    );
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();

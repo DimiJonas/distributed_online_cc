@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::node_config::{
-        ConstraintConfig, NodeConfig, OverlayConfig, ResultBufferConfig, TcpChannelConfig,
+        CEGossipConfig, ConstraintConfig, NodeConfig, OverlayConfig, ResultBufferConfig,
+        TcpChannelConfig,
     },
     network::message_types,
     types::PeerId,
@@ -33,7 +34,7 @@ impl NodeConfigBuilder {
         Self { config }
     }
 
-    // ---- identity & addressing (new — what gen-config needs) ----
+    // ---- identity & addressing (needed especially for gen-config binary) ----
     pub fn node_id(mut self, id: PeerId) -> Self {
         self.config.node_id = id;
         self
@@ -59,13 +60,13 @@ impl NodeConfigBuilder {
         self
     }
 
-    /// Kept for existing tests: TCP listen from a localhost port.
+    /// for testing: TCP listen from a localhost port
     pub fn port(mut self, port: u16) -> Self {
         self.config.tcp_listen_address = format!("127.0.0.1:{}", port).parse().unwrap();
         self
     }
 
-    // ---- overlay / CYCLON knobs (new) ----
+    // ---- overlay / CYCLON knobs ----
     pub fn overlay(mut self, o: OverlayConfig) -> Self {
         self.config.overlay = o;
         self
@@ -87,7 +88,35 @@ impl NodeConfigBuilder {
         self
     }
 
-    // ---- existing constraint-layer setters (unchanged) ----
+    // ---- gossip knobs ----
+    pub fn gossip(mut self, g: CEGossipConfig) -> Self {
+        self.config.case_end_gossip = g;
+        self
+    }
+    pub fn case_end_gossip_ttl(mut self, d: Duration) -> Self {
+        self.config.case_end_gossip.case_end_propagation_ttl = d;
+        self
+    }
+    pub fn anti_entropy_interval(mut self, d: Duration) -> Self {
+        self.config.case_end_gossip.anti_entropy_interval = d;
+        self
+    }
+    pub fn fanout(mut self, n: usize) -> Self {
+        self.config.case_end_gossip.fanout = n;
+        self
+    }
+    pub fn local_end_signal_mpsc_channel_size(mut self, n: usize) -> Self {
+        self.config
+            .case_end_gossip
+            .local_end_signal_mpsc_channel_size = n;
+        self
+    }
+    pub fn gossip_message_queue_size(mut self, n: usize) -> Self {
+        self.config.case_end_gossip.gossip_message_queue_size = n;
+        self
+    }
+
+    // ---- existing constraint-layer setters ----
     pub fn constraints(mut self, c: Vec<ConstraintConfig>) -> Self {
         self.config.constraints = c;
         self
@@ -98,10 +127,6 @@ impl NodeConfigBuilder {
     }
     pub fn grace_period(mut self, p: Duration) -> Self {
         self.config.case_end_grace_period = p;
-        self
-    }
-    pub fn retention_period(mut self, p: Duration) -> Self {
-        self.config.case_retention_period = p;
         self
     }
     pub fn default_buffer(mut self, b: ResultBufferConfig) -> Self {
@@ -136,7 +161,6 @@ pub fn make_base_config() -> NodeConfig {
         result_sink_addresses: None,
         result_sink: None,
         case_end_grace_period: Duration::from_secs(10),
-        case_retention_period: Duration::from_secs(15),
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_mpsc_channel_size: 256,
@@ -158,6 +182,13 @@ pub fn make_base_config() -> NodeConfig {
             shuffle_length: 4,
             shuffle_interval: Duration::from_mins(10),
             idle_timeout: None,
+        },
+        case_end_gossip: CEGossipConfig {
+            anti_entropy_interval: Duration::from_mins(5),
+            case_end_propagation_ttl: Duration::from_secs(15),
+            fanout: 4,
+            gossip_message_queue_size: 1024,
+            local_end_signal_mpsc_channel_size: 64,
         },
     };
     message_types::init(config.clone());

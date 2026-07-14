@@ -57,6 +57,10 @@ impl PeerCache {
             .collect()
     }
 
+    pub fn sample_addresses(&self, amount: usize, rng: &mut impl rand::Rng) -> Vec<SocketAddr> {
+        self.peers.keys().copied().sample(rng, amount)
+    }
+
     /// updates the peer cache as described in CYCLON:
     /// 1. discard entries pointing at self
     /// 2. discard entries already contained in the cache
