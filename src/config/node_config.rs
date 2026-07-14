@@ -16,8 +16,6 @@ pub struct NodeConfig {
     pub unix_socket: String,
     #[serde(default = "default_log_file")]
     pub log_file: String,
-    #[serde(with = "humantime_serde", default = "default_message_ttl")]
-    pub message_ttl: Duration,
     #[serde(default = "default_event_q_size")]
     pub event_queue_size: usize,
     #[serde(default = "default_loopback_q_size")]
@@ -94,6 +92,8 @@ pub struct TcpChannelConfig {
     pub peer_manager_mpsc_channel_size: usize,
     #[serde(default = "default_tcp_message_queue_size")]
     pub message_queue_size: usize,
+    #[serde(with = "humantime_serde", default = "default_internal_message_ttl")]
+    pub internal_message_ttl: Duration,
     #[serde(
         default = "default_tcp_reconnect_start_delay",
         with = "humantime_serde"
@@ -118,6 +118,7 @@ impl Default for TcpChannelConfig {
             tcp_channel_mpsc_channel_size: default_tcp_channel_mpsc_channel_size(),
             peer_manager_mpsc_channel_size: default_peer_manager_mpsc_channel_size(),
             message_queue_size: default_tcp_message_queue_size(),
+            internal_message_ttl: default_internal_message_ttl(),
             reconnect_start_delay: default_tcp_reconnect_start_delay(),
             reconnect_max_delay: default_tcp_reconnect_max_delay(),
             wait_for_response_timeout: default_wait_for_response_timeout(),
@@ -438,7 +439,7 @@ fn default_log_file() -> String {
     "app.log".to_string()
 }
 
-fn default_message_ttl() -> Duration {
+fn default_internal_message_ttl() -> Duration {
     Duration::from_secs(30)
 }
 

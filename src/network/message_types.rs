@@ -20,7 +20,7 @@ use crate::{
 pub static MESSAGE_TTL: OnceLock<Duration> = OnceLock::new();
 
 pub fn init(config: NodeConfig) {
-    match MESSAGE_TTL.set(config.message_ttl) {
+    match MESSAGE_TTL.set(config.tcp_channels.internal_message_ttl) {
         Ok(()) => {}
         Err(_) => {
             log::warn!("message TTL already initialized");
