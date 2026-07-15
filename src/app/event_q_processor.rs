@@ -64,7 +64,7 @@ mod tests {
 
     use crate::types::ConstraintHandlerId;
     use crate::util::test_tools::{
-        make_state_with_config_and_event_q, make_state_with_event_q, make_traced_event,
+        make_state_with_config_and_event_q, make_state_with_event_q, make_traced_event_with_fixed_timestamp,
     };
     use crate::{
         app::event_q_processor::spawn_event_processor, config::node_config::ConstraintConfig,
@@ -83,7 +83,7 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
-            .send(make_traced_event("case-new", "some_event"))
+            .send(make_traced_event_with_fixed_timestamp("case-new", "some_event"))
             .await
             .unwrap();
 
@@ -102,11 +102,11 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
-            .send(make_traced_event("case-dup", "e1"))
+            .send(make_traced_event_with_fixed_timestamp("case-dup", "e1"))
             .await
             .unwrap();
         event_tx
-            .send(make_traced_event("case-dup", "e2"))
+            .send(make_traced_event_with_fixed_timestamp("case-dup", "e2"))
             .await
             .unwrap();
 
@@ -125,7 +125,7 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         for id in ["alpha", "beta", "gamma"] {
-            event_tx.send(make_traced_event(id, "e")).await.unwrap();
+            event_tx.send(make_traced_event_with_fixed_timestamp(id, "e")).await.unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -168,7 +168,7 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
-            .send(make_traced_event("case-dispatch", "produce"))
+            .send(make_traced_event_with_fixed_timestamp("case-dispatch", "produce"))
             .await
             .unwrap();
 

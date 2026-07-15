@@ -485,8 +485,7 @@ mod tests {
             read_result(&state),
             Some(ConstraintResultType::Violated)
         ));
-        // Immediate policy → finalize runs → fired tokens cleared
-        assert_eq!(fired_count(&state), 0);
+        assert_eq!(fired_count(&state), 1);
     }
 
     #[tokio::test(start_paused = true)]

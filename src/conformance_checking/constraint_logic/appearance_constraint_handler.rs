@@ -267,7 +267,8 @@ mod tests {
         state::app_state::AppState,
         types::{ConstraintHandlerId, ConstraintResultType},
         util::test_tools::{
-            make_config_with_constraints_and_port, make_state_from_config, make_traced_event,
+            make_config_with_constraints_and_port, make_state_from_config,
+            make_traced_event_with_fixed_timestamp,
         },
     };
 
@@ -351,10 +352,16 @@ mod tests {
         let case = "c3";
         let state = counter_state(25020, case, MinMaxMode::Min, 2);
         let h = handler(MinMaxMode::Min, 2);
-        h.handle_event(&make_traced_event(case, EID), state.clone())
-            .await;
-        h.handle_event(&make_traced_event(case, EID), state.clone())
-            .await;
+        h.handle_event(
+            &make_traced_event_with_fixed_timestamp(case, EID),
+            state.clone(),
+        )
+        .await;
+        h.handle_event(
+            &make_traced_event_with_fixed_timestamp(case, EID),
+            state.clone(),
+        )
+        .await;
         h.handle_message(state.clone(), trigger(case), Some(Uuid::new_v4()))
             .await;
         assert!(result_type(&state, case).is_none());
@@ -366,10 +373,16 @@ mod tests {
         let case = "c4";
         let state = counter_state(25030, case, MinMaxMode::Min, 3);
         let h = handler(MinMaxMode::Min, 3);
-        h.handle_event(&make_traced_event(case, EID), state.clone())
-            .await;
-        h.handle_event(&make_traced_event(case, EID), state.clone())
-            .await;
+        h.handle_event(
+            &make_traced_event_with_fixed_timestamp(case, EID),
+            state.clone(),
+        )
+        .await;
+        h.handle_event(
+            &make_traced_event_with_fixed_timestamp(case, EID),
+            state.clone(),
+        )
+        .await;
         h.handle_message(state.clone(), trigger(case), Some(Uuid::new_v4()))
             .await;
         assert!(matches!(
@@ -386,8 +399,11 @@ mod tests {
         let state = counter_state(25040, case, MinMaxMode::Max, 2);
         let h = handler(MinMaxMode::Max, 2);
         for _ in 0..5 {
-            h.handle_event(&make_traced_event(case, EID), state.clone())
-                .await;
+            h.handle_event(
+                &make_traced_event_with_fixed_timestamp(case, EID),
+                state.clone(),
+            )
+            .await;
         }
         h.handle_case_end(&case.to_string(), state.clone()).await;
         assert!(

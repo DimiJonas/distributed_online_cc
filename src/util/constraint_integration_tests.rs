@@ -2,8 +2,13 @@
 mod tests {
     use std::time::Duration;
 
+    use tokio::{sync::mpsc, time::sleep};
+
     use crate::{
-        app::event_q_processor::spawn_event_processor,
+        app::{
+            case_end_gossip::spawn_case_end_gossip_manager,
+            event_q_processor::spawn_event_processor,
+        },
         config::{
             config_builder::NodeConfigBuilder,
             node_config::{
@@ -12,7 +17,7 @@ mod tests {
             },
         },
         types::ConstraintHandlerId,
-        util::test_tools::make_traced_event,
+        util::test_tools::{make_traced_event, make_traced_event_with_fixed_timestamp},
     };
 
     /// Test A — with seven constraints all configured on the SAME event_id, the
@@ -81,7 +86,10 @@ mod tests {
         );
 
         // push one event through the real processor
-        event_tx.send(make_traced_event(CASE, EVENT)).await.unwrap();
+        event_tx
+            .send(make_traced_event_with_fixed_timestamp(CASE, EVENT))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // each ResponseProducer left an open token under its own constraint_id
@@ -138,62 +146,68 @@ mod tests {
 
         let constraint_ids = ["r1", "r2", "r3", "a1", "a2", "o1"];
 
-        let (state, event_tx, event_rx) = NodeConfigBuilder::new_base_config()
-            .port(31010)
-            // long grace so results are still readable when we assert; the test
-            // returns well before it elapses (the background task is dropped).
-            .grace_period(Duration::from_secs(5))
-            .case_end_gossip_ttl(Duration::from_millis(50))
-            .constraints(vec![
-                ConstraintConfig::ResponseProducer {
-                    constraint_id: "r1".to_string(),
-                    event_id: EVENT.to_string(),
-                },
-                ConstraintConfig::ResponseProducer {
-                    constraint_id: "r2".to_string(),
-                    event_id: EVENT.to_string(),
-                },
-                ConstraintConfig::ResponseProducer {
-                    constraint_id: "r3".to_string(),
-                    event_id: EVENT.to_string(),
-                },
-                ConstraintConfig::AppearanceCounter {
-                    constraint_id: "a1".to_string(),
-                    event_id: EVENT.to_string(),
-                    mode: MinMaxMode::Max,
-                    frequency: 5,
-                    reset: AppearanceCounterReset::Keep,
-                },
-                ConstraintConfig::AppearanceCounter {
-                    constraint_id: "a2".to_string(),
-                    event_id: EVENT.to_string(),
-                    mode: MinMaxMode::Max,
-                    frequency: 5,
-                    reset: AppearanceCounterReset::Keep,
-                },
-                ConstraintConfig::OrderFirst {
-                    constraint_id: "o1".to_string(),
-                    event_id: EVENT.to_string(),
-                },
-                // drives the real case-closing task when the "end" event arrives
-                ConstraintConfig::EndActivity {
-                    constraint_id: "ea".to_string(),
-                    event_id: END.to_string(),
-                },
-            ])
-            .build_state_with_event_q();
+        let (state, event_tx, event_rx, _local_end_tx, local_end_rx) =
+            NodeConfigBuilder::new_base_config()
+                .port(31010)
+                // long grace so results are still readable when we assert; the test
+                // returns well before it elapses (the background task is dropped).
+                .grace_period(Duration::from_secs(5))
+                .case_end_gossip_ttl(Duration::from_secs(5))
+                .constraints(vec![
+                    ConstraintConfig::ResponseProducer {
+                        constraint_id: "r1".to_string(),
+                        event_id: EVENT.to_string(),
+                    },
+                    ConstraintConfig::ResponseProducer {
+                        constraint_id: "r2".to_string(),
+                        event_id: EVENT.to_string(),
+                    },
+                    ConstraintConfig::ResponseProducer {
+                        constraint_id: "r3".to_string(),
+                        event_id: EVENT.to_string(),
+                    },
+                    ConstraintConfig::AppearanceCounter {
+                        constraint_id: "a1".to_string(),
+                        event_id: EVENT.to_string(),
+                        mode: MinMaxMode::Max,
+                        frequency: 5,
+                        reset: AppearanceCounterReset::Keep,
+                    },
+                    ConstraintConfig::AppearanceCounter {
+                        constraint_id: "a2".to_string(),
+                        event_id: EVENT.to_string(),
+                        mode: MinMaxMode::Max,
+                        frequency: 5,
+                        reset: AppearanceCounterReset::Keep,
+                    },
+                    ConstraintConfig::OrderFirst {
+                        constraint_id: "o1".to_string(),
+                        event_id: EVENT.to_string(),
+                    },
+                    // drives the real case-closing task when the "end" event arrives
+                    ConstraintConfig::EndActivity {
+                        constraint_id: "ea".to_string(),
+                        event_id: END.to_string(),
+                    },
+                ])
+                .build_state_with_event_q_and_local_end_q();
         spawn_event_processor(state.clone(), event_rx);
+        let (_g_msg_tx, g_msg_rx) = mpsc::channel(16);
+        spawn_case_end_gossip_manager(state.clone(), local_end_rx, g_msg_rx);
 
         // one real event reaches every handler on this event_id (FIFO: processed
         // before the end event below)
-        event_tx.send(make_traced_event(CASE, EVENT)).await.unwrap();
+        event_tx
+            .send(make_traced_event_with_fixed_timestamp(CASE, EVENT))
+            .await
+            .unwrap();
         // then end the case for real -> EndActivity spawns the case-closing task,
         // which runs handle_case_end on every handler
         event_tx.send(make_traced_event(CASE, END)).await.unwrap();
 
         // give the processor + closing task time to run handle_case_end (well under
         // the 5s grace period, so results are still in the store)
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        sleep(Duration::from_millis(200)).await;
 
         // every configured result-producing constraint left a result — none missing
         let results = state.cc_results.lock().unwrap();

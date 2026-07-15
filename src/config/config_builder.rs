@@ -16,8 +16,11 @@ use crate::{
 #[cfg(test)]
 use crate::{
     state::app_state::AppState,
-    types::TracedEvent,
-    util::test_tools::{make_state_from_config, make_state_with_config_and_event_q},
+    types::{CaseId, EventTime, TracedEvent},
+    util::test_tools::{
+        make_state_from_config, make_state_with_config_and_event_q,
+        make_state_with_config_and_event_q_and_local_end_q,
+    },
 };
 
 pub struct NodeConfigBuilder {
@@ -215,5 +218,25 @@ impl NodeConfigBuilder {
         let (event_tx, event_rx) = mpsc::channel(64);
         let state = make_state_with_config_and_event_q(self.config, event_tx.clone());
         (state, event_tx, event_rx)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn build_state_with_event_q_and_local_end_q(
+        self,
+    ) -> (
+        AppState,
+        mpsc::Sender<TracedEvent>,
+        mpsc::Receiver<TracedEvent>,
+        mpsc::Sender<(CaseId, EventTime)>,
+        mpsc::Receiver<(CaseId, EventTime)>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (local_end_tx, local_end_rx) = mpsc::channel(64);
+        let state = make_state_with_config_and_event_q_and_local_end_q(
+            self.config,
+            event_tx.clone(),
+            local_end_tx.clone(),
+        );
+        (state, event_tx, event_rx, local_end_tx, local_end_rx)
     }
 }

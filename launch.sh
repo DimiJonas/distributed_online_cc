@@ -68,7 +68,7 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
-# ---- ensure log dir exists (main.rs also does this, but do it up front) ----
+# ---- ensure log dir exists ----
 mkdir -p "$LOG_DIR"
 
 # ---- tmux session ----

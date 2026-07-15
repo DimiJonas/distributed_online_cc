@@ -329,7 +329,8 @@ mod tests {
         types::{ConstraintHandlerId, ConstraintResultType, PeerAddress},
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
-            make_counter_token, make_state_from_config, make_traced_event, register_manager,
+            make_counter_token, make_state_from_config, make_traced_event_with_fixed_timestamp,
+            register_manager,
         },
     };
 
@@ -415,7 +416,7 @@ mod tests {
         let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 1, peers);
-        let ev = make_traced_event(case, EID);
+        let ev = make_traced_event_with_fixed_timestamp(case, EID);
         let run = h.handle_event(&ev, state.clone());
         let mock =
             answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 0));
@@ -435,7 +436,7 @@ mod tests {
         let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 2, peers);
-        let ev = make_traced_event(case, EID);
+        let ev = make_traced_event_with_fixed_timestamp(case, EID);
         let run = h.handle_event(&ev, state.clone());
         let mock =
             answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3));
@@ -452,7 +453,7 @@ mod tests {
         let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
         let h = handler(MinMaxMode::Min, 3, peers);
-        let ev = make_traced_event(case, EID);
+        let ev = make_traced_event_with_fixed_timestamp(case, EID);
         let run = h.handle_event(&ev, state.clone());
         let mock =
             answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 2));

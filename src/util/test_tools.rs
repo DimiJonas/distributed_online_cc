@@ -17,7 +17,7 @@ use crate::{
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
-    types::{ConstraintType, PeerAddress, Token, TokenPayload, TracedEvent},
+    types::{CaseId, ConstraintType, EventTime, PeerAddress, Token, TokenPayload, TracedEvent},
 };
 use std::{collections::HashMap, net::SocketAddr};
 
@@ -101,6 +101,24 @@ pub fn make_state_with_config_and_event_q(
     )
 }
 
+pub fn make_state_with_config_and_event_q_and_local_end_q(
+    config: NodeConfig,
+    event_tx: mpsc::Sender<TracedEvent>,
+    local_end_tx: mpsc::Sender<(CaseId, EventTime)>,
+) -> AppState {
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    let (sink_tx, _sink_rx) = mpsc::channel(16);
+    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
+    AppState::new(
+        config,
+        event_tx,
+        loopback_tx,
+        sink_tx,
+        local_end_tx,
+        gossip_msg_q_tx,
+    )
+}
+
 pub fn make_state_from_config(config: NodeConfig) -> AppState {
     let (event_tx, _event_rx) = mpsc::channel(16);
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
@@ -155,6 +173,41 @@ pub fn cli_msg(port: u16) -> PeerMessage {
 }
 
 pub fn make_traced_event(case_id: &str, event_name: &str) -> TracedEvent {
+    let xes = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" ?>
+<log>
+  <trace>
+    <string key="concept:name" value="{case_id}"/>
+    <event>
+      <string key="concept:name" value="{event_name}"/>
+    </event>
+  </trace>
+</log>"#
+    );
+    let buf = BytesMut::from(xes.as_bytes());
+    let opts = XESImportOptions {
+        sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
+        verbose: false,
+        ..XESImportOptions::default()
+    };
+    let log = import_xes_slice(&buf, false, opts).unwrap();
+    let trace = log.traces.into_iter().next().unwrap();
+
+    let case_id_val = trace
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let event = trace.events.into_iter().next().unwrap();
+    TracedEvent {
+        case_id: case_id_val,
+        event,
+    }
+}
+
+pub fn make_traced_event_with_fixed_timestamp(case_id: &str, event_name: &str) -> TracedEvent {
     let xes = format!(
         r#"<?xml version="1.0" encoding="UTF-8" ?>
 <log>
