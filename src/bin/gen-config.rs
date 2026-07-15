@@ -25,6 +25,24 @@ impl Default for CyclonParams {
     }
 }
 
+#[derive(Clone)]
+struct GossipParams {
+    anti_entropy_interval: Duration,
+    anti_entropy_fanout: usize,
+    case_end_propagation_ttl: Duration,
+    push_fanout: usize,
+}
+impl Default for GossipParams {
+    fn default() -> Self {
+        Self {
+            anti_entropy_interval: Duration::from_secs(4),
+            anti_entropy_fanout: 1,
+            case_end_propagation_ttl: Duration::from_mins(3),
+            push_fanout: 4,
+        }
+    }
+}
+
 // string config skleton
 // loading the config from a string utilizes the default values defined for the deserializer in the node config module
 fn app_default_base() -> NodeConfig {
@@ -144,11 +162,17 @@ fn bootstrap_ids(id: u64, n: u64, ring_degree: u64) -> Vec<u64> {
 }
 
 // creates the final config and writes it to disk
-fn generate(n: u64, params: &CyclonParams, addr: &Addressing, out_dir: &Path) {
+fn generate(
+    n: u64,
+    cyclon_params: &CyclonParams,
+    gossip_params: &GossipParams,
+    addr: &Addressing,
+    out_dir: &Path,
+) {
     let base = app_default_base();
     std::fs::create_dir_all(out_dir).unwrap();
     for id in 0..n {
-        let peers = bootstrap_ids(id, n, params.ring_degree)
+        let peers = bootstrap_ids(id, n, cyclon_params.ring_degree)
             .into_iter()
             .map(|p| addr.reachable_overlay(p))
             .collect();
@@ -160,13 +184,17 @@ fn generate(n: u64, params: &CyclonParams, addr: &Addressing, out_dir: &Path) {
             .initial_peers(peers)
             .unix_socket(format!("/tmp/event_listener_{id}.sock"))
             .log_file(format!("node-{id}.log"))
-            .shuffle_interval(params.shuffle_interval)
-            .shuffle_length(params.shuffle_length)
-            .max_peer_cache_size(params.cache_size)
-            .idle_timeout(params.idle_timeout)
+            .shuffle_interval(cyclon_params.shuffle_interval)
+            .shuffle_length(cyclon_params.shuffle_length)
+            .max_peer_cache_size(cyclon_params.cache_size)
+            .idle_timeout(cyclon_params.idle_timeout)
+            .anti_entropy_interval(gossip_params.anti_entropy_interval)
+            .anti_entropy_fanout(gossip_params.anti_entropy_fanout)
+            .case_end_gossip_ttl(gossip_params.case_end_propagation_ttl)
+            .push_fanout(gossip_params.push_fanout)
             .build();
 
-        let path = out_dir.join(format!("node{id}.toml"));
+        let path = out_dir.join(format!("node-{id}-config.toml"));
         std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
     }
 }
@@ -195,38 +223,66 @@ struct Args {
     cache_size: Option<usize>,
     #[arg(long)]
     ring_degree: Option<u64>,
+    #[arg(long)]
+    anti_entropy_secs: Option<u64>,
+    #[arg(long)]
+    anti_entropy_fanout: Option<usize>,
+    #[arg(long)]
+    case_end_propagation_ttl: Option<u64>,
+    #[arg(long)]
+    push_fanout: Option<usize>,
 }
 
 fn main() {
-    let a = Args::parse();
-    let mut p = CyclonParams::default();
-    if let Some(s) = a.shuffle_secs {
-        p.shuffle_interval = Duration::from_secs(s);
+    let args: Args = Args::parse();
+    let mut cyclon_params = CyclonParams::default();
+    if let Some(ss) = args.shuffle_secs {
+        cyclon_params.shuffle_interval = Duration::from_secs(ss);
     }
-    if let Some(v) = a.shuffle_length {
-        p.shuffle_length = v;
+    if let Some(sl) = args.shuffle_length {
+        cyclon_params.shuffle_length = sl;
     }
-    if let Some(v) = a.cache_size {
-        p.cache_size = v;
+    if let Some(cs) = args.cache_size {
+        cyclon_params.cache_size = cs;
     }
-    if let Some(v) = a.ring_degree {
-        p.ring_degree = v;
+    if let Some(rd) = args.ring_degree {
+        cyclon_params.ring_degree = rd;
     }
 
-    let addressing = match a.mode.as_str() {
+    let mut gossip_params = GossipParams::default();
+    if let Some(aes) = args.anti_entropy_secs {
+        gossip_params.anti_entropy_interval = Duration::from_secs(aes);
+    }
+    if let Some(aef) = args.anti_entropy_fanout {
+        gossip_params.anti_entropy_fanout = aef;
+    }
+    if let Some(pf) = args.push_fanout {
+        gossip_params.push_fanout = pf;
+    }
+    if let Some(cept) = args.case_end_propagation_ttl {
+        gossip_params.case_end_propagation_ttl = Duration::from_secs(cept);
+    }
+
+    let addressing = match args.mode.as_str() {
         "local" => Addressing::Local {
             ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            overlay_base: a.overlay_port,
-            conformance_base: a.conformance_port,
+            overlay_base: args.overlay_port,
+            conformance_base: args.conformance_port,
         },
         "distributed" => Addressing::Distributed {
-            hosts: a.hosts,
-            overlay_port: a.overlay_port,
-            conformance_port: a.conformance_port,
-            bind_all: a.bind_all,
+            hosts: args.hosts,
+            overlay_port: args.overlay_port,
+            conformance_port: args.conformance_port,
+            bind_all: args.bind_all,
         },
         m => panic!("unknown mode: {m}"),
     };
-    let n = addressing.node_count(a.nodes); // distributed derives n from host count
-    generate(n, &p, &addressing, &a.out_dir);
+    let n = addressing.node_count(args.nodes); // distributed derives n from host count
+    generate(
+        n,
+        &cyclon_params,
+        &gossip_params,
+        &addressing,
+        &args.out_dir,
+    );
 }

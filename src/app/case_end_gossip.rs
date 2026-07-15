@@ -36,7 +36,7 @@ pub fn spawn_case_end_gossip_manager(
                     };
                     let addresses = {
                         let peer_cache = state.peer_cache.lock().unwrap();
-                        peer_cache.sample_addresses(1, &mut rand::rng())
+                        peer_cache.sample_addresses(state.config.case_end_gossip.anti_entropy_fanout, &mut rand::rng())
                     };
                     let digest_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_digest(state.config.overlay.listen_address, digest));
                     for address in addresses {
@@ -81,7 +81,7 @@ async fn initiate_push_gossip(data: Vec<(CaseId, EventTime)>, state: AppState) {
 
     let addresses = {
         let peer_cache = state.peer_cache.lock().unwrap();
-        peer_cache.sample_addresses(state.config.case_end_gossip.fanout, &mut rand::rng())
+        peer_cache.sample_addresses(state.config.case_end_gossip.push_fanout, &mut rand::rng())
     };
 
     let push_gossip_message = PeerMessage::ce_gossip(CEGossipMessage::new_push(

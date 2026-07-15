@@ -101,8 +101,12 @@ impl NodeConfigBuilder {
         self.config.case_end_gossip.anti_entropy_interval = d;
         self
     }
-    pub fn fanout(mut self, n: usize) -> Self {
-        self.config.case_end_gossip.fanout = n;
+    pub fn anti_entropy_fanout(mut self, n: usize) -> Self {
+        self.config.case_end_gossip.anti_entropy_fanout = n;
+        self
+    }
+    pub fn push_fanout(mut self, n: usize) -> Self {
+        self.config.case_end_gossip.push_fanout = n;
         self
     }
     pub fn local_end_signal_mpsc_channel_size(mut self, n: usize) -> Self {
@@ -185,8 +189,9 @@ pub fn make_base_config() -> NodeConfig {
         },
         case_end_gossip: CEGossipConfig {
             anti_entropy_interval: Duration::from_mins(5),
+            anti_entropy_fanout: 1,
             case_end_propagation_ttl: Duration::from_secs(15),
-            fanout: 4,
+            push_fanout: 4,
             gossip_message_queue_size: 1024,
             local_end_signal_mpsc_channel_size: 64,
         },

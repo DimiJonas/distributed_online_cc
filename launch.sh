@@ -44,8 +44,8 @@ done
 # ---- generate (clearing stale) ----
 if $GENERATE; then
   mkdir -p "$CONFIG_DIR"
-  echo "regenerating $NODES configs in $CONFIG_DIR (removing old node*.toml)"
-  find "$CONFIG_DIR" -maxdepth 1 -name 'node*.toml' -delete
+  echo "regenerating $NODES configs in $CONFIG_DIR (removing old node-*-config.toml)"
+  find "$CONFIG_DIR" -maxdepth 1 -name 'node-*-config.toml' -delete
   "${GEN_CMD[@]}" --nodes "$NODES" --mode local --out-dir "$CONFIG_DIR"
 fi
 
@@ -56,9 +56,9 @@ if [[ ! -d "$CONFIG_DIR" ]]; then
 fi
 CONFIGS=()
 while IFS= read -r f; do CONFIGS+=("$f"); done \
-  < <(find "$CONFIG_DIR" -maxdepth 1 -name 'node*.toml' | sort -V)
+  < <(find "$CONFIG_DIR" -maxdepth 1 -name '*-config.toml' | sort -V)
 if [[ ${#CONFIGS[@]} -eq 0 ]]; then
-  echo "no node*.toml in '$CONFIG_DIR' (use --generate to create them)" >&2
+  echo "no *-config.toml in '$CONFIG_DIR' (use --generate to create them)" >&2
   exit 1
 fi
 

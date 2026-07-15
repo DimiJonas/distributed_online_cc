@@ -157,10 +157,12 @@ pub struct OverlayConfig {
 pub struct CEGossipConfig {
     #[serde(with = "humantime_serde", default = "default_anti_entropy_interval")]
     pub anti_entropy_interval: Duration,
+    #[serde(default = "default_anti_entropy_fanout")]
+    pub anti_entropy_fanout: usize,
     #[serde(with = "humantime_serde", default = "default_case_end_propagation_ttl")]
     pub case_end_propagation_ttl: Duration,
-    #[serde(default = "default_fanout")]
-    pub fanout: usize,
+    #[serde(default = "default_push_fanout")]
+    pub push_fanout: usize,
     #[serde(default = "default_local_end_signal_mpsc_channel_size")]
     pub local_end_signal_mpsc_channel_size: usize,
     #[serde(default = "default_gossip_message_queue_size")]
@@ -171,8 +173,9 @@ impl Default for CEGossipConfig {
     fn default() -> Self {
         Self {
             anti_entropy_interval: default_anti_entropy_interval(),
+            anti_entropy_fanout: default_anti_entropy_fanout(),
             case_end_propagation_ttl: default_case_end_propagation_ttl(),
-            fanout: default_fanout(),
+            push_fanout: default_push_fanout(),
             gossip_message_queue_size: default_gossip_message_queue_size(),
             local_end_signal_mpsc_channel_size: default_local_end_signal_mpsc_channel_size(),
         }
@@ -549,7 +552,7 @@ fn default_anti_entropy_interval() -> Duration {
     Duration::from_secs(5)
 }
 
-fn default_fanout() -> usize {
+fn default_push_fanout() -> usize {
     4
 }
 
@@ -559,6 +562,10 @@ fn default_local_end_signal_mpsc_channel_size() -> usize {
 
 fn default_gossip_message_queue_size() -> usize {
     1024
+}
+
+fn default_anti_entropy_fanout() -> usize {
+    1
 }
 
 // deserialize a value that can be int or float
