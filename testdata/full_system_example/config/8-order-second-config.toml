@@ -1,0 +1,19 @@
+node_id = 8
+tcp_listen_address = "127.0.0.1:19008"
+unix_socket = "/tmp/event_listener_os.sock"
+log_file = "order-second.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "OrderSecond"
+constraint_id = "order_test"
+event_id = "order_second_event"
+order_first_peers = ["127.0.0.1:19007"]
+
+[overlay]
+listen_address = "127.0.0.1:9008"
+initial_peers = ["127.0.0.1:9005", "127.0.0.1:9006", "127.0.0.1:9007", "127.0.0.1:9009", "127.0.0.1:9010", "127.0.0.1:9012", "127.0.0.1:9016"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

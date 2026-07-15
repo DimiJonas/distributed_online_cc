@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS results (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     case_id       TEXT NOT NULL REFERENCES cases(case_id),
     constraint_id TEXT NOT NULL REFERENCES constraints(constraint_id),
-    constraint_type TEXT NOT NULL REFERENCES constraints(constraint_type),
     result        TEXT NOT NULL CHECK (result IN ('Violated', 'TemporarilyViolated', 'Satisfied')),
     info          TEXT NOT NULL,
     created_at    TEXT NOT NULL

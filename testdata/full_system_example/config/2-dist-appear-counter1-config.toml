@@ -1,0 +1,19 @@
+node_id = 2
+tcp_listen_address = "127.0.0.1:19002"
+unix_socket = "/tmp/event_listener_dac1.sock"
+log_file = "distributed_appearance_counter1.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter1_event"
+reset = "Zero"
+
+[overlay]
+listen_address = "127.0.0.1:9002"
+initial_peers = ["127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9003", "127.0.0.1:9004", "127.0.0.1:9006", "127.0.0.1:9010", "127.0.0.1:9018"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

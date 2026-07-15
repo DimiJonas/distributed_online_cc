@@ -1,0 +1,19 @@
+node_id = 17
+tcp_listen_address = "127.0.0.1:19017"
+unix_socket = "/tmp/event_listener_tstop.sock"
+log_file = "time-stop.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "TimeStop"
+constraint_id = "time_test"
+event_id = "time_stop_event"
+time_start_peers = ["127.0.0.1:19016"]
+
+[overlay]
+listen_address = "127.0.0.1:9017"
+initial_peers = ["127.0.0.1:9000", "127.0.0.1:9002", "127.0.0.1:9006", "127.0.0.1:9014", "127.0.0.1:9015", "127.0.0.1:9016", "127.0.0.1:9018"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

@@ -1,0 +1,161 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8000"
+unix_socket = "/tmp/event_listener.sock"
+event_queue_size = 100
+loopback_queue_size = 100
+log_file = "app.log"
+result_sink_addresses = ["127.0.0.1:8000"]
+case_end_grace_period = "15s"
+case_retention_period = "30s"
+
+[tcp_channels]
+tcp_channel_mpsc_channel_size = 100
+peer_manager_mpsc_channel_size = 256
+message_queue_size = 256
+internal_message_ttl = "30m"
+reconnect_start_delay = "1s"
+reconnect_max_delay = "30s"
+wait_for_response_timeout = "20s"
+max_reconnect_attempts = 20
+connect_timeout = "10s"
+
+[result_sink]
+db_path = "results.db"
+mpsc_channel_size = 1024
+retry_interval = "15s"
+retry_buffer_size = 4096
+
+[overlay]
+listen_address = "127.0.0.1:9000"
+initial_peers = ["127.0.0.1:9001", "127.0.0.1:9002"]
+shuffle_interval = "10s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "1h"
+
+[case_end_gossip]
+anti_entropy_interval = "5s"
+anti_entropy_fanout = 1
+case_end_propagation_ttl = "50s"
+push_fanout = 1
+local_end_signal_mpsc_channel_size = 32
+gossip_message_queue_size = 1024
+
+# fallback for all constraints
+[default_result_buffer]
+policy = "GracePeriod"
+duration = "5s"
+
+# per-constraint overrides
+[result_buffers.time_test]
+policy = "Revocable"
+duration = "10s"
+
+[result_buffers.order_test]
+policy = "Immediate"
+
+[[constraints]]
+constraint_role = "EndActivity"
+constraint_id = "end_activity"
+event_id = "dummy_end_activity"
+
+[[constraints]]
+constraint_role = "AppearanceCounter"
+constraint_id = "appearance_test"
+event_id = "appearance_counter_event"
+mode = "Max"
+frequency = 3
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "AppearanceTrigger"
+constraint_id = "appearance_test"
+event_id = "appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter1_event"
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceTrigger"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001", "127.0.0.1:8002"]
+mode = "Min"
+frequency = 5
+
+[[constraints]]
+constraint_role = "NotCoexistenceA"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_a_event"
+b_peer = "127.0.0.1:8002"
+
+[[constraints]]
+constraint_role = "NotCoexistenceB"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_b_event"
+a_peer = "127.0.0.1:8001"
+
+[[constraints]]
+constraint_role = "OrderFirst"
+constraint_id = "order_test"
+event_id = "order_first_event"
+
+[[constraints]]
+constraint_role = "OrderSecond"
+constraint_id = "order_test"
+event_id = "order_second_event"
+order_first_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "PrecedenceConsumer"
+constraint_id = "precedence_test"
+event_id = "precedence_consumer_event"
+
+[[constraints]]
+constraint_role = "PrecedenceProducer"
+constraint_id = "precedence_test"
+event_id = "precedence_producer_event"
+consumer_peers = ["127.0.0.1:8002"]
+
+[[constraints]]
+constraint_role = "ResponseConsumer"
+constraint_id = "response_test"
+event_id = "response_consumer_event"
+producer_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "ResponseProducer"
+constraint_id = "response_test"
+event_id = "response_producer_event"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_collector_event"
+attribute_key = "lt_value"
+mode = "<"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "TimeStart"
+constraint_id = "time_test"
+event_id = "time_start_event"
+duration = "10s"
+mode = "min"
+
+[[constraints]]
+constraint_role = "TimeStop"
+constraint_id = "time_test"
+event_id = "time_stop_event"
+time_start_peers = ["127.0.0.1:8001"]

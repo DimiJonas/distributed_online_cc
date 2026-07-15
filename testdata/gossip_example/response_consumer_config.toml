@@ -17,4 +17,4 @@ producer_peers = ["127.0.0.1:8001"]
 [case_end_gossip]
 anti_entropy_interval = "5s"
 case_end_propagation_ttl = "50s"
-fanout = 1
+push_fanout = 1

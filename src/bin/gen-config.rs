@@ -19,7 +19,7 @@ impl Default for CyclonParams {
             shuffle_interval: Duration::from_secs(5),
             shuffle_length: 4,
             cache_size: 20,
-            idle_timeout: Some(Duration::from_secs(120)),
+            idle_timeout: None,
             ring_degree: 2,
         }
     }
@@ -224,6 +224,8 @@ struct Args {
     #[arg(long)]
     ring_degree: Option<u64>,
     #[arg(long)]
+    idle_timeout_secs: Option<u64>,
+    #[arg(long)]
     anti_entropy_secs: Option<u64>,
     #[arg(long)]
     anti_entropy_fanout: Option<usize>,
@@ -247,6 +249,9 @@ fn main() {
     }
     if let Some(rd) = args.ring_degree {
         cyclon_params.ring_degree = rd;
+    }
+    if let Some(its) = args.idle_timeout_secs {
+        cyclon_params.idle_timeout = Some(Duration::from_secs(its));
     }
 
     let mut gossip_params = GossipParams::default();

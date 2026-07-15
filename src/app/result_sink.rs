@@ -276,12 +276,11 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
 
     // insert result with info and timestamp into db
     tx.execute(
-        "INSERT INTO results (case_id, constraint_id, constraint_type, result, info, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO results (case_id, constraint_id, result, info, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         rusqlite::params![
             result_message.case_id,
             result_message.constraint_id,
-            result_message.constraint_type.to_string(),
             result_message.result.to_string(),
             result_message.info,
             created_at,

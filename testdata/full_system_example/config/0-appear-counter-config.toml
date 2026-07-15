@@ -1,0 +1,21 @@
+node_id = 0
+tcp_listen_address = "127.0.0.1:19000"
+unix_socket = "/tmp/event_listener_ac.sock"
+log_file = "appearance_counter.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "AppearanceCounter"
+constraint_id = "appearance_test"
+event_id = "appearance_counter_event"
+mode = "Max"
+frequency = 3
+reset = "Zero"
+
+[overlay]
+listen_address = "127.0.0.1:9000"
+initial_peers = ["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9004", "127.0.0.1:9008", "127.0.0.1:9016", "127.0.0.1:9017", "127.0.0.1:9018"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

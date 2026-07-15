@@ -1,0 +1,18 @@
+node_id = 18
+tcp_listen_address = "127.0.0.1:19018"
+unix_socket = "/tmp/event_listener_ea.sock"
+log_file = "end-activity.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "EndActivity"
+constraint_id = "end_activity"
+event_id = "dummy_end_activity"
+
+[overlay]
+listen_address = "127.0.0.1:9018"
+initial_peers = ["127.0.0.1:9000", "127.0.0.1:9001", "127.0.0.1:9003", "127.0.0.1:9007", "127.0.0.1:9015", "127.0.0.1:9016", "127.0.0.1:9017"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

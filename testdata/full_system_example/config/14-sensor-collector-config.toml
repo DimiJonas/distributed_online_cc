@@ -1,0 +1,58 @@
+node_id = 14
+tcp_listen_address = "127.0.0.1:19014"
+unix_socket = "/tmp/event_listener_sc.sock"
+log_file = "sensor_collector.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[overlay]
+listen_address = "127.0.0.1:9014"
+initial_peers = ["127.0.0.1:9003", "127.0.0.1:9011", "127.0.0.1:9012", "127.0.0.1:9013", "127.0.0.1:9015", "127.0.0.1:9016", "127.0.0.1:9018"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_collector_event"
+attribute_key = "lt_value"
+mode = "<"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_collector_event"
+attribute_key = "gt_value"
+mode = ">"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_collector_event"
+attribute_key = "lte_value"
+mode = "<="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_collector_event"
+attribute_key = "gte_value"
+mode = ">="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_collector_event"
+attribute_key = "eq_value"
+mode = "=="
+value = 10
+max_value_age = "10s"

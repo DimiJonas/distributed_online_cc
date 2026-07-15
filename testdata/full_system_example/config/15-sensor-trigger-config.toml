@@ -1,0 +1,43 @@
+node_id = 15
+tcp_listen_address = "127.0.0.1:19015"
+unix_socket = "/tmp/event_listener_st.sock"
+log_file = "sensor_trigger.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[overlay]
+listen_address = "127.0.0.1:9015"
+initial_peers = ["127.0.0.1:9000", "127.0.0.1:9004", "127.0.0.1:9012", "127.0.0.1:9013", "127.0.0.1:9014", "127.0.0.1:9016", "127.0.0.1:9017"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:19014"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:19014"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:19014"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:19014"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:19014"]

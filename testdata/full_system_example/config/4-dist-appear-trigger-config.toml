@@ -1,0 +1,21 @@
+node_id = 4
+tcp_listen_address = "127.0.0.1:19004"
+unix_socket = "/tmp/event_listener_dat.sock"
+log_file = "distributed_appearance_trigger.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "DistributedAppearanceTrigger"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_trigger_event"
+counter_peers = ["127.0.0.1:19002", "127.0.0.1:19003"]
+mode = "Min"
+frequency = 5
+
+[overlay]
+listen_address = "127.0.0.1:9004"
+initial_peers = ["127.0.0.1:9001", "127.0.0.1:9002", "127.0.0.1:9003", "127.0.0.1:9005", "127.0.0.1:9006", "127.0.0.1:9008", "127.0.0.1:9012"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

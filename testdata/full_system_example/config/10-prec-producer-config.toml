@@ -1,0 +1,19 @@
+node_id = 10
+tcp_listen_address = "127.0.0.1:19010"
+unix_socket = "/tmp/event_listener_pp.sock"
+log_file = "precedence-producer.log"
+result_sink_addresses = ["127.0.0.1:19011"]
+
+[[constraints]]
+constraint_role = "PrecedenceProducer"
+constraint_id = "precedence_test"
+event_id = "precedence_producer_event"
+consumer_peers = ["127.0.0.1:19009"]
+
+[overlay]
+listen_address = "127.0.0.1:9010"
+initial_peers = ["127.0.0.1:9007", "127.0.0.1:9008", "127.0.0.1:9009", "127.0.0.1:9011", "127.0.0.1:9012", "127.0.0.1:9014", "127.0.0.1:9018"]
+shuffle_interval = "30s"
+shuffle_length = 4
+max_peer_cache_size = 20
+idle_timeout = "30m"

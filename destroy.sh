@@ -62,12 +62,12 @@ if $CLEAN_LOGS; then
   logs=()
   if [[ -d "$LOG_DIR" ]]; then
     while IFS= read -r f; do logs+=("$f"); done \
-      < <(find "$LOG_DIR" -maxdepth 1 -name 'node*.log')
+      < <(find "$LOG_DIR" -maxdepth 1 -name '*.log')
   fi
   if [[ ${#logs[@]} -gt 0 ]]; then
     rm -f "${logs[@]}"
     echo "removed ${#logs[@]} log file(s) from $LOG_DIR"
   else
-    echo "no node*.log in $LOG_DIR"
+    echo "no *.log files in $LOG_DIR"
   fi
 fi

@@ -17,7 +17,7 @@ Usage: $0 [options]
 Launch a local P2P test network in tmux, one window per node.
 
   -b, --bin PATH         node binary to run          (default: $BIN)
-  -d, --config-dir DIR   directory of node*.toml      (default: $CONFIG_DIR)
+  -d, --config-dir DIR   directory of *-config.toml      (default: $CONFIG_DIR)
   -l, --log-dir DIR      directory for node logs      (default: $LOG_DIR)
   -g, --generate         (re)generate configs into DIR before launching
   -n, --nodes N          node count when generating   (default: $NODES)
