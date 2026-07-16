@@ -185,6 +185,40 @@ async fn tcp_channel(
     let idle_duration = idle_timeout.unwrap_or_default();
 
     loop {
+        // drain every complete frame already sitting in the buffer before waiting
+        //
+        // this can happen when a tcp channel is created on demand because a message send is requested.
+        // in this case the hello message for the handshake is probably sent together with the actual message by the kernel in one frame
+        while check_frame(&read_buf) {
+            let msg = match decode(&mut read_buf) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::error!(
+                        "tcp_channel: failed to decode message from peer {}: {}, closing connection.",
+                        peer_address,
+                        e
+                    );
+                    // deserialization failure probably means the stream is
+                    // corrupted so it should be closed
+                    notify_manager(
+                        state.clone(),
+                        peer_address,
+                        PeerManagerMessage::ConnectionLost,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            log::info!(
+                "tcp_channel: decoded message from peer {}: {}",
+                peer_address,
+                msg
+            );
+
+            dispatch_message(msg, peer_address.address, state.clone()).await;
+        }
+
         tokio::select! {
             // send msg
             Some(msg) = tcp_channel_receiver.recv() => {
@@ -209,39 +243,11 @@ async fn tcp_channel(
             result = stream.read_buf(&mut read_buf) => {
                 match result {
                     Ok(0) => {
-                        // connection closed
                         log::info!("tcp_channel: got zero bytes. peer {} probably disconnected", peer_address);
                         break;
                     }
                     Ok(_) => {
-                        // some bytes received
-                        loop {
-                            if !check_frame(&read_buf) {
-                                break;
-                            }
-
-                            let msg = match decode(&mut read_buf) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    log::error!(
-                                        "tcp_channel: failed to decode message from peer {}: {}, closing connection and removing peer from peer manager",
-                                        peer_address, e
-                                    );
-                                    // deserialization failure probably means the stream is
-                                    // corrupted so it should be closed
-                                    notify_manager(state.clone(), peer_address, PeerManagerMessage::ConnectionLost).await;
-                                    return;
-                                }
-                            };
-
-                            log::info!(
-                                "tcp_channel: decoded message from peer {}: {}",
-                                peer_address,
-                                msg
-                            );
-
-                           dispatch_message(msg, peer_address.address, state.clone()).await;
-                        }
+                        // bytes received - the next loop iteration drains them
                     }
                     Err(e) => {
                         log::error!("tcp_channel: error reading from peer {}: {}", peer_address, e);
@@ -250,6 +256,7 @@ async fn tcp_channel(
                 }
             }
             // idle: if an idle timeout is configured, the channel will be torn down if no messages were sent or received for a configured timeout duration
+            // idle timeout is only configurable for the overlay network, where the connectionLost signal to the peer manager will never try to reconnect
             _ = sleep(idle_duration), if idle_enabled => {
                 log::info!("tcp_channel: channel to {} has been in idle for {}. closing channel", peer_address, humantime::format_duration(idle_duration));
                 break;

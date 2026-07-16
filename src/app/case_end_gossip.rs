@@ -38,6 +38,10 @@ pub fn spawn_case_end_gossip_manager(
                         let peer_cache = state.peer_cache.lock().unwrap();
                         peer_cache.sample_addresses(state.config.case_end_gossip.anti_entropy_fanout, &mut rand::rng())
                     };
+                    if addresses.is_empty() {
+                        log::warn!("anti_entropy: cannot run anti entropy mechanism because of no known peers");
+                        continue;
+                    }
                     let digest_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_digest(state.config.overlay.listen_address, digest));
                     for address in addresses {
                         log::info!("anti entropy: sending digest {} to {}", digest, address);

@@ -89,7 +89,6 @@ async fn main() {
 
     // spawn result sink if configured
     if let Some(result_sink_config) = state.config.result_sink.as_ref() {
-        // TODO: wrap config in Arc<> and pass it so cloning is cheap
         distributed_online_cc::app::result_sink::spawn_result_sink(
             result_sink_config.clone(),
             sink_rx,
