@@ -16,7 +16,7 @@ use crate::{
 #[cfg(test)]
 use crate::{
     state::app_state::AppState,
-    types::{CaseId, EventTime, TracedEvent},
+    types::{CaseEnd, TracedEvent},
     util::test_tools::{
         make_state_from_config, make_state_with_config_and_event_q,
         make_state_with_config_and_event_q_and_local_end_q,
@@ -227,8 +227,8 @@ impl NodeConfigBuilder {
         AppState,
         mpsc::Sender<TracedEvent>,
         mpsc::Receiver<TracedEvent>,
-        mpsc::Sender<(CaseId, EventTime)>,
-        mpsc::Receiver<(CaseId, EventTime)>,
+        mpsc::Sender<Vec<CaseEnd>>,
+        mpsc::Receiver<Vec<CaseEnd>>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (local_end_tx, local_end_rx) = mpsc::channel(64);

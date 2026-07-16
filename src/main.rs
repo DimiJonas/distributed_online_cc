@@ -96,7 +96,7 @@ async fn main() {
     }
 
     distributed_online_cc::app::overlay_manager::spawn_overlay_task(state.clone());
-    distributed_online_cc::app::case_end_gossip::spawn_case_end_gossip_manager(
+    distributed_online_cc::app::gossip_manager::spawn_case_end_gossip_manager(
         state.clone(),
         local_end_signal_rx,
         gossip_msg_q_rx,

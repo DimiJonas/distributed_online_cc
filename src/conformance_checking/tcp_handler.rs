@@ -134,7 +134,7 @@ pub async fn handle_ce_gossip_message(msg: CEGossipMessage, state: AppState, msg
     );
 
     // pass message to case end gossip manager
-    match state.gossip_msg_q.send(msg).await {
+    match state.inbound_gossip_q.send(msg).await {
         Ok(()) => {}
         Err(e) => {
             log::error!(

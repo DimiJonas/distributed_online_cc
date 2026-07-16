@@ -13,7 +13,7 @@ use crate::state::timer_token_store::TimerTokenStore;
 use crate::state::token_in_store::TokenInStore;
 use crate::state::token_out_store::TokenOutStore;
 use crate::state::watchdog_cancel_store::WatchdogCancelStore;
-use crate::types::{CaseId, EventTime, TracedEvent};
+use crate::types::{CaseEnd, TracedEvent};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -37,8 +37,8 @@ pub struct AppState {
     pub case_state: Arc<Mutex<CaseStateMap>>,
     pub peer_cache: Arc<Mutex<PeerCache>>,
     pub ce_gossip_cache: Arc<Mutex<CEGossipCache>>,
-    pub local_case_end_sender: mpsc::Sender<(CaseId, EventTime)>,
-    pub gossip_msg_q: mpsc::Sender<CEGossipMessage>,
+    pub outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
+    pub inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
 }
 
 impl AppState {
@@ -47,8 +47,8 @@ impl AppState {
         event_q: mpsc::Sender<TracedEvent>,
         loopback_q: mpsc::Sender<PeerMessage>,
         result_sink_channel: mpsc::Sender<CCResultMessage>,
-        local_case_end_sender: mpsc::Sender<(CaseId, EventTime)>,
-        gossip_msg_q: mpsc::Sender<CEGossipMessage>,
+        outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
+        inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
     ) -> Self {
         let handlers = Arc::new(HandlerRegistry::build(&config));
         let case_end_ttl = config.case_end_gossip.case_end_propagation_ttl;
@@ -71,8 +71,8 @@ impl AppState {
             case_state: Arc::new(Mutex::new(CaseStateMap::new())),
             peer_cache: Arc::new(Mutex::new(PeerCache::new())),
             ce_gossip_cache: Arc::new(Mutex::new(CEGossipCache::new(case_end_ttl))),
-            local_case_end_sender,
-            gossip_msg_q,
+            outbound_gossip_q,
+            inbound_gossip_q,
         }
     }
 }

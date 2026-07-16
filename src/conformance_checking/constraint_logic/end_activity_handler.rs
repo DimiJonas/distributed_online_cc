@@ -1,7 +1,8 @@
+use crate::conformance_checking::case_end_signal_handling::handle_case_end;
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::impl_constraint_handler_fields;
 use crate::state::app_state::AppState;
-use crate::types::{ConstraintHandlerId, TracedEvent};
+use crate::types::{CaseEnd, ConstraintHandlerId, TracedEvent};
 use async_trait::async_trait;
 use chrono::Utc;
 
@@ -35,18 +36,13 @@ impl ConstraintHandler for EndActivityHandler {
         let case_id = event.case_id.clone();
 
         // signal case end
-        match state
-            .local_case_end_sender
-            .send((case_id, event_time))
-            .await
-        {
-            Ok(()) => {}
-            Err(e) => {
-                log::error!(
-                    "unable to signal case end to case end gossip manager: {}",
-                    e
-                );
-            }
-        }
+        handle_case_end(
+            state.clone(),
+            CaseEnd {
+                case_id,
+                timestamp: event_time,
+            },
+        )
+        .await;
     }
 }

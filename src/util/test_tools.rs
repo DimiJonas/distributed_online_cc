@@ -17,7 +17,7 @@ use crate::{
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
-    types::{CaseId, ConstraintType, EventTime, PeerAddress, Token, TokenPayload, TracedEvent},
+    types::{CaseEnd, ConstraintType, PeerAddress, Token, TokenPayload, TracedEvent},
 };
 use std::{collections::HashMap, net::SocketAddr};
 
@@ -104,18 +104,18 @@ pub fn make_state_with_config_and_event_q(
 pub fn make_state_with_config_and_event_q_and_local_end_q(
     config: NodeConfig,
     event_tx: mpsc::Sender<TracedEvent>,
-    local_end_tx: mpsc::Sender<(CaseId, EventTime)>,
+    outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
 ) -> AppState {
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
-    let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
+    let (inbound_gossip_tx, _inbound_gossip_rx) = mpsc::channel(16);
     AppState::new(
         config,
         event_tx,
         loopback_tx,
         sink_tx,
-        local_end_tx,
-        gossip_msg_q_tx,
+        outbound_gossip_q,
+        inbound_gossip_tx,
     )
 }
 

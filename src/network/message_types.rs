@@ -8,8 +8,8 @@ use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-        MessageId, PeerBatch, RequestId, Token,
+        CaseEnd, CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType,
+        EventTime, MessageId, PeerBatch, RequestId, Token,
     },
 };
 
@@ -403,11 +403,11 @@ impl OverlayMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CEGossipPayload {
     // eagerly push of freshly learned case ends
-    Push(Vec<(CaseId, EventTime)>),
+    Push(Vec<CaseEnd>),
     // anti entropy: initiators digest of its live set
     AeDigest(u64),
     /// anti entropy: responders live set (sent only on digest mismatch)
-    AeSet(Vec<(CaseId, EventTime)>),
+    AeSet(Vec<CaseEnd>),
 }
 
 impl CEGossipPayload {
@@ -434,7 +434,7 @@ impl CEGossipMessage {
         }
     }
 
-    pub fn new_push(sender_address: SocketAddr, data: Vec<(CaseId, EventTime)>) -> Self {
+    pub fn new_push(sender_address: SocketAddr, data: Vec<CaseEnd>) -> Self {
         Self::new(sender_address, CEGossipPayload::Push(data))
     }
 
@@ -442,7 +442,7 @@ impl CEGossipMessage {
         Self::new(sender_address, CEGossipPayload::AeDigest(digest))
     }
 
-    pub fn new_ae_set(sender_address: SocketAddr, data: Vec<(CaseId, EventTime)>) -> Self {
+    pub fn new_ae_set(sender_address: SocketAddr, data: Vec<CaseEnd>) -> Self {
         Self::new(sender_address, CEGossipPayload::AeSet(data))
     }
 }

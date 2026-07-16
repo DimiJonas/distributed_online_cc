@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use crate::types::{CaseId, EventTime};
+use crate::types::{CaseEnd, CaseId, EventTime};
 
 #[derive(Debug)]
 pub enum CaseEndOutcome {
@@ -12,10 +12,12 @@ pub enum CaseEndOutcome {
     Unchanged,
 }
 
+// it is important to differentiate new entries from updated entries
+// because for new entries c case closing task has to be spawned
 #[derive(Debug)]
 pub struct MergeResult {
-    pub new: Vec<(CaseId, EventTime)>,
-    pub updated: Vec<(CaseId, EventTime)>,
+    pub new: Vec<CaseEnd>,
+    pub updated: Vec<CaseEnd>,
 }
 
 pub struct CEGossipCache {
@@ -35,23 +37,20 @@ impl CEGossipCache {
 
     // check if a received case end is new or already known
     // if the timestamps differ (possibly because another end activity was configured?) then lower timestamp wins
-    pub fn observe(
-        &mut self,
-        case_id: &CaseId,
-        ts: EventTime,
-        now: DateTime<Utc>,
-    ) -> CaseEndOutcome {
-        if !self.is_live(ts, now) {
+    pub fn observe(&mut self, case_end: &CaseEnd, now: DateTime<Utc>) -> CaseEndOutcome {
+        if !self.is_live(case_end.timestamp, now) {
             return CaseEndOutcome::Unchanged;
         }
-        match self.cache.get(case_id) {
+        match self.cache.get(&case_end.case_id) {
             None => {
-                self.cache.insert(case_id.clone(), ts);
+                self.cache
+                    .insert(case_end.case_id.clone(), case_end.timestamp.clone());
                 CaseEndOutcome::New
             }
-            Some(&stored) if ts < stored => {
+            Some(&stored) if case_end.timestamp < stored => {
                 // update timestamp to earliest
-                self.cache.insert(case_id.clone(), ts);
+                self.cache
+                    .insert(case_end.case_id.clone(), case_end.timestamp.clone());
                 CaseEndOutcome::Updated
             }
             Some(_) => CaseEndOutcome::Unchanged,
@@ -62,40 +61,21 @@ impl CEGossipCache {
         event_time + self.ttl > now
     }
 
-    // insert a case end
-    // returns true if it is new
-    // rejects already known cases and already expired cases (resurrection guard)
-    pub fn insert_new(
-        &mut self,
-        case_id: &CaseId,
-        event_time: EventTime,
-        now: DateTime<Utc>,
-    ) -> bool {
-        if !self.is_live(event_time, now) {
-            return false; // past ts+P everywhere: never re-import
-        }
-        if self.cache.contains_key(case_id) {
-            return false; // duplicate: idempotent no-op
-        }
-        self.cache.insert(case_id.clone(), event_time);
-        true
-    }
-
     // merge a batch from a peer
     // returns the entries that were new
     pub fn merge(
         &mut self,
-        incoming: impl IntoIterator<Item = (CaseId, EventTime)>,
+        incoming: impl IntoIterator<Item = CaseEnd>,
         now: DateTime<Utc>,
     ) -> MergeResult {
         let mut result: MergeResult = MergeResult {
             new: Vec::new(),
             updated: Vec::new(),
         };
-        for (case_id, event_time) in incoming {
-            match self.observe(&case_id, event_time, now) {
-                CaseEndOutcome::New => result.new.push((case_id, event_time)),
-                CaseEndOutcome::Updated => result.updated.push((case_id, event_time)),
+        for case_end in incoming {
+            match self.observe(&case_end, now) {
+                CaseEndOutcome::New => result.new.push(case_end),
+                CaseEndOutcome::Updated => result.updated.push(case_end),
                 CaseEndOutcome::Unchanged => {}
             }
         }
@@ -103,11 +83,14 @@ impl CEGossipCache {
     }
 
     // pushable state: live entries only
-    pub fn live_entries(&self, now: DateTime<Utc>) -> Vec<(CaseId, EventTime)> {
+    pub fn live_entries(&self, now: DateTime<Utc>) -> Vec<CaseEnd> {
         self.cache
             .iter()
             .filter(|(_, et)| self.is_live(**et, now))
-            .map(|(c, &et)| (c.clone(), et))
+            .map(|(c, &et)| CaseEnd {
+                case_id: c.clone(),
+                timestamp: et,
+            })
             .collect()
     }
 
@@ -115,11 +98,11 @@ impl CEGossipCache {
     // DefaultHasher::new has fixed keys, so equal sets => equal digest across nodes
     pub fn digest(&self, now: DateTime<Utc>) -> u64 {
         let mut entries = self.live_entries(now);
-        entries.sort_by(|a, b| a.0.cmp(&b.0)); // canonical order
+        entries.sort_by(|a, b| a.case_id.cmp(&b.case_id)); // canonical order
         let mut h = DefaultHasher::new();
-        for (cid, et) in entries {
-            cid.hash(&mut h);
-            et.timestamp_millis().hash(&mut h);
+        for case_end in entries {
+            case_end.case_id.hash(&mut h);
+            case_end.timestamp.timestamp_millis().hash(&mut h);
         }
         h.finish()
     }

@@ -117,6 +117,18 @@ impl Display for TracedEvent {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaseEnd {
+    pub case_id: CaseId,
+    pub timestamp: EventTime,
+}
+
+impl Display for CaseEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Case End: case={} time={}", self.case_id, self.timestamp)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Copy)]
 pub enum ConstraintType {
     Response,
