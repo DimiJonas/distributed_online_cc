@@ -29,7 +29,6 @@ impl Default for CyclonParams {
 struct GossipParams {
     anti_entropy_interval: Duration,
     anti_entropy_fanout: usize,
-    case_end_propagation_ttl: Duration,
     push_fanout: usize,
 }
 impl Default for GossipParams {
@@ -37,7 +36,6 @@ impl Default for GossipParams {
         Self {
             anti_entropy_interval: Duration::from_secs(4),
             anti_entropy_fanout: 1,
-            case_end_propagation_ttl: Duration::from_mins(3),
             push_fanout: 4,
         }
     }
@@ -168,6 +166,7 @@ fn generate(
     gossip_params: &GossipParams,
     addr: &Addressing,
     out_dir: &Path,
+    case_end_retention_period_secs: &u64,
 ) {
     let base = app_default_base();
     std::fs::create_dir_all(out_dir).unwrap();
@@ -182,6 +181,7 @@ fn generate(
             .tcp_listen(addr.listen_conformance(id))
             .overlay_listen(addr.listen_overlay(id))
             .initial_peers(peers)
+            .case_end_retention_period(Duration::from_secs(*case_end_retention_period_secs))
             .unix_socket(format!("/tmp/event_listener_{id}.sock"))
             .log_file(format!("node-{id}.log"))
             .shuffle_interval(cyclon_params.shuffle_interval)
@@ -190,7 +190,6 @@ fn generate(
             .idle_timeout(cyclon_params.idle_timeout)
             .anti_entropy_interval(gossip_params.anti_entropy_interval)
             .anti_entropy_fanout(gossip_params.anti_entropy_fanout)
-            .case_end_gossip_ttl(gossip_params.case_end_propagation_ttl)
             .push_fanout(gossip_params.push_fanout)
             .build();
 
@@ -215,6 +214,8 @@ struct Args {
     bind_all: bool,
     #[arg(long, default_value = "run/configs")]
     out_dir: std::path::PathBuf,
+    #[arg(long, default_value_t = 180)]
+    case_end_retention_period_secs: u64,
     #[arg(long)]
     shuffle_secs: Option<u64>,
     #[arg(long)]
@@ -229,8 +230,6 @@ struct Args {
     anti_entropy_secs: Option<u64>,
     #[arg(long)]
     anti_entropy_fanout: Option<usize>,
-    #[arg(long)]
-    case_end_propagation_ttl: Option<u64>,
     #[arg(long)]
     push_fanout: Option<usize>,
 }
@@ -264,9 +263,6 @@ fn main() {
     if let Some(pf) = args.push_fanout {
         gossip_params.push_fanout = pf;
     }
-    if let Some(cept) = args.case_end_propagation_ttl {
-        gossip_params.case_end_propagation_ttl = Duration::from_secs(cept);
-    }
 
     let addressing = match args.mode.as_str() {
         "local" => Addressing::Local {
@@ -289,5 +285,6 @@ fn main() {
         &gossip_params,
         &addressing,
         &args.out_dir,
+        &args.case_end_retention_period_secs,
     );
 }

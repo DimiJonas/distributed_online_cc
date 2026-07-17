@@ -3,9 +3,8 @@ use distributed_online_cc::config::node_config::NodeConfig;
 use distributed_online_cc::network::tcp_router::connect_peer;
 use distributed_online_cc::state::app_state::AppState;
 use distributed_online_cc::types::PeerAddress;
-use log::LevelFilter;
+use distributed_online_cc::util::logging::setup_logging;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 // parse command line arguments
@@ -22,26 +21,7 @@ async fn main() {
     let args = Input::parse();
     let config: NodeConfig = NodeConfig::load_config(&args.config_path);
 
-    // config owns the filename; --log-dir (if it exists) owns the directory
-    let log_path: PathBuf = match &args.log_dir {
-        Some(dir) => {
-            let file_name = Path::new(&config.log_file)
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("app.log"));
-            Path::new(dir).join(file_name)
-        }
-        None => PathBuf::from(&config.log_file),
-    };
-
-    // ensure the directory exists so logging init can't fail on a missing path
-    if let Some(parent) = log_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).expect("failed to create log directory");
-    }
-
-    let log_path_str = log_path.to_string_lossy().into_owned();
-    setup_logging(&log_path_str).expect("failed to initialize logging");
+    setup_logging(&args.log_dir, &config).expect("failed to initialize logging");
     log::info!("starting node");
     log::debug!("configuration: {:?}", config);
 
@@ -58,18 +38,18 @@ async fn main() {
     };
     let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
     // create local end signal channel
-    let (local_end_signal_tx, local_end_signal_rx) =
-        mpsc::channel(config.case_end_gossip.local_end_signal_mpsc_channel_size);
-    let (gossip_msg_q_tx, gossip_msg_q_rx) =
-        mpsc::channel(config.case_end_gossip.gossip_message_queue_size);
+    let (outbound_gossip_tx, outbound_gossip_rx) =
+        mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
+    let (inbound_gossip_tx, inbound_gossip_rx) =
+        mpsc::channel(config.gossip().gossip_inbound_mpsc_channel_size);
 
-    let state = AppState::new(
+    let state = AppState::new_distributed(
         config,
         event_q_tx,
         loopback_q_tx,
         sink_tx,
-        local_end_signal_tx,
-        gossip_msg_q_tx,
+        outbound_gossip_tx,
+        inbound_gossip_tx,
     );
 
     setup_tcp_channels(state.clone()).await;
@@ -98,8 +78,8 @@ async fn main() {
     distributed_online_cc::app::overlay_manager::spawn_overlay_task(state.clone());
     distributed_online_cc::app::gossip_manager::spawn_case_end_gossip_manager(
         state.clone(),
-        local_end_signal_rx,
-        gossip_msg_q_rx,
+        outbound_gossip_rx,
+        inbound_gossip_rx,
     );
 
     // keeps main alive until i shut it down
@@ -126,35 +106,4 @@ async fn setup_tcp_channels(state: AppState) {
     for address in constraint_peers {
         connect_peer(PeerAddress::new_conformance_address(address), state.clone()).await;
     }
-}
-
-fn setup_logging(log_file: &str) -> Result<(), fern::InitError> {
-    let format =
-        |out: fern::FormatCallback, message: &std::fmt::Arguments, record: &log::Record| {
-            out.finish(format_args!(
-                "[{} {} {}] {}",
-                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
-                record.level(),  // error, warn, info, debug
-                record.target(), // module path, e.g. "distributed_online_cc::network::tcp_channel"
-                message
-            ))
-        };
-
-    // read desired level from env var, default to Info
-    // e.g. RUST_LOG=info cargo run
-    let level = std::env::var("RUST_LOG")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(LevelFilter::Info);
-
-    fern::Dispatch::new()
-        .format(format)
-        .level(level)
-        // stdout for Info and above
-        .chain(std::io::stdout())
-        // file gets everything
-        .chain(fern::log_file(log_file)?)
-        .apply()?;
-
-    Ok(())
 }

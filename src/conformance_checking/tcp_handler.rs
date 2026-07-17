@@ -134,7 +134,7 @@ pub async fn handle_ce_gossip_message(msg: CEGossipMessage, state: AppState, msg
     );
 
     // pass message to case end gossip manager
-    match state.inbound_gossip_q.send(msg).await {
+    match state.dist().inbound_gossip_q.send(msg).await {
         Ok(()) => {}
         Err(e) => {
             log::error!(
@@ -180,17 +180,17 @@ pub async fn handle_overlay_message(
 
     // pick random subset from peer cache
     let subset = {
-        let mut peer_cache = state.peer_cache.lock().unwrap();
-        let subset =
-            peer_cache.select_random_subset(state.config.overlay.shuffle_length, &mut rand::rng());
+        let mut peer_cache = state.dist().peer_cache.lock().unwrap();
+        let subset = peer_cache
+            .select_random_subset(state.config.overlay().shuffle_length, &mut rand::rng());
         let sent: Vec<SocketAddr> = subset.keys().copied().collect();
 
         // update peer cache with received cache entries
         peer_cache.update(
-            state.config.overlay.listen_address,
+            state.config.overlay().listen_address,
             &sent,
             msg.peer_batch,
-            state.config.overlay.max_peer_cache_size,
+            state.config.overlay().max_peer_cache_size,
         );
         subset
     };
@@ -215,7 +215,7 @@ pub async fn handle_overlay_message(
     // build response
     let response = PeerMessage::overlay_res(
         request_id,
-        OverlayMessage::new(state.config.overlay.listen_address, subset),
+        OverlayMessage::new(state.config.overlay().listen_address, subset),
     );
 
     // respond to request
@@ -478,7 +478,7 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
         let (tx4, _rx4) = tokio::sync::mpsc::channel(16);
         let (tx5, _rx5) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2, tx3, tx4, tx5);
+        let state = AppState::new_distributed(config, tx, tx2, tx3, tx4, tx5);
 
         {
             let mut store = state.cc_results.lock().unwrap();

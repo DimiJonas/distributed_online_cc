@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     config::{
         config_builder::make_base_config,
-        node_config::{ConstraintConfig, NodeConfig, ResultBufferConfig},
+        node_config::{ConfigMode, ConstraintConfig, NodeConfig, ResultBufferConfig},
     },
     network::{
         message_types::{CCMessage, CliTestMessage, PeerMessage},
@@ -30,13 +30,13 @@ pub fn peer_addr(port: u16) -> PeerAddress {
 }
 
 pub fn make_config_with_port(listen_port: u16) -> NodeConfig {
-    let mut config = make_base_config();
+    let mut config = make_base_config(ConfigMode::Distributed);
     config.tcp_listen_address = addr(listen_port);
     config
 }
 
 pub fn make_config_with_constraints(constraints: Vec<ConstraintConfig>) -> NodeConfig {
-    let mut config = make_base_config();
+    let mut config = make_base_config(ConfigMode::Distributed);
     config.constraints = constraints;
     config
 }
@@ -45,7 +45,7 @@ pub fn make_config_with_constraints_and_port(
     constraints: Vec<ConstraintConfig>,
     listen_port: u16,
 ) -> NodeConfig {
-    let mut config = make_base_config();
+    let mut config = make_base_config(ConfigMode::Distributed);
     config.constraints = constraints;
     config.tcp_listen_address = addr(listen_port);
     config
@@ -57,7 +57,7 @@ pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<Tra
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    let state = AppState::new(
+    let state = AppState::new_distributed(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,
@@ -73,8 +73,8 @@ pub fn make_state_with_event_q(event_tx: mpsc::Sender<TracedEvent>) -> AppState 
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new(
-        make_base_config(),
+    AppState::new_distributed(
+        make_base_config(ConfigMode::Distributed),
         event_tx,
         loopback_tx,
         sink_tx,
@@ -91,7 +91,7 @@ pub fn make_state_with_config_and_event_q(
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new(
+    AppState::new_distributed(
         config,
         event_tx,
         loopback_tx,
@@ -109,7 +109,7 @@ pub fn make_state_with_config_and_event_q_and_local_end_q(
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (inbound_gossip_tx, _inbound_gossip_rx) = mpsc::channel(16);
-    AppState::new(
+    AppState::new_distributed(
         config,
         event_tx,
         loopback_tx,
@@ -125,7 +125,7 @@ pub fn make_state_from_config(config: NodeConfig) -> AppState {
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new(
+    AppState::new_distributed(
         config,
         event_tx,
         loopback_tx,
@@ -141,7 +141,7 @@ pub fn make_state(listen_port: u16) -> AppState {
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new(
+    AppState::new_distributed(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,
@@ -283,7 +283,7 @@ pub fn make_config_with_buffers(
     buffers: HashMap<String, ResultBufferConfig>,
     default_buffer: ResultBufferConfig,
 ) -> NodeConfig {
-    let mut config = make_base_config();
+    let mut config = make_base_config(ConfigMode::Distributed);
     config.constraints = constraints;
     config.result_buffers = buffers;
     config.default_result_buffer = default_buffer;

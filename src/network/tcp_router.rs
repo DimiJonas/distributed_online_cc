@@ -11,9 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 // build a tcp channel to another peer
 pub async fn connect_peer(peer_address: PeerAddress, state: AppState) {
-    if peer_address.address == state.config.tcp_listen_address
-        || peer_address.address == state.config.overlay.listen_address
-    {
+    if state.config.is_own_address(peer_address.address) {
         log::info!("connect_peer: skipping self-connect to {}", peer_address);
         return;
     }
@@ -47,10 +45,7 @@ pub async fn send_to_peer(
         msg.payload,
         peer_address
     );
-    if peer_address.address == state.config.tcp_listen_address // conformance checking tcp address
-        || peer_address.address == state.config.overlay.listen_address
-    // overlay tcp address
-    {
+    if state.config.is_own_address(peer_address.address) {
         log::debug!("send_to_peer: short-circuiting self-addressed message");
         deliver_to_self(msg, state).await;
         Ok(())

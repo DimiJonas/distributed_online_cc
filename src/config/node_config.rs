@@ -8,8 +8,10 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NodeConfig {
+    pub mode: ConfigMode,
     pub node_id: PeerId,
     pub tcp_listen_address: SocketAddr,
     #[serde(default = "default_unix_socket")]
@@ -20,28 +22,86 @@ pub struct NodeConfig {
     pub event_queue_size: usize,
     #[serde(default = "default_loopback_q_size")]
     pub loopback_queue_size: usize,
+    #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
+    pub case_end_grace_period: Duration,
+    #[serde(
+        with = "humantime_serde",
+        default = "default_case_end_retention_period"
+    )]
+    pub case_end_retention_period: Duration,
+    pub result_sink_addresses: Option<Vec<SocketAddr>>,
+    #[serde(default)]
+    pub result_sink: Option<ResultSinkConfig>,
+    #[serde(default)]
     pub constraints: Vec<ConstraintConfig>,
     #[serde(default)]
     pub tcp_channels: TcpChannelConfig,
     #[serde(default)]
-    pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
+    pub overlay: Option<OverlayConfig>,
+    #[serde(default)]
+    pub gossip: Option<GossipConfig>,
     #[serde(default)]
     pub default_result_buffer: ResultBufferConfig,
-    pub result_sink_addresses: Option<Vec<SocketAddr>>,
-    pub result_sink: Option<ResultSinkConfig>,
-    #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
-    pub case_end_grace_period: Duration,
-    pub overlay: OverlayConfig,
     #[serde(default)]
-    pub case_end_gossip: CEGossipConfig,
+    pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigMode {
+    Distributed,
+    Central,
 }
 
 impl NodeConfig {
     pub fn load_config(path: &str) -> Self {
         let contents = fs::read_to_string(path).expect("could not read config file");
         let config: NodeConfig = toml::from_str(&contents).expect("could not parse config file");
+        config.validate();
         crate::network::message_types::init(config.clone());
         config
+    }
+
+    pub fn validate(&self) {
+        match self.mode {
+            ConfigMode::Distributed => {
+                assert!(
+                    self.overlay.is_some(),
+                    "distributed mode requires [overlay]"
+                );
+                assert!(self.gossip.is_some(), "distributed mode requires [gossip]");
+            }
+            ConfigMode::Central => {
+                assert!(
+                    self.overlay.is_none(),
+                    "central mode must not configure [overlay]"
+                );
+                assert!(
+                    self.gossip.is_none(),
+                    "central mode must not configure [gossip]"
+                );
+            }
+        }
+    }
+
+    pub fn overlay(&self) -> &OverlayConfig {
+        self.overlay.as_ref().expect("validated at load")
+    }
+
+    pub fn gossip(&self) -> &GossipConfig {
+        self.gossip.as_ref().expect("validated at load")
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.mode == ConfigMode::Distributed
+    }
+
+    pub fn is_own_address(&self, addr: SocketAddr) -> bool {
+        addr == self.tcp_listen_address
+            || self
+                .overlay
+                .as_ref()
+                .is_some_and(|overlay| overlay.listen_address == addr)
     }
 
     pub fn build_constraint_list(&self) -> Vec<(ConstraintId, ConstraintType)> {
@@ -85,6 +145,7 @@ impl NodeConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TcpChannelConfig {
     #[serde(default = "default_tcp_channel_mpsc_channel_size")]
     pub tcp_channel_mpsc_channel_size: usize,
@@ -129,6 +190,7 @@ impl Default for TcpChannelConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResultSinkConfig {
     pub db_path: String,
     #[serde(default = "default_result_sink_mpsc_channel_size")]
@@ -140,6 +202,7 @@ pub struct ResultSinkConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OverlayConfig {
     pub listen_address: SocketAddr,
     pub initial_peers: Vec<SocketAddr>,
@@ -154,30 +217,28 @@ pub struct OverlayConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CEGossipConfig {
+#[serde(deny_unknown_fields)]
+pub struct GossipConfig {
     #[serde(with = "humantime_serde", default = "default_anti_entropy_interval")]
     pub anti_entropy_interval: Duration,
     #[serde(default = "default_anti_entropy_fanout")]
     pub anti_entropy_fanout: usize,
-    #[serde(with = "humantime_serde", default = "default_case_end_propagation_ttl")]
-    pub case_end_propagation_ttl: Duration,
     #[serde(default = "default_push_fanout")]
     pub push_fanout: usize,
-    #[serde(default = "default_local_end_signal_mpsc_channel_size")]
-    pub local_end_signal_mpsc_channel_size: usize,
-    #[serde(default = "default_gossip_message_queue_size")]
-    pub gossip_message_queue_size: usize,
+    #[serde(default = "default_gossip_outbound_mpsc_channel_size")]
+    pub gossip_outbound_mpsc_channel_size: usize,
+    #[serde(default = "default_gossip_inbound_mpsc_channel_size")]
+    pub gossip_inbound_mpsc_channel_size: usize,
 }
 
-impl Default for CEGossipConfig {
+impl Default for GossipConfig {
     fn default() -> Self {
         Self {
             anti_entropy_interval: default_anti_entropy_interval(),
             anti_entropy_fanout: default_anti_entropy_fanout(),
-            case_end_propagation_ttl: default_case_end_propagation_ttl(),
             push_fanout: default_push_fanout(),
-            gossip_message_queue_size: default_gossip_message_queue_size(),
-            local_end_signal_mpsc_channel_size: default_local_end_signal_mpsc_channel_size(),
+            gossip_inbound_mpsc_channel_size: default_gossip_inbound_mpsc_channel_size(),
+            gossip_outbound_mpsc_channel_size: default_gossip_outbound_mpsc_channel_size(),
         }
     }
 }
@@ -260,7 +321,7 @@ pub enum DistributedAppearanceCounterReset {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(tag = "policy")]
+#[serde(tag = "policy", deny_unknown_fields)]
 pub enum ResultBufferConfig {
     #[default]
     Immediate,
@@ -291,7 +352,7 @@ impl ResultBufferConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "constraint_role")]
+#[serde(tag = "constraint_role", deny_unknown_fields)]
 pub enum ConstraintConfig {
     ResponseProducer {
         constraint_id: ConstraintId,
@@ -528,7 +589,7 @@ fn default_case_end_grace_period() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_case_end_propagation_ttl() -> Duration {
+fn default_case_end_retention_period() -> Duration {
     Duration::from_secs(30)
 }
 
@@ -556,11 +617,11 @@ fn default_push_fanout() -> usize {
     4
 }
 
-fn default_local_end_signal_mpsc_channel_size() -> usize {
+fn default_gossip_outbound_mpsc_channel_size() -> usize {
     64
 }
 
-fn default_gossip_message_queue_size() -> usize {
+fn default_gossip_inbound_mpsc_channel_size() -> usize {
     1024
 }
 

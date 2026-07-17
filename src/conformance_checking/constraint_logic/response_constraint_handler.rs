@@ -359,7 +359,10 @@ mod tests {
             event_id: "produce".to_string(),
         };
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c1", "produce"), state.clone())
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c1", "produce"),
+                state.clone(),
+            )
             .await;
 
         assert!(state.token_out.lock().unwrap().has_open_token(
@@ -385,7 +388,10 @@ mod tests {
         };
 
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c2", "produce"), state.clone())
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c2", "produce"),
+                state.clone(),
+            )
             .await;
         assert!(state.token_out.lock().unwrap().has_open_token(
             &"c2".to_string(),
@@ -421,7 +427,10 @@ mod tests {
         };
 
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c3", "produce"), state.clone())
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c3", "produce"),
+                state.clone(),
+            )
             .await;
         handler
             .handle_case_end(&"c3".to_string(), state.clone())
@@ -483,7 +492,10 @@ mod tests {
         };
 
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c5", "produce"), state.clone())
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c5", "produce"),
+                state.clone(),
+            )
             .await;
 
         let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
@@ -681,7 +693,7 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
         let (tx4, _rx4) = tokio::sync::mpsc::channel(16);
         let (tx5, _rx5) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2, tx3, tx4, tx5);
+        let state = AppState::new_distributed(config, tx, tx2, tx3, tx4, tx5);
 
         let mut mgr_rx = register_manager(&state, producer_addr);
 
@@ -693,7 +705,10 @@ mod tests {
         };
 
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c6", "consume"), state)
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c6", "consume"),
+                state,
+            )
             .await;
 
         let received = tokio::time::timeout(std::time::Duration::from_millis(200), mgr_rx.recv())
@@ -730,7 +745,7 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
         let (tx4, _rx4) = tokio::sync::mpsc::channel(16);
         let (tx5, _rx5) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new(config, tx, tx2, tx3, tx4, tx5);
+        let state = AppState::new_distributed(config, tx, tx2, tx3, tx4, tx5);
 
         let mut rx1 = register_manager(&state, p1);
         let mut rx2 = register_manager(&state, p2);
@@ -743,7 +758,10 @@ mod tests {
         };
 
         handler
-            .handle_event(&make_traced_event_with_fixed_timestamp("c7", "consume"), state)
+            .handle_event(
+                &make_traced_event_with_fixed_timestamp("c7", "consume"),
+                state,
+            )
             .await;
 
         let timeout = std::time::Duration::from_millis(200);

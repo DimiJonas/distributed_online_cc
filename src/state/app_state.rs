@@ -35,6 +35,10 @@ pub struct AppState {
     pub sensor_events: Arc<Mutex<SensorEventStore>>,
     pub result_sink_channel: mpsc::Sender<CCResultMessage>,
     pub case_state: Arc<Mutex<CaseStateMap>>,
+    pub dist: Option<Arc<DistributedState>>,
+}
+
+pub struct DistributedState {
     pub peer_cache: Arc<Mutex<PeerCache>>,
     pub ce_gossip_cache: Arc<Mutex<CEGossipCache>>,
     pub outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
@@ -42,16 +46,14 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
+    fn new_base(
         config: NodeConfig,
         event_q: mpsc::Sender<TracedEvent>,
         loopback_q: mpsc::Sender<PeerMessage>,
         result_sink_channel: mpsc::Sender<CCResultMessage>,
-        outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
-        inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
+        dist: Option<Arc<DistributedState>>,
     ) -> Self {
         let handlers = Arc::new(HandlerRegistry::build(&config));
-        let case_end_ttl = config.case_end_gossip.case_end_propagation_ttl;
         Self {
             config: Arc::new(config),
             pending: Arc::new(Mutex::new(PendingRequestManager::new())),
@@ -69,10 +71,48 @@ impl AppState {
             sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
             result_sink_channel,
             case_state: Arc::new(Mutex::new(CaseStateMap::new())),
+            dist,
+        }
+    }
+
+    pub fn new_distributed(
+        config: NodeConfig,
+        event_q: mpsc::Sender<TracedEvent>,
+        loopback_q: mpsc::Sender<PeerMessage>,
+        result_sink_channel: mpsc::Sender<CCResultMessage>,
+        outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
+        inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
+    ) -> Self {
+        assert!(
+            config.is_distributed(),
+            "new_distributed with a central config"
+        );
+        let case_end_ttl = config.case_end_retention_period;
+        let dist = Arc::new(DistributedState {
             peer_cache: Arc::new(Mutex::new(PeerCache::new())),
             ce_gossip_cache: Arc::new(Mutex::new(CEGossipCache::new(case_end_ttl))),
             outbound_gossip_q,
             inbound_gossip_q,
-        }
+        });
+        Self::new_base(config, event_q, loopback_q, result_sink_channel, Some(dist))
+    }
+
+    pub fn new_central(
+        config: NodeConfig,
+        event_q: mpsc::Sender<TracedEvent>,
+        loopback_q: mpsc::Sender<PeerMessage>,
+        result_sink_channel: mpsc::Sender<CCResultMessage>,
+    ) -> Self {
+        assert!(
+            !config.is_distributed(),
+            "new_central with a distributed config"
+        );
+        Self::new_base(config, event_q, loopback_q, result_sink_channel, None)
+    }
+
+    pub fn dist(&self) -> &DistributedState {
+        self.dist
+            .as_ref()
+            .expect("distributed-only state accessed in central mode")
     }
 }

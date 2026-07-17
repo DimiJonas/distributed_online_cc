@@ -17,7 +17,7 @@ pub fn spawn_case_end_gossip_manager(
     mut gossip_message_receiver: mpsc::Receiver<CEGossipMessage>, // 1024
 ) {
     let mut anti_entropy_interval =
-        tokio::time::interval(state.config.case_end_gossip.anti_entropy_interval);
+        tokio::time::interval(state.config.gossip().anti_entropy_interval);
 
     tokio::spawn(async move {
         loop {
@@ -27,20 +27,20 @@ pub fn spawn_case_end_gossip_manager(
                     let now = Utc::now();
                     log::info!("anti entropy: running anti entropy mechanism");
                     let digest = {
-                        let mut ce_cache = state.ce_gossip_cache.lock().unwrap();
+                        let mut ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
                         // prune expired records
                         ce_cache.prune(now);
                         ce_cache.digest(now)
                     };
                     let addresses = {
-                        let peer_cache = state.peer_cache.lock().unwrap();
-                        peer_cache.sample_addresses(state.config.case_end_gossip.anti_entropy_fanout, &mut rand::rng())
+                        let peer_cache = state.dist().peer_cache.lock().unwrap();
+                        peer_cache.sample_addresses(state.config.gossip().anti_entropy_fanout, &mut rand::rng())
                     };
                     if addresses.is_empty() {
                         log::warn!("anti_entropy: cannot run anti entropy mechanism because of no known peers");
                         continue;
                     }
-                    let digest_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_digest(state.config.overlay.listen_address, digest));
+                    let digest_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_digest(state.config.overlay().listen_address, digest));
                     for address in addresses {
                         log::info!("anti entropy: sending digest {} to {}", digest, address);
                         if let Err(e) = send_to_overlay_peer(address, digest_message.clone(), state.clone()).await {
@@ -75,12 +75,12 @@ pub async fn initiate_push_gossip(data: Vec<CaseEnd>, state: AppState) {
     }
 
     let addresses = {
-        let peer_cache = state.peer_cache.lock().unwrap();
-        peer_cache.sample_addresses(state.config.case_end_gossip.push_fanout, &mut rand::rng())
+        let peer_cache = state.dist().peer_cache.lock().unwrap();
+        peer_cache.sample_addresses(state.config.gossip().push_fanout, &mut rand::rng())
     };
 
     let push_gossip_message = PeerMessage::ce_gossip(CEGossipMessage::new_push(
-        state.config.overlay.listen_address,
+        state.config.overlay().listen_address,
         data,
     ));
 
@@ -116,7 +116,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
                 their_digest
             );
             let (my_digest, live) = {
-                let ce_cache = state.ce_gossip_cache.lock().unwrap();
+                let ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
                 (ce_cache.digest(now), ce_cache.live_entries(now))
             };
             log::debug!("my digest: {}; their digest: {}", my_digest, their_digest);
@@ -128,7 +128,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
                     message.sender_address
                 );
                 let ae_reply_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_set(
-                    state.config.overlay.listen_address,
+                    state.config.overlay().listen_address,
                     live,
                 ));
                 if let Err(e) =

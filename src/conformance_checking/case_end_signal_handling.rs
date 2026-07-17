@@ -18,7 +18,7 @@ pub async fn handle_case_end_info(state: AppState, case_end_info: Vec<CaseEnd>) 
     let now = Utc::now();
     let merge_result = {
         // update cache if needed
-        let mut ce_cache = state.ce_gossip_cache.lock().unwrap();
+        let mut ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
         ce_cache.merge(case_end_info, now)
     };
     log::debug!("merge result: {:?}", merge_result);
@@ -34,7 +34,7 @@ async fn apply_merge(res: MergeResult, state: AppState) {
     let mut to_push = res.new;
     to_push.extend(res.updated);
     // TODO: check if its a decentralized node (config.mode) and only then initiate gossip
-    if let Err(e) = state.outbound_gossip_q.send(to_push).await {
+    if let Err(e) = state.dist().outbound_gossip_q.send(to_push).await {
         log::error!("error passing push gossip to gossip manager: {}", e);
     }
 }

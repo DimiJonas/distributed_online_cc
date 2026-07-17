@@ -29,7 +29,7 @@ pub async fn initiate_tcp_connection(
     let hello = PeerMessage::hello(HelloMessage {
         listening_address: match peer_address.network {
             NetworkType::Conformance => state.config.tcp_listen_address,
-            NetworkType::Overlay => state.config.overlay.listen_address,
+            NetworkType::Overlay => state.config.overlay().listen_address,
         },
     });
 
@@ -178,7 +178,7 @@ async fn tcp_channel(
     mut read_buf: BytesMut,
 ) {
     let idle_timeout = match peer_address.network {
-        NetworkType::Overlay => state.config.overlay.idle_timeout,
+        NetworkType::Overlay => state.config.overlay().idle_timeout,
         NetworkType::Conformance => None,
     };
     let idle_enabled = idle_timeout.is_some();

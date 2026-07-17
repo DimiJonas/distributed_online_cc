@@ -22,7 +22,8 @@ pub fn spawn_loopback_q_processor(state: AppState, mut loopback_q: mpsc::Receive
                     dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
                 }
                 Overlay(_) | CEGossip(_) => {
-                    dispatch_message(msg, state.config.overlay.listen_address, state.clone()).await;
+                    dispatch_message(msg, state.config.overlay().listen_address, state.clone())
+                        .await;
                 }
                 Hello(_) => {
                     log::error!(

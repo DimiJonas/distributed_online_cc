@@ -27,12 +27,12 @@ pub fn spawn_conformance_network_listener(state: AppState) {
 
 pub fn spawn_overlay_network_listener(state: AppState) {
     tokio::spawn(async move {
-        let listener = TcpListener::bind(&state.config.overlay.listen_address)
+        let listener = TcpListener::bind(&state.config.overlay().listen_address)
             .await
             .unwrap();
         log::info!(
             "listening in overlay network for peer messages on {}",
-            state.config.overlay.listen_address
+            state.config.overlay().listen_address
         );
 
         loop {

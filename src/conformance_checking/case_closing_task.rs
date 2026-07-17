@@ -30,7 +30,7 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
         handler.clean_up_state(&case_id, state.clone()).await;
     }
 
-    sleep(state.config.case_end_gossip.case_end_propagation_ttl).await;
+    sleep(state.config.case_end_retention_period).await;
 
     log::debug!("forgetting case {}", case_id);
     {
@@ -100,7 +100,7 @@ mod tests {
     ) -> AppState {
         let mut config = make_config_with_port(0);
         config.case_end_grace_period = grace_period;
-        config.case_end_gossip.case_end_propagation_ttl = propagation_ttl;
+        config.case_end_retention_period = propagation_ttl;
         // No ConstraintConfig variant maps to a test mock, so build the
         // base state from config (empty handler registry)...
         let mut state = make_state_from_config(config);

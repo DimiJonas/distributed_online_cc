@@ -31,7 +31,7 @@ use crate::{
 ///     age is only increased when shuffling is initiated on its own
 pub async fn cyclon_shuffle_initiation_task(state: AppState) {
     loop {
-        sleep(state.config.overlay.shuffle_interval).await;
+        sleep(state.config.overlay().shuffle_interval).await;
         initiate_shuffle(state.clone()).await;
     }
 }
@@ -40,7 +40,7 @@ async fn initiate_shuffle(state: AppState) {
     log::info!("cyclon overlay: initiating shuffle");
 
     let (subset, q_address) = {
-        let mut peer_cache = state.peer_cache.lock().unwrap();
+        let mut peer_cache = state.dist().peer_cache.lock().unwrap();
         // first let all entries age
         peer_cache.advance_age();
         // then remove oldest entry
@@ -54,13 +54,13 @@ async fn initiate_shuffle(state: AppState) {
             }
         };
         // now select batch of l-1 entries
-        let mut subset = peer_cache
-            .select_random_subset(state.config.overlay.shuffle_length - 1, &mut rand::rng());
+        let mut subset: std::collections::HashMap<SocketAddr, u64> = peer_cache
+            .select_random_subset(state.config.overlay().shuffle_length - 1, &mut rand::rng());
         if subset.is_empty() {
             log::warn!("peer cache does not contain any more addresses than Q");
         }
         // and add own address to batch with age 0
-        subset.insert(state.config.overlay.listen_address, 0);
+        subset.insert(state.config.overlay().listen_address, 0);
 
         (subset, q)
     };
@@ -72,7 +72,7 @@ async fn initiate_shuffle(state: AppState) {
 
     let shuffle_req = PeerMessage::overlay_req(
         RequestId::new_v4(),
-        OverlayMessage::new(state.config.overlay.listen_address, subset),
+        OverlayMessage::new(state.config.overlay().listen_address, subset),
     );
 
     // send peer subset to Q and receive another subset from Q
@@ -114,12 +114,12 @@ async fn initiate_shuffle(state: AppState) {
     );
 
     {
-        let mut peer_cache = state.peer_cache.lock().unwrap();
+        let mut peer_cache = state.dist().peer_cache.lock().unwrap();
         peer_cache.update(
-            state.config.overlay.listen_address,
+            state.config.overlay().listen_address,
             &sent,
             received_subset,
-            state.config.overlay.max_peer_cache_size,
+            state.config.overlay().max_peer_cache_size,
         );
     }
 }
