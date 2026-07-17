@@ -1,6 +1,6 @@
 use clap::Parser;
-use distributed_online_cc::config::config_builder::NodeConfigBuilder;
-use distributed_online_cc::config::node_config::NodeConfig;
+use online_cc::config::config_builder::NodeConfigBuilder;
+use online_cc::config::node_config::NodeConfig;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;

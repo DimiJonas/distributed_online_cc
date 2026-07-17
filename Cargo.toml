@@ -1,7 +1,9 @@
 [package]
-name = "distributed_online_cc"
-version = "0.1.0"
+name = "online_cc"
+version = "1.0.0"
 edition = "2024"
+# default binary
+default-run = "node"
 
 [dependencies]
 # cli parsing

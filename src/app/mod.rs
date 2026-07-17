@@ -5,4 +5,5 @@ pub mod gossip_manager;
 pub mod loopback_q_processor;
 pub mod overlay_manager;
 pub mod result_sink;
+pub mod run;
 pub mod tcp_listener;

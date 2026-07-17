@@ -44,13 +44,13 @@ impl CEGossipCache {
         match self.cache.get(&case_end.case_id) {
             None => {
                 self.cache
-                    .insert(case_end.case_id.clone(), case_end.timestamp.clone());
+                    .insert(case_end.case_id.clone(), case_end.timestamp);
                 CaseEndOutcome::New
             }
             Some(&stored) if case_end.timestamp < stored => {
                 // update timestamp to earliest
                 self.cache
-                    .insert(case_end.case_id.clone(), case_end.timestamp.clone());
+                    .insert(case_end.case_id.clone(), case_end.timestamp);
                 CaseEndOutcome::Updated
             }
             Some(_) => CaseEndOutcome::Unchanged,
