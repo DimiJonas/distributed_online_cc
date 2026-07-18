@@ -29,32 +29,29 @@ pub async fn run(config: NodeConfig) {
         }
     };
     let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
-    // gossip channels (only exist for distributed mode)
-    let (outbound_gossip_tx, outbound_gossip_rx) = match config.mode {
-        ConfigMode::Distributed => {
-            let (tx, rx) = mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
-            (Some(tx), Some(rx))
-        }
-        ConfigMode::Central => (None, None),
-    };
-    let (inbound_gossip_tx, inbound_gossip_rx) = match config.mode {
-        ConfigMode::Distributed => {
-            let (tx, rx) = mpsc::channel(config.gossip().gossip_inbound_mpsc_channel_size);
-            (Some(tx), Some(rx))
-        }
-        ConfigMode::Central => (None, None),
-    };
 
-    let state = match config.mode {
-        ConfigMode::Distributed => AppState::new_distributed(
-            config,
-            event_q_tx,
-            loopback_q_tx,
-            sink_tx,
-            outbound_gossip_tx.unwrap(),
-            inbound_gossip_tx.unwrap(),
+    let (state, outbound_gossip_rx, inbound_gossip_rx) = match config.mode {
+        ConfigMode::Distributed => {
+            // gossip channels (only exist for distributed mode)
+            let (outbound_gossip_tx, outbound_gossip_rx) =
+                mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
+            let (inbound_gossip_tx, inbound_gossip_rx) =
+                mpsc::channel(config.gossip().gossip_inbound_mpsc_channel_size);
+            let state = AppState::new_distributed(
+                config,
+                event_q_tx,
+                loopback_q_tx,
+                sink_tx,
+                outbound_gossip_tx,
+                inbound_gossip_tx,
+            );
+            (state, Some(outbound_gossip_rx), Some(inbound_gossip_rx))
+        }
+        ConfigMode::Central => (
+            AppState::new_central(config, event_q_tx, loopback_q_tx, sink_tx),
+            None,
+            None,
         ),
-        ConfigMode::Central => AppState::new_central(config, event_q_tx, loopback_q_tx, sink_tx),
     };
 
     setup_tcp_channels(state.clone()).await;
@@ -70,9 +67,10 @@ pub async fn run(config: NodeConfig) {
         crate::app::result_sink::spawn_result_sink(result_sink_config.clone(), sink_rx);
     }
 
+    // mode specific tasks
     if state.config.mode == ConfigMode::Distributed {
         crate::app::tcp_listener::spawn_overlay_network_listener(state.clone());
-        crate::app::overlay_manager::spawn_overlay_task(state.clone());
+        crate::app::overlay_manager::spawn_cyclon_overlay_task(state.clone());
         crate::app::gossip_manager::spawn_case_end_gossip_manager(
             state.clone(),
             outbound_gossip_rx.unwrap(),

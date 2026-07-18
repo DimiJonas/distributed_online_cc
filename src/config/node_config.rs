@@ -41,6 +41,8 @@ pub struct NodeConfig {
     #[serde(default)]
     pub gossip: Option<GossipConfig>,
     #[serde(default)]
+    pub forwarder: Option<ForwarderConfig>,
+    #[serde(default)]
     pub default_result_buffer: ResultBufferConfig,
     #[serde(default)]
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
@@ -133,14 +135,26 @@ impl NodeConfig {
                 None
             }
         }));
+        if let Some(forwarder_config) = &self.forwarder
+            && let Some(attribute_list) = &forwarder_config.include_event_attributes
+        {
+            attributes.extend(attribute_list.iter().cloned())
+        }
         attributes
     }
 
     pub fn build_event_list(&self) -> HashSet<EventId> {
-        self.constraints
+        let mut events: HashSet<EventId> = self
+            .constraints
             .iter()
             .map(|c| c.event_id().to_string().to_lowercase())
-            .collect()
+            .collect();
+        if let Some(forwarder_config) = &self.forwarder
+            && let Some(event_list) = &forwarder_config.include_event_ids
+        {
+            events.extend(event_list.iter().map(|id| id.to_lowercase()));
+        }
+        events
     }
 }
 
@@ -241,6 +255,16 @@ impl Default for GossipConfig {
             gossip_outbound_mpsc_channel_size: default_gossip_outbound_mpsc_channel_size(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForwarderConfig {
+    #[serde(default)]
+    pub include_event_attributes: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_event_ids: Option<Vec<EventId>>,
+    pub central_node_address: SocketAddr,
 }
 
 #[derive(Debug, PartialEq, Serialize, Clone)]

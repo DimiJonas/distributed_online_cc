@@ -63,7 +63,7 @@ impl Display for PeerAddress {
 }
 
 // augmenting the Event struct from rust4pm with a trace id
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TracedEvent {
     pub case_id: CaseId,
     pub event: Event,

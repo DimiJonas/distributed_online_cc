@@ -4,7 +4,7 @@ use crate::{
     network::{
         message_types::{
             PeerMessage,
-            PeerMessagePayload::{CEGossip, Cli, Conformance, Hello, Overlay, Result},
+            PeerMessagePayload::{CEGossip, Cli, Conformance, Event, Hello, Overlay, Result},
         },
         tcp_channel::dispatch_message,
     },
@@ -18,7 +18,7 @@ pub fn spawn_loopback_q_processor(state: AppState, mut loopback_q: mpsc::Receive
     tokio::spawn(async move {
         while let Some(msg) = loopback_q.recv().await {
             match msg.payload {
-                Cli(_) | Conformance(_) | Result(_) => {
+                Cli(_) | Conformance(_) | Result(_) | Event(_) => {
                     dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
                 }
                 Overlay(_) | CEGossip(_) => {

@@ -25,6 +25,7 @@ pub fn spawn_event_listener(state: AppState) {
                 state.event_q.clone(),
                 configured_attributes.clone(),
                 configured_events.clone(),
+                state.clone(),
             ));
         }
     });

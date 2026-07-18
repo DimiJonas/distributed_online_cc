@@ -3,7 +3,7 @@ use crate::{
     state::app_state::AppState,
 };
 
-pub fn spawn_overlay_task(state: AppState) {
+pub fn spawn_cyclon_overlay_task(state: AppState) {
     // populate peer cache
     log::info!("initializing overlay peer cache");
     {

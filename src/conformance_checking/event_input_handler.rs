@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::network::message_types::PeerMessage;
+use crate::network::tcp_router::send_to_conformance_peer;
+use crate::state::app_state::AppState;
 use crate::types::{CaseId, EventId, TracedEvent};
 use bytes::BytesMut;
 use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
@@ -14,6 +17,7 @@ pub async fn handle_event(
     event_q: mpsc::Sender<TracedEvent>,
     configured_attributes: Arc<HashSet<String>>,
     configured_events: Arc<HashSet<EventId>>,
+    state: AppState,
 ) {
     let mut read_buf = BytesMut::with_capacity(8 * 1024);
 
@@ -24,9 +28,15 @@ pub async fn handle_event(
             break;
         }
 
+        // only filter attributes if they are configured (mainly for forwarder nodes)
+        let attribute_filter = match configured_attributes.is_empty() {
+            false => Some((*configured_attributes).clone()),
+            true => None,
+        };
+
         let import_options: XESImportOptions = XESImportOptions {
             // list contains event name, timestamp and the sensor constraint attributes
-            ignore_event_attributes_except: Some((*configured_attributes).clone()),
+            ignore_event_attributes_except: attribute_filter,
             // auto-sort events within each trace by timestamp
             sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
             // silence parse warnings in production
@@ -52,19 +62,34 @@ pub async fn handle_event(
                     case_id: trace_id.clone(),
                     event,
                 };
+                log::debug!("handle_event: handling event {}", traced_event);
 
                 if let Some(event_id) = traced_event.name() {
                     if configured_events.contains(event_id) {
-                        match event_q.send(traced_event).await {
-                            Ok(()) => {}
-                            Err(e) => {
-                                // error, shut down event handler worker task
+                        if let Some(forwarder_config) = &state.config.forwarder {
+                            // forward the event to the central node
+                            let message = PeerMessage::event(traced_event);
+                            if let Err(e) = send_to_conformance_peer(
+                                forwarder_config.central_node_address,
+                                message,
+                                state.clone(),
+                            )
+                            .await
+                            {
                                 log::error!(
-                                    "event input handler dropped, unable to send event: {}",
+                                    "handle_event: error sending the event to the central node: {}",
                                     e
                                 );
-                                // TODO: trigger respawn of event input handler?
-                                break;
+                                continue;
+                            }
+                        } else {
+                            // put the event directly in the event q
+                            if let Err(e) = event_q.send(traced_event).await {
+                                log::error!(
+                                    "handle_event: unable to send event into event queue: {}",
+                                    e
+                                );
+                                continue;
                             }
                         }
                     } else {
@@ -100,7 +125,7 @@ mod tests {
 
     use crate::conformance_checking::event_input_handler::handle_event;
     use crate::types::EventId;
-    use crate::util::test_tools::minimal_xes;
+    use crate::util::test_tools::{make_state, minimal_xes};
 
     fn no_filters() -> (Arc<HashSet<String>>, Arc<HashSet<EventId>>) {
         (Arc::new(HashSet::new()), Arc::new(HashSet::new()))
@@ -121,6 +146,7 @@ mod tests {
     /// A valid XES document produces a TracedEvent on the queue.
     #[tokio::test]
     async fn valid_xes_produces_event_on_queue() {
+        let state = make_state(11000);
         let socket_path = "/tmp/test_eih_valid.sock";
         let _ = std::fs::remove_file(socket_path);
 
@@ -130,7 +156,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
         });
 
         let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
@@ -154,6 +180,7 @@ mod tests {
     /// Closing the connection immediately (zero bytes) must not panic.
     #[tokio::test]
     async fn empty_connection_does_not_panic() {
+        let state = make_state(11001);
         let socket_path = "/tmp/test_eih_empty.sock";
         let _ = std::fs::remove_file(socket_path);
 
@@ -163,7 +190,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
         });
 
         let client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
@@ -176,6 +203,7 @@ mod tests {
     /// Multiple traces in a single XES document each yield one event.
     #[tokio::test]
     async fn multiple_traces_produce_multiple_events() {
+        let state = make_state(11001);
         let socket_path = "/tmp/test_eih_multi.sock";
         let _ = std::fs::remove_file(socket_path);
 
@@ -185,7 +213,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
         });
 
         let xes = r#"<?xml version="1.0" encoding="UTF-8" ?>
@@ -229,6 +257,7 @@ mod tests {
     /// Events within a trace are sorted by timestamp before being enqueued.
     #[tokio::test]
     async fn events_are_sorted_by_timestamp() {
+        let state = make_state(11001);
         let socket_path = "/tmp/test_eih_sort.sock";
         let _ = std::fs::remove_file(socket_path);
 
@@ -238,7 +267,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
         });
 
         let xes = r#"<?xml version="1.0" encoding="UTF-8" ?>
@@ -279,6 +308,7 @@ mod tests {
     /// Events not in the filter are not enqueued.
     #[tokio::test]
     async fn filtered_out_events_are_not_enqueued() {
+        let state = make_state(11001);
         let socket_path = "/tmp/test_eih_filter.sock";
         let _ = std::fs::remove_file(socket_path);
 
@@ -289,7 +319,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            handle_event(stream, event_tx, filter_attributes, filter_events).await;
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
         });
 
         let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();

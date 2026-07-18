@@ -417,18 +417,14 @@ pub async fn dispatch_to_handler(msg: PeerMessage, address: SocketAddr, state: A
             ));
         }
         PeerMessagePayload::Result(res_msg) => {
-            log::info!(
-                "received conformance result message for {}/{}",
-                res_msg.case_id,
-                res_msg.constraint_id
-            );
-            if let Err(e) = state.result_sink_channel.send(res_msg.clone()).await {
-                log::error!(
-                    "dispatch_to_handler: error passing result message {} to result sink: {}",
-                    res_msg,
-                    e
-                );
-            }
+            tokio::spawn(handle_result_message(
+                res_msg,
+                state.clone(),
+                msg.message_id,
+            ));
+        }
+        PeerMessagePayload::Event(event) => {
+            tokio::spawn(handle_event_message(event, state.clone(), msg.message_id));
         }
     }
 }

@@ -13,8 +13,8 @@ use crate::{
 
 pub fn spawn_case_end_gossip_manager(
     state: AppState,
-    mut push_gossip_q: mpsc::Receiver<Vec<CaseEnd>>,
-    mut gossip_message_receiver: mpsc::Receiver<CEGossipMessage>, // 1024
+    mut outbound_gossip_q: mpsc::Receiver<Vec<CaseEnd>>,
+    mut inbound_gossip_q: mpsc::Receiver<CEGossipMessage>,
 ) {
     let mut anti_entropy_interval =
         tokio::time::interval(state.config.gossip().anti_entropy_interval);
@@ -55,12 +55,12 @@ pub fn spawn_case_end_gossip_manager(
                 }
 
                 // receive gossip to spread from the application
-                Some(data) = push_gossip_q.recv() => {
+                Some(data) = outbound_gossip_q.recv() => {
                     initiate_push_gossip(data, state.clone()).await;
                 }
 
                 // message from another peer
-                Some(msg) = gossip_message_receiver.recv() => {
+                Some(msg) = inbound_gossip_q.recv() => {
                     handle_inbound_message(msg, state.clone()).await;
                 }
 

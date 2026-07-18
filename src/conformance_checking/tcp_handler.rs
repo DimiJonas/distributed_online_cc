@@ -6,11 +6,12 @@
 use std::net::SocketAddr;
 
 use crate::network::message_types::{
-    CCMessage, CEGossipMessage, CliTestMessage, MessageKind, OverlayMessage, PeerMessage,
+    CCMessage, CCResultMessage, CEGossipMessage, CliTestMessage, MessageKind, OverlayMessage,
+    PeerMessage,
 };
 use crate::network::tcp_router::{send_to_conformance_peer, send_to_overlay_peer};
 use crate::state::app_state::AppState;
-use crate::types::{MessageId, RequestId};
+use crate::types::{MessageId, RequestId, TracedEvent};
 
 pub async fn handle_cli_message(
     msg: CliTestMessage,
@@ -223,6 +224,36 @@ pub async fn handle_overlay_message(
         log::error!(
             "cyclon overlay: error responding to shuffle request from {}: {}",
             msg.sender_address,
+            e
+        );
+    }
+}
+
+pub async fn handle_result_message(msg: CCResultMessage, state: AppState, msg_id: MessageId) {
+    log::debug!(
+        "handle_result_message: handling result message message with id={} msg={}",
+        msg_id,
+        msg
+    );
+
+    if let Err(e) = state.result_sink_channel.send(msg).await {
+        log::error!(
+            "dispatch_to_handler: unable to put result message into result sink channel: {}",
+            e
+        );
+    }
+}
+
+pub async fn handle_event_message(event: TracedEvent, state: AppState, msg_id: MessageId) {
+    log::debug!(
+        "handle_event_message: handling message with id={} event={}",
+        msg_id,
+        event
+    );
+
+    if let Err(e) = state.event_q.send(event).await {
+        log::error!(
+            "handle_event_message: unable to put event into event q: {}",
             e
         );
     }

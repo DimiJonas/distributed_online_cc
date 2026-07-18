@@ -9,7 +9,7 @@ use crate::{
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
         CaseEnd, CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType,
-        EventTime, MessageId, PeerBatch, RequestId, Token,
+        EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
     },
 };
 
@@ -156,6 +156,10 @@ impl PeerMessage {
     pub fn result(msg: CCResultMessage) -> Self {
         Self::new(PeerMessagePayload::Result(msg))
     }
+
+    pub fn event(event: TracedEvent) -> Self {
+        Self::new(PeerMessagePayload::Event(event))
+    }
 }
 
 impl Display for PeerMessage {
@@ -172,6 +176,7 @@ pub enum PeerMessagePayload {
     Overlay(OverlayMessage),
     CEGossip(CEGossipMessage),
     Result(CCResultMessage),
+    Event(TracedEvent),
 }
 
 impl Display for PeerMessagePayload {
@@ -183,6 +188,7 @@ impl Display for PeerMessagePayload {
             PeerMessagePayload::Overlay(_) => write!(f, "overlay"),
             PeerMessagePayload::CEGossip(_) => write!(f, "case-end-gossip"),
             PeerMessagePayload::Result(_) => write!(f, "result"),
+            PeerMessagePayload::Event(_) => write!(f, "event"),
         }
     }
 }

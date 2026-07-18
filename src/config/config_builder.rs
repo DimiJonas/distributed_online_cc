@@ -231,6 +231,7 @@ pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
         default_result_buffer: ResultBufferConfig::Immediate,
         overlay,
         gossip,
+        forwarder: None,
     };
     message_types::init(config.clone()); // see caveat above
     config
