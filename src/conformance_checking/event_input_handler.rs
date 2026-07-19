@@ -28,15 +28,9 @@ pub async fn handle_event(
             break;
         }
 
-        // only filter attributes if they are configured (mainly for forwarder nodes)
-        let attribute_filter = match configured_attributes.is_empty() {
-            false => Some((*configured_attributes).clone()),
-            true => None,
-        };
-
         let import_options: XESImportOptions = XESImportOptions {
-            // list contains event name, timestamp and the sensor constraint attributes
-            ignore_event_attributes_except: attribute_filter,
+            // list contains event name, timestamp (and the sensor constraint attributes if configured)
+            ignore_event_attributes_except: Some((*configured_attributes).clone()),
             // auto-sort events within each trace by timestamp
             sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
             // silence parse warnings in production

@@ -1,0 +1,178 @@
+node_id = 1
+tcp_listen_address = "127.0.0.1:8001"
+unix_socket = "/tmp/event_listener_c.sock"
+log_file = "central-node.log"
+result_sink_addresses = ["127.0.0.1:8001"]
+
+[result_sink]
+db_path = "run/central-results.db"
+mpsc_channel_size = 1024
+retry_interval = "15s"
+retry_buffer_size = 4096
+
+[[constraints]]
+constraint_role = "EndActivity"
+constraint_id = "end_activity"
+event_id = "dummy_end_activity"
+
+[[constraints]]
+constraint_role = "AppearanceCounter"
+constraint_id = "appearance_test"
+event_id = "appearance_counter_event"
+mode = "Max"
+frequency = 3
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "AppearanceTrigger"
+constraint_id = "appearance_test"
+event_id = "appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter1_event"
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceCounter"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_counter2_event"
+reset = "Zero"
+
+[[constraints]]
+constraint_role = "DistributedAppearanceTrigger"
+constraint_id = "distributed_appearance_test"
+event_id = "distributed_appearance_trigger_event"
+counter_peers = ["127.0.0.1:8001", "127.0.0.1:8001"]
+mode = "Min"
+frequency = 5
+
+[[constraints]]
+constraint_role = "NotCoexistenceA"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_a_event"
+b_peer = "127.0.0.1:8001"
+
+[[constraints]]
+constraint_role = "NotCoexistenceB"
+constraint_id = "not_coexistence_test"
+event_id = "not_coexistence_b_event"
+a_peer = "127.0.0.1:8001"
+
+[[constraints]]
+constraint_role = "OrderFirst"
+constraint_id = "order_test"
+event_id = "order_first_event"
+
+[[constraints]]
+constraint_role = "OrderSecond"
+constraint_id = "order_test"
+event_id = "order_second_event"
+order_first_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "PrecedenceConsumer"
+constraint_id = "precedence_test"
+event_id = "precedence_consumer_event"
+
+
+[[constraints]]
+constraint_role = "PrecedenceProducer"
+constraint_id = "precedence_test"
+event_id = "precedence_producer_event"
+consumer_peers = ["127.0.0.1:8001"]
+
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_collector_event"
+attribute_key = "lt_value"
+mode = "<"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_collector_event"
+attribute_key = "gt_value"
+mode = ">"
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_collector_event"
+attribute_key = "lte_value"
+mode = "<="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_collector_event"
+attribute_key = "gte_value"
+mode = ">="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorCollector"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_collector_event"
+attribute_key = "eq_value"
+mode = "=="
+value = 10
+max_value_age = "10s"
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gt_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_lte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_gte_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "SensorTrigger"
+constraint_id = "sensor_eq_test"
+event_id = "sensor_trigger_event"
+collector_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "TimeStart"
+constraint_id = "time_test"
+event_id = "time_start_event"
+duration = "10s"
+mode = "Min"
+
+[[constraints]]
+constraint_role = "TimeStop"
+constraint_id = "time_test"
+event_id = "time_stop_event"
+time_start_peers = ["127.0.0.1:8001"]
+
+[result_buffers.time_test]
+policy = "Revocable"
+duration = "10s"

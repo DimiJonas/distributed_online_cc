@@ -1,4 +1,4 @@
-node_id = 1
+node_id = 3
 tcp_listen_address = "127.0.0.1:8003"
 unix_socket = "/tmp/event_listener_e.sock"
 log_file = "end-node.log"
