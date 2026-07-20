@@ -1,10 +1,10 @@
-use crate::types::{CaseId, ConstraintHandlerId, ConstraintId, EventTime, Token};
-use std::collections::HashMap;
+use crate::types::{CaseId, EventTime, HandlerIndex, Token};
+use std::collections::{HashMap, hash_map::Entry};
 
 #[derive(Debug, Default)]
 pub struct TokenOutStore {
     // tokens produced by the node destined to be pushed to or pulled by other nodes
-    token_out: HashMap<(CaseId, ConstraintId, ConstraintHandlerId), Token>,
+    token_out: HashMap<CaseId, HashMap<HandlerIndex, Token>>,
 }
 
 impl TokenOutStore {
@@ -13,149 +13,75 @@ impl TokenOutStore {
     }
 
     /// puts the token into token_out overwriting existing tokens
-    pub fn produce_with_overwrite(&mut self, token: Token, handler_id: ConstraintHandlerId) {
-        let case_id = token.case_id.clone();
-        let constraint_id = token.constraint_id.clone();
-        if self.contains_out_token(&case_id, &constraint_id, handler_id) {
-            log::debug!(
-                "produce: token for ({}, {}) already exists, overwriting",
-                case_id,
-                constraint_id
-            );
-        }
+    pub fn produce_with_overwrite(&mut self, token: Token, index: HandlerIndex) {
         self.token_out
-            .insert((case_id, constraint_id, handler_id), token);
+            .entry(token.case_id.clone())
+            .or_default()
+            .insert(index, token);
     }
 
-    /// puts the token into token_out NOT overwriting existing tokens
-    ///
-    /// returns
-    ///     - true if token was inserted
-    ///     - false if token was not inserted because there already exists a token for the same key
-    pub fn produce_without_overwrite(
-        &mut self,
-        token: Token,
-        handler_id: ConstraintHandlerId,
-    ) -> bool {
-        let case_id = token.case_id.clone();
-        let constraint_id = token.constraint_id.clone();
-        let mut inserted = false;
-        if self.contains_out_token(&case_id, &constraint_id, handler_id) {
-            log::warn!(
-                "produce: token for ({}, {}) already exists, keeping old token",
-                case_id,
-                constraint_id
-            );
-        } else {
-            self.token_out
-                .insert((case_id, constraint_id, handler_id), token);
-            inserted = true;
+    pub fn produce_without_overwrite(&mut self, token: Token, index: HandlerIndex) {
+        let inner_map = self.token_out.entry(token.case_id.clone()).or_default();
+        if let Entry::Vacant(e) = inner_map.entry(index) {
+            e.insert(token);
         }
-        inserted
     }
 
-    pub fn remove_out(
-        &mut self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<Token> {
-        self.token_out
-            .remove(&(case_id.clone(), constraint_id.clone(), handler_id))
+    pub fn remove_out(&mut self, case_id: &CaseId, index: HandlerIndex) -> Option<Token> {
+        let inner_map = self.token_out.get_mut(case_id)?;
+        let token = inner_map.remove(&index);
+        if inner_map.is_empty() {
+            self.token_out.remove(case_id);
+        }
+        token
     }
 
     pub fn remove_out_before(
         &mut self,
         case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
+        index: HandlerIndex,
         timestamp: EventTime,
     ) -> Option<Token> {
-        if let Some(token) =
-            self.token_out
-                .get(&(case_id.clone(), constraint_id.clone(), handler_id))
-        {
-            let token_time = {
-                if let Some(event_time) = token.event_time {
-                    event_time
-                } else {
-                    token.created_at
-                }
-            };
-            if token_time < timestamp {
-                return self.token_out.remove(&(
-                    case_id.clone(),
-                    constraint_id.clone(),
-                    handler_id,
-                ));
-            }
+        let inner_map = self.token_out.get_mut(case_id)?;
+        let token_time = {
+            let token = inner_map.get(&index)?;
+            token.event_time.unwrap_or(token.created_at)
+        };
+        if token_time >= timestamp {
+            return None;
         }
-        None
+
+        let token = inner_map.remove(&index);
+        if inner_map.is_empty() {
+            self.token_out.remove(case_id);
+        }
+        token
     }
 
-    pub fn contains_out_token(
-        &self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> bool {
+    pub fn contains_out_token(&self, case_id: &CaseId, index: HandlerIndex) -> bool {
         self.token_out
-            .contains_key(&(case_id.clone(), constraint_id.clone(), handler_id))
+            .get(case_id)
+            .is_some_and(|inner| inner.contains_key(&index))
     }
 
     pub fn contains_out_token_before(
         &self,
         case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
+        index: HandlerIndex,
         timestamp: EventTime,
     ) -> bool {
-        if let Some(token) =
-            self.token_out
-                .get(&(case_id.clone(), constraint_id.clone(), handler_id))
-        {
-            let token_time = {
-                if let Some(event_time) = token.event_time {
-                    event_time
-                } else {
-                    token.created_at
-                }
-            };
-            return token_time < timestamp;
-        }
-        false
+        self.token_out
+            .get(case_id)
+            .and_then(|inner| inner.get(&index))
+            .is_some_and(|token| token.event_time.unwrap_or(token.created_at) < timestamp)
     }
 
-    pub fn get_out_mut(
-        &mut self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<&mut Token> {
-        self.token_out
-            .get_mut(&(case_id.clone(), constraint_id.clone(), handler_id))
+    pub fn get_out_mut(&mut self, case_id: &CaseId, index: HandlerIndex) -> Option<&mut Token> {
+        self.token_out.get_mut(case_id)?.get_mut(&index)
     }
 
-    pub fn get_out_cloned(
-        &self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> Option<Token> {
-        self.token_out
-            .get(&(case_id.clone(), constraint_id.clone(), handler_id))
-            .cloned()
-    }
-
-    // are there still open obligations e.g. are there tokens in token_out
-    pub fn has_open_token(
-        &self,
-        case_id: &CaseId,
-        constraint_id: &ConstraintId,
-        handler_id: ConstraintHandlerId,
-    ) -> bool {
-        self.token_out
-            .contains_key(&(case_id.clone(), constraint_id.clone(), handler_id))
+    pub fn get_out_cloned(&self, case_id: &CaseId, index: HandlerIndex) -> Option<Token> {
+        self.token_out.get(case_id)?.get(&index).cloned()
     }
 }
 
@@ -167,41 +93,15 @@ mod tests {
     #[test]
     fn produce_and_has_open_token() {
         let mut store = TokenOutStore::new();
-        store.produce_with_overwrite(
-            make_token("case-1", "constraint-a"),
-            ConstraintHandlerId::ResponseProducer,
-        );
-        assert!(store.has_open_token(
-            &"case-1".to_string(),
-            &"constraint-a".to_string(),
-            ConstraintHandlerId::ResponseProducer
-        ));
+        store.produce_with_overwrite(make_token("case-1", "constraint-a"), 0);
+        assert!(store.contains_out_token(&"case-1".to_string(), 0));
     }
 
     #[test]
     fn remove_out_returns_token_and_clears_it() {
         let mut store = TokenOutStore::new();
-        store.produce_with_overwrite(
-            make_token("case-1", "constraint-a"),
-            ConstraintHandlerId::ResponseProducer,
-        );
-        assert!(
-            store
-                .remove_out(
-                    &"case-1".to_string(),
-                    &"constraint-a".to_string(),
-                    ConstraintHandlerId::ResponseProducer
-                )
-                .is_some()
-        );
-        assert!(
-            store
-                .remove_out(
-                    &"case-1".to_string(),
-                    &"constraint-a".to_string(),
-                    ConstraintHandlerId::ResponseProducer
-                )
-                .is_none()
-        );
+        store.produce_with_overwrite(make_token("case-1", "constraint-a"), 0);
+        assert!(store.remove_out(&"case-1".to_string(), 0).is_some());
+        assert!(store.remove_out(&"case-1".to_string(), 0).is_none());
     }
 }

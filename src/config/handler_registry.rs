@@ -25,7 +25,7 @@ use crate::conformance_checking::constraint_logic::sensor_constraint_handler::{
 use crate::conformance_checking::constraint_logic::time_constraint_handler::{
     TimeStartHandler, TimeStopHandler,
 };
-use crate::types::{ConstraintHandlerId, ConstraintId, EventId};
+use crate::types::{ConstraintId, ConstraintRole, EventId};
 use std::collections::HashMap;
 
 pub struct HandlerRegistry {
@@ -51,12 +51,14 @@ impl HandlerRegistry {
         let mut registry = HandlerRegistry::new();
 
         for constraint in &config.constraints {
+            let index = registry.handlers.len();
             let handler: Box<dyn ConstraintHandler> = match constraint {
                 ConstraintConfig::ResponseProducer {
                     constraint_id,
                     event_id,
                 } => Box::new(ResponseProducerHandler {
-                    handler_id: ConstraintHandlerId::ResponseProducer,
+                    index,
+                    role: ConstraintRole::ResponseProducer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -65,7 +67,8 @@ impl HandlerRegistry {
                     event_id,
                     producer_peers,
                 } => Box::new(ResponseConsumerHandler {
-                    handler_id: ConstraintHandlerId::ResponseConsumer,
+                    index,
+                    role: ConstraintRole::ResponseConsumer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     producer_peers: producer_peers.clone(),
@@ -74,7 +77,8 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(EndActivityHandler {
-                    handler_id: ConstraintHandlerId::EndActivity,
+                    index,
+                    role: ConstraintRole::EndActivity,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -83,7 +87,8 @@ impl HandlerRegistry {
                     event_id,
                     consumer_peers,
                 } => Box::new(PrecedenceProducerHandler {
-                    handler_id: ConstraintHandlerId::PrecedenceProducer,
+                    index,
+                    role: ConstraintRole::PrecedenceProducer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     consumer_peers: consumer_peers.clone(),
@@ -92,7 +97,8 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(PrecedenceConsumerHandler {
-                    handler_id: ConstraintHandlerId::PrecedenceConsumer,
+                    index,
+                    role: ConstraintRole::PrecedenceConsumer,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -100,7 +106,8 @@ impl HandlerRegistry {
                     constraint_id,
                     event_id,
                 } => Box::new(OrderFirstHandler {
-                    handler_id: ConstraintHandlerId::OrderFirst,
+                    index,
+                    role: ConstraintRole::OrderFirst,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                 }),
@@ -109,7 +116,8 @@ impl HandlerRegistry {
                     event_id,
                     order_first_peers,
                 } => Box::new(OrderSecondHandler {
-                    handler_id: ConstraintHandlerId::OrderSecond,
+                    index,
+                    role: ConstraintRole::OrderSecond,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     order_first_peers: order_first_peers.clone(),
@@ -122,7 +130,8 @@ impl HandlerRegistry {
                     mode,
                     max_value_age,
                 } => Box::new(SensorCollectorHandler {
-                    handler_id: ConstraintHandlerId::SensorCollector,
+                    index,
+                    role: ConstraintRole::SensorCollector,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     attribute_key: attribute_key.clone(),
@@ -135,7 +144,8 @@ impl HandlerRegistry {
                     event_id,
                     collector_peers,
                 } => Box::new(SensorTriggerHandler {
-                    handler_id: ConstraintHandlerId::SensorTrigger,
+                    index,
+                    role: ConstraintRole::SensorTrigger,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     collector_peers: collector_peers.clone(),
@@ -146,7 +156,8 @@ impl HandlerRegistry {
                     duration,
                     mode,
                 } => Box::new(TimeStartHandler {
-                    handler_id: ConstraintHandlerId::TimeStart,
+                    index,
+                    role: ConstraintRole::TimeStart,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     duration: *duration,
@@ -157,7 +168,8 @@ impl HandlerRegistry {
                     event_id,
                     time_start_peers,
                 } => Box::new(TimeStopHandler {
-                    handler_id: ConstraintHandlerId::TimeStop,
+                    index,
+                    role: ConstraintRole::TimeStop,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     time_start_peers: time_start_peers.clone(),
@@ -167,7 +179,8 @@ impl HandlerRegistry {
                     event_id,
                     b_peer,
                 } => Box::new(NotCoexistenceAHandler {
-                    handler_id: ConstraintHandlerId::NotCoexistenceA,
+                    index,
+                    role: ConstraintRole::NotCoexistenceA,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     b_peer: *b_peer,
@@ -177,7 +190,8 @@ impl HandlerRegistry {
                     event_id,
                     a_peer,
                 } => Box::new(NotCoexistenceBHandler {
-                    handler_id: ConstraintHandlerId::NotCoexistenceB,
+                    index,
+                    role: ConstraintRole::NotCoexistenceB,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     a_peer: *a_peer,
@@ -189,7 +203,8 @@ impl HandlerRegistry {
                     frequency,
                     reset,
                 } => Box::new(AppearanceCounterHandler {
-                    handler_id: ConstraintHandlerId::AppearanceCounter,
+                    index,
+                    role: ConstraintRole::AppearanceCounter,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     mode: mode.clone(),
@@ -201,7 +216,8 @@ impl HandlerRegistry {
                     event_id,
                     counter_peers,
                 } => Box::new(AppearanceTriggerHandler {
-                    handler_id: ConstraintHandlerId::AppearanceTrigger,
+                    index,
+                    role: ConstraintRole::AppearanceTrigger,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     counter_peers: counter_peers.clone(),
@@ -211,7 +227,8 @@ impl HandlerRegistry {
                     event_id,
                     reset,
                 } => Box::new(DistributedAppearanceCounterHandler {
-                    handler_id: ConstraintHandlerId::DistributedAppearanceCounter,
+                    index,
+                    role: ConstraintRole::DistributedAppearanceCounter,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     reset: reset.clone(),
@@ -223,7 +240,8 @@ impl HandlerRegistry {
                     frequency,
                     counter_peers,
                 } => Box::new(DistributedAppearanceTriggerHandler {
-                    handler_id: ConstraintHandlerId::DistributedAppearanceTrigger,
+                    index,
+                    role: ConstraintRole::DistributedAppearanceTrigger,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
                     counter_peers: counter_peers.clone(),
@@ -231,7 +249,7 @@ impl HandlerRegistry {
                     frequency: *frequency,
                 }),
             };
-            registry.register(handler);
+            registry.register(handler, index);
         }
 
         registry
@@ -258,18 +276,16 @@ impl HandlerRegistry {
         self.handlers.iter().map(|h| h.as_ref())
     }
 
-    pub fn register(&mut self, handler: Box<dyn ConstraintHandler>) {
-        let idx = self.handlers.len();
-
+    pub fn register(&mut self, handler: Box<dyn ConstraintHandler>, index: usize) {
         self.by_event_id
             .entry(handler.event_id().to_string())
             .or_default()
-            .push(idx);
+            .push(index);
 
         self.by_constraint_id
             .entry(handler.constraint_id().to_string())
             .or_default()
-            .push(idx);
+            .push(index);
 
         self.handlers.push(handler);
     }
@@ -286,6 +302,16 @@ mod tests {
     use super::*;
     use crate::config::node_config::ConstraintConfig;
     use crate::util::test_tools::make_config_with_constraints;
+
+    impl HandlerRegistry {
+        // returns the first index by constraint id
+        pub fn get_handler_index_by_constraint_id(
+            &self,
+            constraint_id: &ConstraintId,
+        ) -> Option<usize> {
+            self.by_constraint_id.get(constraint_id)?.first().copied()
+        }
+    }
 
     #[test]
     fn empty_registry_returns_nothing() {

@@ -30,16 +30,17 @@ use crate::conformance_checking::result_emitter::emit_result;
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::state::app_state::AppState;
 use crate::types::{
-    CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventTime,
-    RequestId, Token, TracedEvent,
+    CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId, EventTime,
+    HandlerIndex, RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
 
 pub struct ResponseProducerHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
-    pub event_id: String,
+    pub event_id: EventId,
 }
 
 #[async_trait]
@@ -74,7 +75,7 @@ impl ConstraintHandler for ResponseProducerHandler {
         );
         {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.produce_with_overwrite(producer_token.clone(), self.handler_id);
+            token_out.produce_with_overwrite(producer_token.clone(), self.index);
         }
 
         log::info!(
@@ -142,12 +143,7 @@ impl ConstraintHandler for ResponseProducerHandler {
 
         if let Some(token) = {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out_before(
-                &message.case_id,
-                &self.constraint_id,
-                self.handler_id,
-                consumer_event_time,
-            )
+            token_out.remove_out_before(&message.case_id, self.index, consumer_event_time)
         } {
             log::info!("response producer handler: removed token {}", token);
             log::debug!("token={:?}", token);
@@ -186,7 +182,7 @@ impl ConstraintHandler for ResponseProducerHandler {
         // create constraint result
         let (constraint_result, info) = {
             let mut token_out = state.token_out.lock().unwrap();
-            match token_out.remove_out(case_id, &self.constraint_id, self.handler_id) {
+            match token_out.remove_out(case_id, self.index) {
                 Some(token) => (
                     ConstraintResultType::Violated,
                     format!(
@@ -222,15 +218,16 @@ impl ConstraintHandler for ResponseProducerHandler {
         // remove producer token
         {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+            token_out.remove_out(case_id, self.index);
         }
     }
 }
 
 pub struct ResponseConsumerHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
-    pub event_id: String,
+    pub event_id: EventId,
     pub producer_peers: Vec<SocketAddr>,
 }
 
@@ -322,7 +319,7 @@ mod tests {
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
-        types::ConstraintHandlerId,
+        types::ConstraintRole,
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state_from_config, peer_addr,
             register_manager,
@@ -354,7 +351,8 @@ mod tests {
         }
 
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 1,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -365,11 +363,13 @@ mod tests {
             )
             .await;
 
-        assert!(state.token_out.lock().unwrap().has_open_token(
-            &"c1".to_string(),
-            &"rp".to_string(),
-            handler.handler_id()
-        ));
+        assert!(
+            state
+                .token_out
+                .lock()
+                .unwrap()
+                .contains_out_token(&"c1".to_string(), 1)
+        );
     }
 
     /// handle_message with DeleteToken removes the token.
@@ -382,7 +382,8 @@ mod tests {
         }
 
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 2,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -393,22 +394,26 @@ mod tests {
                 state.clone(),
             )
             .await;
-        assert!(state.token_out.lock().unwrap().has_open_token(
-            &"c2".to_string(),
-            &"rp".to_string(),
-            handler.handler_id()
-        ));
+        assert!(
+            state
+                .token_out
+                .lock()
+                .unwrap()
+                .contains_out_token(&"c2".to_string(), 2)
+        );
 
         let delete_msg = CCMessage::delete_token("c2".to_string(), "rp".to_string(), Utc::now());
         handler
             .handle_message(state.clone(), delete_msg, None)
             .await;
 
-        assert!(!state.token_out.lock().unwrap().has_open_token(
-            &"c2".to_string(),
-            &"rp".to_string(),
-            handler.handler_id()
-        ));
+        assert!(
+            !state
+                .token_out
+                .lock()
+                .unwrap()
+                .contains_out_token(&"c2".to_string(), 2)
+        );
     }
 
     /// handle_case_end with an open token → result is Violated.
@@ -421,7 +426,8 @@ mod tests {
         }
 
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 3,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -456,7 +462,8 @@ mod tests {
         }
 
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 4,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -486,7 +493,8 @@ mod tests {
         }
 
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 5,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -501,11 +509,13 @@ mod tests {
         let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
         handler.handle_message(state.clone(), trigger, None).await;
 
-        assert!(state.token_out.lock().unwrap().has_open_token(
-            &"c5".to_string(),
-            &"rp".to_string(),
-            handler.handler_id()
-        ));
+        assert!(
+            state
+                .token_out
+                .lock()
+                .unwrap()
+                .contains_out_token(&"c5".to_string(), 5)
+        );
     }
 
     // -- Response scenarios (producer-side evaluator) --
@@ -526,7 +536,8 @@ mod tests {
             store.register_case("c8".to_string());
         }
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 6,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -567,7 +578,8 @@ mod tests {
             store.register_case("c9".to_string());
         }
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 7,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -608,7 +620,8 @@ mod tests {
             store.register_case("c10".to_string());
         }
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 8,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -649,7 +662,8 @@ mod tests {
             store.register_case("c11".to_string());
         }
         let handler = ResponseProducerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 9,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "produce".to_string(),
         };
@@ -698,7 +712,8 @@ mod tests {
         let mut mgr_rx = register_manager(&state, producer_addr);
 
         let handler = ResponseConsumerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 10,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "consume".to_string(),
             producer_peers: vec![producer_addr.address],
@@ -751,7 +766,8 @@ mod tests {
         let mut rx2 = register_manager(&state, p2);
 
         let handler = ResponseConsumerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 11,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "consume".to_string(),
             producer_peers: vec![p1.address, p2.address],
@@ -780,7 +796,8 @@ mod tests {
     fn consumer_configured_peers() {
         let peers = vec![addr(20070), addr(20071)];
         let handler = ResponseConsumerHandler {
-            handler_id: ConstraintHandlerId::ResponseProducer,
+            index: 12,
+            role: ConstraintRole::ResponseProducer,
             constraint_id: "rp".to_string(),
             event_id: "consume".to_string(),
             producer_peers: peers.clone(),

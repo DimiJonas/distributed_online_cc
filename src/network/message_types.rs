@@ -8,7 +8,7 @@ use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
-        CaseEnd, CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType,
+        CaseEnd, CaseId, ConstraintRole, ConstraintId, ConstraintResultType, ConstraintType,
         EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
     },
 };
@@ -248,7 +248,7 @@ pub struct CCMessage {
     pub sender_address: Option<SocketAddr>,
     // present for: PushToken for NotCoexistence constraint pushing claim tokens
     // used to differentiate if the token came from notcoexistence a or b handler which is needed when both are configured on the same node
-    pub creating_handler: Option<ConstraintHandlerId>,
+    pub creating_handler: Option<ConstraintRole>,
 }
 
 impl CCMessage {
@@ -276,7 +276,7 @@ impl CCMessage {
         msg
     }
 
-    pub fn push_claim_token(token: Token, handler_id: ConstraintHandlerId) -> Self {
+    pub fn push_claim_token(token: Token, handler_id: ConstraintRole) -> Self {
         let mut msg = Self::base(
             CCMessageType::PushToken,
             token.case_id.clone(),

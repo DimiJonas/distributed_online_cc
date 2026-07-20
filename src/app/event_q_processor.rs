@@ -62,9 +62,9 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
 mod tests {
     use tokio::sync::mpsc;
 
-    use crate::types::ConstraintHandlerId;
     use crate::util::test_tools::{
-        make_state_with_config_and_event_q, make_state_with_event_q, make_traced_event_with_fixed_timestamp,
+        make_state_with_config_and_event_q, make_state_with_event_q,
+        make_traced_event_with_fixed_timestamp,
     };
     use crate::{
         app::event_q_processor::spawn_event_processor, config::node_config::ConstraintConfig,
@@ -83,7 +83,10 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
-            .send(make_traced_event_with_fixed_timestamp("case-new", "some_event"))
+            .send(make_traced_event_with_fixed_timestamp(
+                "case-new",
+                "some_event",
+            ))
             .await
             .unwrap();
 
@@ -125,7 +128,10 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         for id in ["alpha", "beta", "gamma"] {
-            event_tx.send(make_traced_event_with_fixed_timestamp(id, "e")).await.unwrap();
+            event_tx
+                .send(make_traced_event_with_fixed_timestamp(id, "e"))
+                .await
+                .unwrap();
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -168,17 +174,22 @@ mod tests {
         spawn_event_processor(state.clone(), event_rx);
 
         event_tx
-            .send(make_traced_event_with_fixed_timestamp("case-dispatch", "produce"))
+            .send(make_traced_event_with_fixed_timestamp(
+                "case-dispatch",
+                "produce",
+            ))
             .await
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
         assert!(
-            state.token_out.lock().unwrap().has_open_token(
+            state.token_out.lock().unwrap().contains_out_token(
                 &"case-dispatch".to_string(),
-                &"rp".to_string(),
-                ConstraintHandlerId::ResponseProducer
+                state
+                    .handlers
+                    .get_handler_index_by_constraint_id(&"rp".to_string())
+                    .unwrap()
             ),
             "token should have been created by the handler"
         );

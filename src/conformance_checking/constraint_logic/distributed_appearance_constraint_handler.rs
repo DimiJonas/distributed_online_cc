@@ -15,15 +15,16 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
-        TokenPayload, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
 pub struct DistributedAppearanceCounterHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub reset: DistributedAppearanceCounterReset,
 }
 
@@ -40,11 +41,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         );
 
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        let count = match meta_tokens.get_token_mut(
-            &event.case_id,
-            &self.constraint_id,
-            self.handler_id,
-        ) {
+        let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
             Some(counter_token) => {
                 counter_token.payload.increment_counter();
                 counter_token.payload.get_count()
@@ -65,7 +62,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
                     state.config.node_id,
                     TokenPayload::Counter(1),
                 );
-                meta_tokens.insert_meta_token(counter_token.clone(), self.handler_id);
+                meta_tokens.insert_meta_token(counter_token.clone(), self.index);
                 counter_token.payload.get_count()
             }
         };
@@ -122,8 +119,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         // get token and reset counter
         let counter_token = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_mut(&message.case_id, &self.constraint_id, self.handler_id)
-            {
+            match meta_tokens.get_token_mut(&message.case_id, self.index) {
                 Some(token) => {
                     let token_clone = token.clone();
                     // reset counter
@@ -171,15 +167,16 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
         // delete counter token
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }
 
 pub struct DistributedAppearanceTriggerHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub mode: MinMaxMode,
     pub frequency: u64,
     pub counter_peers: Vec<SocketAddr>,
@@ -326,7 +323,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType, PeerAddress},
+        types::{ConstraintResultType, ConstraintRole, PeerAddress},
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
             make_counter_token, make_state_from_config, make_traced_event_with_fixed_timestamp,
@@ -372,7 +369,8 @@ mod tests {
         counter_peers: Vec<std::net::SocketAddr>,
     ) -> DistributedAppearanceTriggerHandler {
         DistributedAppearanceTriggerHandler {
-            handler_id: ConstraintHandlerId::DistributedAppearanceTrigger,
+            index: 1,
+            role: ConstraintRole::DistributedAppearanceTrigger,
             event_id: EID.to_string(),
             constraint_id: CID.to_string(),
             mode,

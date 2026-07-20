@@ -15,15 +15,16 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
-        TokenPayload, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
 pub struct AppearanceCounterHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub mode: MinMaxMode,
     pub frequency: u64,
     pub reset: AppearanceCounterReset,
@@ -41,11 +42,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
         );
 
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        let count = match meta_tokens.get_token_mut(
-            &event.case_id,
-            &self.constraint_id,
-            self.handler_id,
-        ) {
+        let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
             Some(counter_token) => {
                 counter_token.payload.increment_counter();
                 counter_token.payload.get_count()
@@ -66,7 +63,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
                     state.config.node_id,
                     TokenPayload::Counter(1),
                 );
-                meta_tokens.insert_meta_token(counter_token.clone(), self.handler_id);
+                meta_tokens.insert_meta_token(counter_token.clone(), self.index);
                 counter_token.payload.get_count()
             }
         };
@@ -146,7 +143,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
         // remove counter token (meta)
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }
@@ -154,13 +151,11 @@ impl ConstraintHandler for AppearanceCounterHandler {
 impl AppearanceCounterHandler {
     fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> u64 {
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        match meta_tokens.get_token_mut(case_id, &self.constraint_id, self.handler_id) {
+        match meta_tokens.get_token_mut(case_id, self.index) {
             Some(token) => {
                 let count = token.payload.get_count();
                 // reset counter while store is locked
-                if let Some(counter_token) =
-                    meta_tokens.get_token_mut(case_id, &self.constraint_id, self.handler_id)
-                {
+                if let Some(counter_token) = meta_tokens.get_token_mut(case_id, self.index) {
                     match self.reset {
                         AppearanceCounterReset::Keep => {}
                         AppearanceCounterReset::Subtract => {
@@ -210,9 +205,10 @@ impl AppearanceCounterHandler {
 }
 
 pub struct AppearanceTriggerHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub counter_peers: Vec<SocketAddr>,
 }
 
@@ -265,7 +261,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType},
+        types::{ConstraintResultType, ConstraintRole},
         util::test_tools::{
             make_config_with_constraints_and_port, make_state_from_config,
             make_traced_event_with_fixed_timestamp,
@@ -297,7 +293,8 @@ mod tests {
 
     fn handler(mode: MinMaxMode, frequency: u64) -> AppearanceCounterHandler {
         AppearanceCounterHandler {
-            handler_id: ConstraintHandlerId::AppearanceCounter,
+            index: 1,
+            role: ConstraintRole::AppearanceCounter,
             event_id: EID.to_string(),
             constraint_id: CID.to_string(),
             mode,

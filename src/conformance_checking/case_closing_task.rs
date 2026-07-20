@@ -42,10 +42,13 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::handler_registry::HandlerRegistry;
     use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
     // case_closing_task
     use crate::state::app_state::AppState;
-    use crate::types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, TracedEvent};
+    use crate::types::{
+        ConstraintResultType, ConstraintRole, ConstraintType, HandlerIndex, TracedEvent,
+    };
     use crate::util::test_tools::{make_config_with_port, make_state_from_config};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
@@ -54,10 +57,11 @@ mod tests {
     /// Records the order in which its hooks are called, with a tag so
     /// multiple recording handlers can be told apart in assertions.
     struct RecordingHandler {
+        _index: HandlerIndex,
         tag: &'static str,
         event_id: String,
         constraint_id: String,
-        handler_id: ConstraintHandlerId,
+        handler_id: ConstraintRole,
         calls: Arc<Mutex<Vec<String>>>,
     }
 
@@ -69,7 +73,7 @@ mod tests {
         fn constraint_id(&self) -> &str {
             &self.constraint_id
         }
-        fn handler_id(&self) -> ConstraintHandlerId {
+        fn role(&self) -> ConstraintRole {
             self.handler_id
         }
 
@@ -109,14 +113,19 @@ mod tests {
         // registry and swap it in. HandlerRegistry::register is pub, and
         // AppState.handlers is `pub handlers: Arc<HandlerRegistry>`, so we
         // can just replace the Arc wholesale.
-        let mut registry = crate::config::handler_registry::HandlerRegistry::new();
-        registry.register(Box::new(RecordingHandler {
-            tag: "h1",
-            event_id: "end".to_string(),
-            constraint_id: "c1".to_string(),
-            handler_id: ConstraintHandlerId::EndActivity,
-            calls,
-        }));
+        let mut registry = HandlerRegistry::new();
+        let index = 0;
+        registry.register(
+            Box::new(RecordingHandler {
+                _index: index,
+                tag: "h1",
+                event_id: "end".to_string(),
+                constraint_id: "c1".to_string(),
+                handler_id: ConstraintRole::EndActivity,
+                calls,
+            }),
+            index,
+        );
         state.handlers = Arc::new(registry);
         state
     }

@@ -14,15 +14,16 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, RequestId,
-        Token, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        HandlerIndex, RequestId, Token, TracedEvent,
     },
 };
 
 pub struct PrecedenceProducerHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
-    pub event_id: String,
+    pub event_id: EventId,
     pub consumer_peers: Vec<SocketAddr>,
 }
 
@@ -57,7 +58,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         // check if token already exists
         let token = {
             let mut token_out = state.token_out.lock().unwrap();
-            if token_out.contains_out_token(&event.case_id, &self.constraint_id, self.handler_id) {
+            if token_out.contains_out_token(&event.case_id, self.index) {
                 log::debug!(
                     "precedence producer handler: token already exists for case={} constraint={}",
                     event.case_id,
@@ -72,7 +73,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
                 Some(producer_event_time),
                 state.config.node_id,
             );
-            token_out.produce_without_overwrite(producer_token.clone(), self.handler_id);
+            token_out.produce_without_overwrite(producer_token.clone(), self.index);
             log::info!(
                 "precedence producer handler: produced token for case={} constraint={}",
                 event.case_id,
@@ -106,15 +107,16 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         // remove producer token
         {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out(case_id, &self.constraint_id, self.handler_id);
+            token_out.remove_out(case_id, self.index);
         }
     }
 }
 
 pub struct PrecedenceConsumerHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
-    pub event_id: String,
+    pub event_id: EventId,
 }
 
 #[async_trait]
@@ -141,7 +143,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
 
         let producer_token = {
             let token_in = state.token_in.lock().unwrap();
-            token_in.get_in_cloned(&event.case_id, &self.constraint_id, self.handler_id)
+            token_in.get_in_cloned(&event.case_id, self.index)
         };
 
         let producer_event_time = match producer_token {
@@ -228,7 +230,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         // save token if none exists yet or event time is earlier than the current one
         {
             let mut token_in = state.token_in.lock().unwrap();
-            match token_in.get_in_mut(&message.case_id, &self.constraint_id, self.handler_id) {
+            match token_in.get_in_mut(&message.case_id, self.index) {
                 Some(existing_producer_token) => match existing_producer_token.event_time {
                     Some(existing_event_time) => {
                         if new_event_time < existing_event_time {
@@ -250,7 +252,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     }
                 },
                 None => {
-                    token_in.receive_without_overwrite(new_producer_token, self.handler_id);
+                    token_in.receive_without_overwrite(new_producer_token, self.index);
                     log::info!(
                         "precedence consumer handler: received precedence producer token (insert)"
                     );
@@ -276,7 +278,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             // produce result because none was emitted yet
             let producer_token_exists = {
                 let token_in = state.token_in.lock().unwrap();
-                token_in.contains_in_token(case_id, &self.constraint_id, self.handler_id)
+                token_in.contains_in_token(case_id, self.index)
             };
 
             let info = if producer_token_exists {
@@ -306,7 +308,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         // remove producer token
         {
             let mut token_in = state.token_in.lock().unwrap();
-            token_in.remove_in(case_id, &self.constraint_id, self.handler_id);
+            token_in.remove_in(case_id, self.index);
         }
     }
 }
@@ -323,7 +325,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, Token, TracedEvent},
+        types::{ConstraintResultType, ConstraintRole, ConstraintType, Token, TracedEvent},
         util::test_tools::{make_config_with_constraints_and_port, make_state_from_config},
     };
     use chrono::DateTime;
@@ -354,7 +356,8 @@ mod tests {
 
     fn handler() -> PrecedenceConsumerHandler {
         PrecedenceConsumerHandler {
-            handler_id: ConstraintHandlerId::PrecedenceConsumer,
+            index: 1,
+            role: ConstraintRole::PrecedenceConsumer,
             constraint_id: CID.to_string(),
             event_id: EID.to_string(),
         }

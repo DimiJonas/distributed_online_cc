@@ -2,14 +2,15 @@ use crate::conformance_checking::case_end_signal_handling::handle_case_end;
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::impl_constraint_handler_fields;
 use crate::state::app_state::AppState;
-use crate::types::{CaseEnd, ConstraintHandlerId, TracedEvent};
+use crate::types::{CaseEnd, ConstraintId, ConstraintRole, EventId, HandlerIndex, TracedEvent};
 use async_trait::async_trait;
 use chrono::Utc;
 
 pub struct EndActivityHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
 }
 
 #[async_trait]

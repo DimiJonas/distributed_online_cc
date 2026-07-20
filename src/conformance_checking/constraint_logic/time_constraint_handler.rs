@@ -16,13 +16,14 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
-        EventTime, RequestId, Token, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        EventTime, HandlerIndex, RequestId, Token, TracedEvent,
     },
 };
 
 pub struct TimeStartHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub duration: Duration,
@@ -280,7 +281,8 @@ impl TimeStartHandler {
 }
 
 pub struct TimeStopHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub time_start_peers: Vec<SocketAddr>,
@@ -376,7 +378,8 @@ mod tests {
 
     fn make_handler(duration_secs: u64, mode: MinMaxMode) -> TimeStartHandler {
         TimeStartHandler {
-            handler_id: ConstraintHandlerId::TimeStart,
+            index: 0,
+            role: ConstraintRole::TimeStart,
             constraint_id: CID.into(),
             event_id: "start".into(),
             duration: Duration::from_secs(duration_secs),
@@ -676,7 +679,8 @@ mod tests {
     async fn default_trait_finalize_does_nothing() {
         // The TimeStopHandler doesn't override finalize, so it should be a no-op.
         let stop = TimeStopHandler {
-            handler_id: ConstraintHandlerId::TimeStop,
+            index: 1,
+            role: ConstraintRole::TimeStop,
             constraint_id: CID.into(),
             event_id: "stop".into(),
             time_start_peers: vec![],

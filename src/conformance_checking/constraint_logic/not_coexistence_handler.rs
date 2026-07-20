@@ -15,15 +15,16 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintResultType, ConstraintType, RequestId, Token,
-        TokenPayload, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
 pub struct NotCoexistenceAHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub b_peer: SocketAddr,
 }
 
@@ -58,7 +59,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         // get claim token or create one
         let meta_token = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(&event.case_id, &self.constraint_id, self.handler_id)
+            meta_tokens.get_token_cloned(&event.case_id, self.index)
         };
 
         let mut claim_token = match meta_token {
@@ -78,7 +79,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
 
                 {
                     let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                 }
 
                 claim_token
@@ -90,7 +91,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
 
             let message = PeerMessage::conformance_req(
                 Uuid::new_v4(),
-                CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+                CCMessage::push_claim_token(claim_token.clone(), self.role),
             );
             let other_event_time = match send_and_receive_conformance(
                 self.b_peer,
@@ -156,7 +157,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             // save token with permissions
             {
                 let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                meta_tokens.insert_meta_token(claim_token.clone(), self.index);
             }
         }
 
@@ -185,7 +186,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         message: CCMessage,
         request_id: Option<RequestId>,
     ) {
-        if message.creating_handler == Some(self.handler_id) {
+        if message.creating_handler == Some(self.role) {
             // silently dropping message from self
             return;
         }
@@ -243,11 +244,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         // create own claim token if it does not exist yet
         let mut claim_token = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_cloned(
-                &message.case_id,
-                &self.constraint_id,
-                self.handler_id,
-            ) {
+            match meta_tokens.get_token_cloned(&message.case_id, self.index) {
                 Some(token) => token,
                 None => {
                     // create token without timestamp
@@ -263,7 +260,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         None,
                         state.config.node_id,
                     );
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     claim_token
                 }
             }
@@ -276,7 +273,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         );
         let response = PeerMessage::conformance_res(
             request_id,
-            CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+            CCMessage::push_claim_token(claim_token.clone(), self.role),
         );
         if send_to_conformance_peer(self.b_peer, response, state.clone())
             .await
@@ -322,7 +319,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         // save token with permissions
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
         }
     }
 
@@ -336,9 +333,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
 
         let claim_token_exists = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens
-                .get_token_cloned(case_id, &self.constraint_id, self.handler_id)
-                .is_some()
+            meta_tokens.get_token_cloned(case_id, self.index).is_some()
         };
 
         if !claim_token_exists {
@@ -365,15 +360,16 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         // delete claim token
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }
 
 pub struct NotCoexistenceBHandler {
-    pub handler_id: ConstraintHandlerId,
-    pub event_id: String,
-    pub constraint_id: String,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
+    pub event_id: EventId,
+    pub constraint_id: ConstraintId,
     pub a_peer: SocketAddr,
 }
 
@@ -408,7 +404,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         // get claim token or create one
         let meta_token = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(&event.case_id, &self.constraint_id, self.handler_id)
+            meta_tokens.get_token_cloned(&event.case_id, self.index)
         };
 
         let mut claim_token = match meta_token {
@@ -428,7 +424,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
 
                 {
                     let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                 }
 
                 claim_token
@@ -440,7 +436,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
 
             let message = PeerMessage::conformance_req(
                 Uuid::new_v4(),
-                CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+                CCMessage::push_claim_token(claim_token.clone(), self.role),
             );
             let other_event_time = match send_and_receive_conformance(
                 self.a_peer,
@@ -506,7 +502,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             // save token with permissions
             {
                 let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                meta_tokens.insert_meta_token(claim_token.clone(), self.index);
             }
         }
 
@@ -535,7 +531,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         message: CCMessage,
         request_id: Option<RequestId>,
     ) {
-        if message.creating_handler == Some(self.handler_id) {
+        if message.creating_handler == Some(self.role) {
             // silently dropping message from self
             return;
         }
@@ -593,11 +589,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         // create own claim token if it does not exist yet
         let mut claim_token = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_cloned(
-                &message.case_id,
-                &self.constraint_id,
-                self.handler_id,
-            ) {
+            match meta_tokens.get_token_cloned(&message.case_id, self.index) {
                 Some(token) => token,
                 None => {
                     // create token without timestamp
@@ -613,7 +605,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         None,
                         state.config.node_id,
                     );
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     claim_token
                 }
             }
@@ -626,7 +618,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         );
         let response = PeerMessage::conformance_res(
             request_id,
-            CCMessage::push_claim_token(claim_token.clone(), self.handler_id),
+            CCMessage::push_claim_token(claim_token.clone(), self.role),
         );
         if send_to_conformance_peer(self.a_peer, response, state.clone())
             .await
@@ -672,7 +664,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         // save token with permissions
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.handler_id);
+            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
         }
     }
 
@@ -686,7 +678,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         // delete claim token
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.remove_meta_token(case_id, &self.constraint_id, self.handler_id);
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }
@@ -703,7 +695,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType, ConstraintType, PeerAddress, Token},
+        types::{ConstraintResultType, ConstraintRole, ConstraintType, PeerAddress, Token},
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
             make_state_from_config, make_traced_event_at, register_manager,
@@ -738,7 +730,8 @@ mod tests {
 
     fn handler(b_peer: std::net::SocketAddr) -> NotCoexistenceAHandler {
         NotCoexistenceAHandler {
-            handler_id: ConstraintHandlerId::NotCoexistenceA,
+            index: 1,
+            role: ConstraintRole::NotCoexistenceA,
             event_id: EID.to_string(),
             constraint_id: CID.to_string(),
             b_peer,

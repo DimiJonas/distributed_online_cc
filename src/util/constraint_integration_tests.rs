@@ -13,7 +13,6 @@ mod tests {
                 MinMaxMode,
             },
         },
-        types::ConstraintHandlerId,
         util::test_tools::{make_traced_event, make_traced_event_with_fixed_timestamp},
     };
 
@@ -92,10 +91,12 @@ mod tests {
         // each ResponseProducer left an open token under its own constraint_id
         for cid in ["rp1", "rp2", "rp3"] {
             assert!(
-                state.token_out.lock().unwrap().has_open_token(
+                state.token_out.lock().unwrap().contains_out_token(
                     &CASE.to_string(),
-                    &cid.to_string(),
-                    ConstraintHandlerId::ResponseProducer,
+                    state
+                        .handlers
+                        .get_handler_index_by_constraint_id(&cid.to_string())
+                        .unwrap()
                 ),
                 "ResponseProducer {cid} did not run on the shared event"
             );
@@ -105,8 +106,10 @@ mod tests {
             assert!(
                 state.meta_token_store.lock().unwrap().contains_meta_token(
                     &CASE.to_string(),
-                    &cid.to_string(),
-                    ConstraintHandlerId::AppearanceCounter,
+                    state
+                        .handlers
+                        .get_handler_index_by_constraint_id(&cid.to_string())
+                        .unwrap()
                 ),
                 "AppearanceCounter {cid} did not run on the shared event"
             );
@@ -115,17 +118,21 @@ mod tests {
         assert!(
             state.meta_token_store.lock().unwrap().contains_meta_token(
                 &CASE.to_string(),
-                &"dac1".to_string(),
-                ConstraintHandlerId::DistributedAppearanceCounter,
+                state
+                    .handlers
+                    .get_handler_index_by_constraint_id(&"dac1".to_string())
+                    .unwrap()
             ),
             "DistributedAppearanceCounter dac1 did not run on the shared event"
         );
         // the order-first handler recorded the first execution
         assert!(
-            state.token_out.lock().unwrap().has_open_token(
+            state.token_out.lock().unwrap().contains_out_token(
                 &CASE.to_string(),
-                &"of1".to_string(),
-                ConstraintHandlerId::OrderFirst,
+                state
+                    .handlers
+                    .get_handler_index_by_constraint_id(&"of1".to_string())
+                    .unwrap()
             ),
             "OrderFirst of1 did not run on the shared event"
         );

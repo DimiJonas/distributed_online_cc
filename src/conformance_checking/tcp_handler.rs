@@ -269,7 +269,7 @@ mod tests {
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
-        types::{ConstraintHandlerId, MessageId, RequestId},
+        types::{MessageId, RequestId},
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state, peer_addr, register_manager,
         },
@@ -528,7 +528,7 @@ mod tests {
                 .token_out
                 .lock()
                 .unwrap()
-                .produce_with_overwrite(token, ConstraintHandlerId::ResponseProducer);
+                .produce_with_overwrite(token, 0);
         }
 
         let delete_msg = CCMessage::delete_token("c1".to_string(), "rp".to_string(), Utc::now());
@@ -541,11 +541,11 @@ mod tests {
         .await;
 
         assert!(
-            !state.token_out.lock().unwrap().has_open_token(
-                &"c1".to_string(),
-                &"rp".to_string(),
-                ConstraintHandlerId::ResponseProducer
-            ),
+            !state
+                .token_out
+                .lock()
+                .unwrap()
+                .contains_out_token(&"c1".to_string(), 0),
             "token should be deleted after handling"
         );
     }

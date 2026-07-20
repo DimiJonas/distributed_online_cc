@@ -16,13 +16,14 @@ use crate::{
     },
     state::app_state::AppState,
     types::{
-        CaseId, ConstraintHandlerId, ConstraintId, ConstraintResultType, ConstraintType, EventId,
-        RequestId, TracedEvent,
+        CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+        HandlerIndex, RequestId, TracedEvent,
     },
 };
 
 pub struct SensorCollectorHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub attribute_key: String,
@@ -238,7 +239,8 @@ impl ConstraintHandler for SensorCollectorHandler {
 }
 
 pub struct SensorTriggerHandler {
-    pub handler_id: ConstraintHandlerId,
+    pub index: HandlerIndex,
+    pub role: ConstraintRole,
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub collector_peers: Vec<SocketAddr>,
@@ -308,7 +310,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintHandlerId, ConstraintResultType},
+        types::{ConstraintResultType, ConstraintRole},
         util::test_tools::{
             make_config_with_constraints_and_port, make_sensor_event, make_state_from_config,
         },
@@ -342,7 +344,8 @@ mod tests {
 
     fn handler() -> SensorCollectorHandler {
         SensorCollectorHandler {
-            handler_id: ConstraintHandlerId::SensorCollector,
+            index: 0,
+            role: ConstraintRole::SensorCollector,
             constraint_id: CID.to_string(),
             event_id: EID.to_string(),
             attribute_key: KEY.to_string(),

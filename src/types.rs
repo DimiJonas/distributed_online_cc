@@ -18,6 +18,7 @@ pub type SensorEventKey = String;
 pub type SensorEventValue = f64;
 pub type Age = u64;
 pub type PeerBatch = HashMap<SocketAddr, Age>;
+pub type HandlerIndex = usize;
 
 #[derive(Debug)]
 pub enum CliCommand {
@@ -149,7 +150,7 @@ impl Display for ConstraintType {
 }
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
-pub enum ConstraintHandlerId {
+pub enum ConstraintRole {
     EndActivity,
     ResponseConsumer,
     ResponseProducer,
@@ -169,7 +170,7 @@ pub enum ConstraintHandlerId {
     DistributedAppearanceTrigger,
 }
 
-impl Display for ConstraintHandlerId {
+impl Display for ConstraintRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
