@@ -231,7 +231,7 @@ impl HandlerRegistry {
                     role: ConstraintRole::DistributedAppearanceCounter,
                     constraint_id: constraint_id.clone(),
                     event_id: event_id.clone(),
-                    reset: reset.clone(),
+                    reset: *reset,
                 }),
                 ConstraintConfig::DistributedAppearanceTrigger {
                     constraint_id,

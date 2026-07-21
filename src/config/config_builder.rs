@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::node_config::{
-        ConfigMode, ConstraintConfig, GossipConfig, NodeConfig, OverlayConfig, ResultBufferConfig,
-        TcpChannelConfig,
+        ConfigMode, ConstraintConfig, ForwarderConfig, GossipConfig, NodeConfig, OverlayConfig,
+        ResultBufferConfig, ResultSinkConfig, TcpChannelConfig,
     },
     network::message_types,
     types::PeerId,
@@ -171,6 +171,23 @@ impl NodeConfigBuilder {
         self
     }
 
+    // ---- result sink ----
+    pub fn result_sink(mut self, s: ResultSinkConfig) -> Self {
+        self.config.result_sink = Some(s);
+        self
+    }
+    // set the sink nodes this node forwards its results to
+    pub fn result_sink_addresses(mut self, addrs: Vec<SocketAddr>) -> Self {
+        self.config.result_sink_addresses = Some(addrs);
+        self
+    }
+
+    // ---- forwarder (central mode) ----
+    pub fn forwarder(mut self, f: ForwarderConfig) -> Self {
+        self.config.forwarder = Some(f);
+        self
+    }
+
     pub fn build(self) -> NodeConfig {
         self.config.validate();
         self.config
@@ -233,7 +250,7 @@ pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
         gossip,
         forwarder: None,
     };
-    message_types::init(config.clone()); // see caveat above
+    message_types::init(config.clone());
     config
 }
 

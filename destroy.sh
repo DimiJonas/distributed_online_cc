@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# stops the conformance-checker networks (kills the tmux sessions) and cleans up
+# by default tears down both the distributed and central sessions
+ 
 # ---- defaults ----
-SESSION="p2ptest"
-SOCKET_GLOB="/tmp/event_listener*.sock" 
+SESSION_PREFIX="cc"                          # kills ${PREFIX}-distributed and ${PREFIX}-central
+SYSTEM="both"                                # distributed | central | both
+SESSIONS=()                                  # explicit sessions (override prefix/system)
+SOCKET_GLOB="/tmp/event_listener*.sock"
 CLEAN_SOCKETS=true
 CLEAN_LOGS=false
 LOG_DIR="run/logs"
-
+ 
 usage() {
   cat <<EOF
 Usage: $0 [options]
-
-Stop the P2P test network: kill the tmux session and clean up leftovers.
-
-  -s, --session NAME     tmux session to kill        (default: $SESSION)
-      --socket-glob PAT  socket pattern to remove    (default: $SOCKET_GLOB)
+ 
+  -s, --system WHICH     which to stop: distributed|central|both (default: $SYSTEM)
+      --session-prefix P tmux session prefix           (default: $SESSION_PREFIX)
+      --session NAME     kill this exact session (repeatable; overrides --system)
+      --socket-glob PAT  socket pattern to remove      (default: $SOCKET_GLOB)
       --keep-sockets     do NOT remove unix sockets
-      --clean-logs       also remove $LOG_DIR/node*.log
+      --clean-logs       also remove \$LOG_DIR/*.log
       --log-dir DIR      log directory for --clean-logs (default: $LOG_DIR)
   -h, --help             show this help
 EOF
 }
-
+ 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -s|--session)     SESSION="$2"; shift 2 ;;
+    -s|--system)      SYSTEM="$2"; shift 2 ;;
+    --session-prefix) SESSION_PREFIX="$2"; shift 2 ;;
+    --session)        SESSIONS+=("$2"); shift 2 ;;
     --socket-glob)    SOCKET_GLOB="$2"; shift 2 ;;
     --keep-sockets)   CLEAN_SOCKETS=false; shift ;;
     --clean-logs)     CLEAN_LOGS=true; shift ;;
@@ -35,17 +42,28 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# ---- kill the tmux session ----
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  tmux kill-session -t "$SESSION"
-  echo "killed tmux session '$SESSION'"
-else
-  echo "no tmux session '$SESSION' (already stopped?)"
+# build session list from --system if none given explicitly
+if [[ ${#SESSIONS[@]} -eq 0 ]]; then
+  case "$SYSTEM" in
+    distributed) SESSIONS=("${SESSION_PREFIX}-distributed") ;;
+    central)     SESSIONS=("${SESSION_PREFIX}-central") ;;
+    both)        SESSIONS=("${SESSION_PREFIX}-distributed" "${SESSION_PREFIX}-central") ;;
+    *) echo "--system must be distributed|central|both" >&2; exit 1 ;;
+  esac
 fi
 
-# ---- give nodes a moment to release sockets, then remove them ----
+# ---- kill the tmux sessions ----
+for session in "${SESSIONS[@]}"; do
+  if tmux has-session -t "$session" 2>/dev/null; then
+    tmux kill-session -t "$session"
+    echo "killed tmux session '$session'"
+  else
+    echo "no tmux session '$session' (already stopped?)"
+  fi
+done
+
+# ---- remove unix sockets ----
 if $CLEAN_SOCKETS; then
-  # nullglob so an empty match expands to nothing instead of the literal pattern
   shopt -s nullglob
   sockets=( $SOCKET_GLOB )
   shopt -u nullglob
@@ -56,7 +74,7 @@ if $CLEAN_SOCKETS; then
     echo "no sockets matching $SOCKET_GLOB"
   fi
 fi
-
+ 
 # ---- optional: clean logs (off by default) ----
 if $CLEAN_LOGS; then
   logs=()
@@ -71,3 +89,4 @@ if $CLEAN_LOGS; then
     echo "no *.log files in $LOG_DIR"
   fi
 fi
+

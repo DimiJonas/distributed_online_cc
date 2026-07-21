@@ -268,7 +268,7 @@ pub struct ForwarderConfig {
     pub central_node_address: SocketAddr,
 }
 
-#[derive(Debug, PartialEq, Serialize, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SensorConstraintMode {
     Lt,
     Gt,
@@ -304,6 +304,12 @@ impl FromStr for SensorConstraintMode {
             "==" => Ok(Self::Eq),
             other => Err(format!("Unknown operator: {other:?}")),
         }
+    }
+}
+
+impl Serialize for SensorConstraintMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
     }
 }
 
