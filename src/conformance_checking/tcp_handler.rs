@@ -5,13 +5,14 @@
 
 use std::net::SocketAddr;
 
+use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::network::message_types::{
     CCMessage, CCResultMessage, CEGossipMessage, CliTestMessage, MessageKind, OverlayMessage,
     PeerMessage,
 };
 use crate::network::tcp_router::{send_to_conformance_peer, send_to_overlay_peer};
 use crate::state::app_state::AppState;
-use crate::types::{MessageId, RequestId, TracedEvent};
+use crate::types::{ConstraintRole, MessageId, RequestId, TracedEvent};
 
 pub async fn handle_cli_message(
     msg: CliTestMessage,
@@ -77,6 +78,7 @@ pub async fn handle_cc_message(
     msg: CCMessage,
     state: AppState,
     msg_id: MessageId,
+    kind: MessageKind,
     request_id: Option<RequestId>,
 ) {
     log::debug!(
@@ -118,11 +120,32 @@ pub async fn handle_cc_message(
             msg
         );
     } else {
-        // dispatch case to the handlers
-        for handler in constraint_handler {
-            handler
-                .handle_message(state.clone(), msg.clone(), request_id)
-                .await;
+        // an exemption for requests from distributed appearance trigger handler to distributed appearance counter handler
+        // if multiple counter handlers are configured on the same host, only one of them accumulates the counters and answers the request
+        // this is needed because request-response is always 1:1 right now
+        if kind == MessageKind::Request
+            && let Some(creator) = msg.creating_handler
+            && creator == ConstraintRole::DistributedAppearanceTrigger
+        {
+            let dist_appear_counter_handler: Option<&dyn ConstraintHandler> = state
+                .handlers
+                .get_by_constraint_id(&msg.constraint_id)
+                .into_iter()
+                .find(|h| h.role() == ConstraintRole::DistributedAppearanceCounter);
+            if let Some(handler) = dist_appear_counter_handler {
+                handler.handle_message(state.clone(), msg, request_id).await;
+            } else {
+                log::warn!(
+                    "received distributed appearance request from trigger handler for constraint {} but no counter handler is registered here",
+                    msg.constraint_id
+                );
+            }
+        } else {
+            for handler in constraint_handler {
+                handler
+                    .handle_message(state.clone(), msg.clone(), request_id)
+                    .await;
+            }
         }
     }
 }
@@ -483,6 +506,7 @@ mod tests {
             msg,
             state.clone(),
             MessageId::new_v4(),
+            MessageKind::FireAndForget,
             Some(RequestId::new_v4()),
         )
         .await;
@@ -536,6 +560,7 @@ mod tests {
             delete_msg,
             state.clone(),
             MessageId::new_v4(),
+            MessageKind::FireAndForget,
             Some(RequestId::new_v4()),
         )
         .await;
@@ -555,6 +580,13 @@ mod tests {
     async fn cc_message_unknown_constraint_does_not_panic() {
         let state = make_state(21080);
         let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), Utc::now());
-        handle_cc_message(msg, state, MessageId::new_v4(), Some(RequestId::new_v4())).await;
+        handle_cc_message(
+            msg,
+            state,
+            MessageId::new_v4(),
+            MessageKind::FireAndForget,
+            Some(RequestId::new_v4()),
+        )
+        .await;
     }
 }

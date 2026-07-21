@@ -1,6 +1,7 @@
 use chrono::Utc;
 
 use crate::{
+    config::node_config::ConfigMode,
     conformance_checking::case_closing_task::case_closing_task,
     state::{app_state::AppState, case_end_gossip_cache::MergeResult},
     types::{CaseEnd, CaseId},
@@ -11,7 +12,16 @@ pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
         "case end signal handling: received case end info: {}",
         case_end
     );
-    handle_case_end_info(state.clone(), vec![case_end]).await;
+    match state.config.mode {
+        ConfigMode::Distributed => {
+            // case end might already be known - handle new and known information correctly
+            handle_case_end_info(state.clone(), vec![case_end]).await;
+        }
+        ConfigMode::Central => {
+            // spawn case closing task directly
+            spawn_case_closing_task(state.clone(), case_end.case_id.clone());
+        }
+    }
 }
 
 pub async fn handle_case_end_info(state: AppState, case_end_info: Vec<CaseEnd>) {
@@ -33,7 +43,6 @@ async fn apply_merge(res: MergeResult, state: AppState) {
     // spread gossip of new and updated case ends
     let mut to_push = res.new;
     to_push.extend(res.updated);
-    // TODO: check if its a decentralized node (config.mode) and only then initiate gossip
     if let Err(e) = state.dist().outbound_gossip_q.send(to_push).await {
         log::error!("error passing push gossip to gossip manager: {}", e);
     }

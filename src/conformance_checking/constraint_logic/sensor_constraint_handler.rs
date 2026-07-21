@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
@@ -43,17 +42,6 @@ impl ConstraintHandler for SensorCollectorHandler {
             event
         );
 
-        let sensor_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "sensor collector handler: sensor collector event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         let attribute_value = match event.get_attribute_by_key(&self.attribute_key) {
             Some(value) => match value {
                 AttributeValue::Float(f) => f,
@@ -84,7 +72,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                 event.case_id.clone(),
                 self.attribute_key.clone(),
                 attribute_value,
-                sensor_event_time,
+                event.timestamp,
             ) {
                 Some(_) => {
                     log::info!("sensor collector handler: sensor event collected (update)");
@@ -261,17 +249,6 @@ impl ConstraintHandler for SensorTriggerHandler {
             event
         );
 
-        let trigger_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "sensor trigger handler: sensor trigger event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         log::info!(
             "sensor trigger handler: triggering sensor evaluation on colector peers for case={} constraint={}",
             event.case_id,
@@ -280,7 +257,7 @@ impl ConstraintHandler for SensorTriggerHandler {
         let message = PeerMessage::conformance(CCMessage::trigger_check(
             event.case_id.clone(),
             self.constraint_id.clone(),
-            trigger_event_time,
+            event.timestamp,
         ));
         for &peer_address in self.collector_peers.iter() {
             if let Err(e) =

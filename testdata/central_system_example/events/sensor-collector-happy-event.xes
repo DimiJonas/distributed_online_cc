@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-13"/>
+    <event>
+      <string key="concept:name" value="sensor_collector_event"/>
+      <float key="lt_value" value="9"/>
+    </event>
+  </trace>
+</log>

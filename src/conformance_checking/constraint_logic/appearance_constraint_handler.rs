@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     config::node_config::{AppearanceCounterReset, MinMaxMode},
@@ -232,7 +231,7 @@ impl ConstraintHandler for AppearanceTriggerHandler {
         let message = PeerMessage::conformance(CCMessage::trigger_check(
             event.case_id.clone(),
             self.constraint_id.clone(),
-            event.timestamp_utc().unwrap_or(Utc::now()),
+            event.timestamp,
         ));
         for &peer_address in self.counter_peers.iter() {
             if let Err(e) =

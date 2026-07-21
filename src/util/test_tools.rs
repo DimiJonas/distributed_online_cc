@@ -203,6 +203,7 @@ pub fn make_traced_event(case_id: &str, event_name: &str) -> TracedEvent {
     let event = trace.events.into_iter().next().unwrap();
     TracedEvent {
         case_id: case_id_val,
+        timestamp: Utc::now(),
         event,
     }
 }
@@ -239,6 +240,7 @@ pub fn make_traced_event_with_fixed_timestamp(case_id: &str, event_name: &str) -
     let event = trace.events.into_iter().next().unwrap();
     TracedEvent {
         case_id: case_id_val,
+        timestamp: Utc::now(),
         event,
     }
 }
@@ -325,10 +327,7 @@ pub fn make_traced_event_at(case_id: &str, event_name: &str, seconds_offset: i64
         .unwrap_or_default();
 
     let event = trace.events.into_iter().next().unwrap();
-    TracedEvent {
-        case_id: case_id_val,
-        event,
-    }
+    TracedEvent::new(case_id_val, event)
 }
 
 /// Build a TracedEvent that carries a numeric sensor reading as a `<float>`
@@ -375,10 +374,7 @@ pub fn make_sensor_event(
         .unwrap_or_default();
 
     let event = trace.events.into_iter().next().unwrap();
-    TracedEvent {
-        case_id: case_id_val,
-        event,
-    }
+    TracedEvent::new(case_id_val, event)
 }
 
 /// Build a `Token` carrying a `Counter` payload, used to answer pull-token

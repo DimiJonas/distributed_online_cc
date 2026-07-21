@@ -26,6 +26,7 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
         result_store.remove_case(&case_id);
     }
 
+    // TODO: possibly lean up state here instead of calling handler methods
     for handler in state.handlers.all() {
         handler.clean_up_state(&case_id, state.clone()).await;
     }
@@ -57,11 +58,11 @@ mod tests {
     /// Records the order in which its hooks are called, with a tag so
     /// multiple recording handlers can be told apart in assertions.
     struct RecordingHandler {
-        _index: HandlerIndex,
+        index: HandlerIndex,
         tag: &'static str,
         event_id: String,
         constraint_id: String,
-        handler_id: ConstraintRole,
+        role: ConstraintRole,
         calls: Arc<Mutex<Vec<String>>>,
     }
 
@@ -74,7 +75,10 @@ mod tests {
             &self.constraint_id
         }
         fn role(&self) -> ConstraintRole {
-            self.handler_id
+            self.role
+        }
+        fn index(&self) -> usize {
+            self.index
         }
 
         async fn handle_event(&self, _event: &TracedEvent, _state: AppState) {}
@@ -117,11 +121,11 @@ mod tests {
         let index = 0;
         registry.register(
             Box::new(RecordingHandler {
-                _index: index,
+                index,
                 tag: "h1",
                 event_id: "end".to_string(),
                 constraint_id: "c1".to_string(),
-                handler_id: ConstraintRole::EndActivity,
+                role: ConstraintRole::EndActivity,
                 calls,
             }),
             index,

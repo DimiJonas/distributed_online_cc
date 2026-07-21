@@ -32,6 +32,10 @@ pub struct DistributedAppearanceCounterHandler {
 impl ConstraintHandler for DistributedAppearanceCounterHandler {
     impl_constraint_handler_fields!(DistributedAppearanceCounterHandler);
 
+    fn counter_reset(&self) -> Option<DistributedAppearanceCounterReset> {
+        Some(self.reset)
+    }
+
     // increment counter
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
@@ -116,36 +120,51 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             }
         };
 
-        // get token and reset counter
-        let counter_token = {
+        // accumulate all local distributed appearance counters (if there are multiple configured for the same constraint)
+        // in this case only 1 handler will receive the pulltokenrequest and answer it
+        let dist_appear_counter_handlers: Vec<&dyn ConstraintHandler> = state
+            .handlers
+            .get_by_constraint_id(&self.constraint_id)
+            .into_iter()
+            .filter(|h| h.role() == ConstraintRole::DistributedAppearanceCounter)
+            .collect();
+        let mut total = 0u64;
+        {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            match meta_tokens.get_token_mut(&message.case_id, self.index) {
-                Some(token) => {
-                    let token_clone = token.clone();
+            for handler in dist_appear_counter_handlers {
+                if let Some(token) = meta_tokens.get_token_mut(&message.case_id, handler.index()) {
+                    total += token.payload.get_count();
                     // reset counter
-                    match self.reset {
-                        DistributedAppearanceCounterReset::Keep => {}
-                        DistributedAppearanceCounterReset::Zero => token.payload.reset_counter(),
+                    if let Some(reset) = handler.counter_reset() {
+                        match reset {
+                            DistributedAppearanceCounterReset::Keep => {}
+                            DistributedAppearanceCounterReset::Zero => {
+                                token.payload.reset_counter()
+                            }
+                        }
                     }
-                    token_clone
                 }
-                None => Token::new(
-                    message.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::DistributedAppearance,
-                    None,
-                    state.config.node_id,
-                ),
             }
-        };
+        }
+
+        let token_with_total = Token::new_with_payload(
+            message.case_id.clone(),
+            self.constraint_id.clone(),
+            ConstraintType::DistributedAppearance,
+            None,
+            state.config.node_id,
+            TokenPayload::Counter(total),
+        );
 
         // send counter token
         log::info!(
             "sending counter token to {}",
             message.sender_address.unwrap()
         );
-        let response =
-            PeerMessage::conformance_res(request_id, CCMessage::pull_token_response(counter_token));
+        let response = PeerMessage::conformance_res(
+            request_id,
+            CCMessage::pull_token_response(token_with_total),
+        );
         if send_to_conformance_peer(sender_address, response, state.clone())
             .await
             .is_err()
@@ -249,7 +268,11 @@ impl DistributedAppearanceTriggerHandler {
         for counter_peer in &self.counter_peers {
             let pull_token_request = PeerMessage::conformance_req(
                 Uuid::new_v4(),
-                CCMessage::pull_token_request(case_id.clone(), self.constraint_id.clone()),
+                CCMessage::pull_token_request_with_creator(
+                    case_id.clone(),
+                    self.constraint_id.clone(),
+                    self.role,
+                ),
             );
             match send_and_receive_conformance(*counter_peer, pull_token_request, state.clone())
                 .await

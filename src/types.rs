@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, Utc};
 use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -67,23 +67,46 @@ impl Display for PeerAddress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TracedEvent {
     pub case_id: CaseId,
+    pub timestamp: EventTime,
     pub event: Event,
 }
 
 impl TracedEvent {
-    pub fn timestamp(&self) -> Option<&DateTime<FixedOffset>> {
+    pub fn new(case_id: CaseId, event: Event) -> Self {
+        let timestamp = match Self::timestamp_utc_from_xes(&event) {
+            Some(event_time) => event_time,
+            None => {
+                log::warn!(
+                    "XES event did not contain a timestamp - using current time as event time"
+                );
+                Utc::now()
+            }
+        };
+        Self {
+            case_id,
+            timestamp,
+            event,
+        }
+    }
+
+    fn timestamp_utc_from_xes(event: &Event) -> Option<DateTime<Utc>> {
+        event
+            .attributes
+            .get_by_key("time:timestamp")
+            .and_then(|a| a.value.try_as_date())
+            .map(|dt| dt.with_timezone(&Utc))
+    }
+
+    pub fn xes_timestamp_utc(&self) -> Option<DateTime<Utc>> {
         self.event
             .attributes
             .get_by_key("time:timestamp")
             .and_then(|a| a.value.try_as_date())
+            .map(|dt| dt.with_timezone(&Utc))
     }
 
-    pub fn timestamp_utc(&self) -> Option<DateTime<Utc>> {
-        self.timestamp().map(|dt| dt.with_timezone(&Utc))
-    }
-
-    pub fn timestamp_utc_as_str(&self) -> String {
-        if let Some(timestamp) = self.timestamp_utc() {
+    pub fn xes_timestamp_utc_as_str(&self) -> String {
+        if let Some(timestamp) = self.xes_timestamp_utc() {
             timestamp.clone().to_string()
         } else {
             "None".to_string()
@@ -113,7 +136,7 @@ impl Display for TracedEvent {
             "Event: name={} case={} time={}",
             self.name().unwrap_or_default(),
             self.case_id,
-            self.timestamp_utc_as_str(),
+            self.timestamp,
         )
     }
 }

@@ -86,18 +86,22 @@ pub async fn run(config: NodeConfig) {
 async fn setup_tcp_channels(state: AppState) {
     // create tcp channels from config if there are any
 
-    let constraint_peers: Vec<SocketAddr> = state
+    let mut constraint_peers: Vec<SocketAddr> = state
         .handlers
         .all()
         .flat_map(|h| h.configured_peers())
         .collect();
 
+    if let Some(forwarder_config) = &state.config.forwarder {
+        constraint_peers.push(forwarder_config.central_node_address);
+    }
+
     if constraint_peers.is_empty() {
         return;
     }
 
-    log::info!("creating tcp channels to configured constraint check peers");
-    log::debug!("configured constraint check peers: {:?}", constraint_peers);
+    log::info!("creating tcp channels to configured peers");
+    log::debug!("configured peers: {:?}", constraint_peers);
 
     for address in constraint_peers {
         connect_peer(PeerAddress::new_conformance_address(address), state.clone()).await;

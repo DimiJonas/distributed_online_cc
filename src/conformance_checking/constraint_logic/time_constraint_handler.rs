@@ -1,7 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     config::node_config::MinMaxMode,
@@ -42,14 +41,12 @@ impl ConstraintHandler for TimeStartHandler {
             event
         );
 
-        let start_time = event.timestamp_utc().unwrap_or_else(Utc::now);
-
         // create a timer token for this event instance
         let token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Time,
-            Some(start_time),
+            Some(event.timestamp),
             state.config.node_id,
         );
         let token_id = token.id;
@@ -303,16 +300,6 @@ impl ConstraintHandler for TimeStopHandler {
             event
         );
 
-        let stop_time = match event.timestamp_utc() {
-            Some(timestamp) => timestamp,
-            None => {
-                log::warn!(
-                    "time stop handler: time stop event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         // notify timer start peers
         log::info!("time stop handler: notifying time start peers that time stop event happened");
         for &peer_addr in self.time_start_peers.iter() {
@@ -320,7 +307,7 @@ impl ConstraintHandler for TimeStopHandler {
                 peer_addr,
                 event.case_id.clone(),
                 self.constraint_id.clone(),
-                stop_time,
+                event.timestamp,
                 state.clone(),
             )
             .await;

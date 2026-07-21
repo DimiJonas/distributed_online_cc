@@ -397,6 +397,7 @@ pub async fn dispatch_to_handler(msg: PeerMessage, address: SocketAddr, state: A
                 cc_msg,
                 state.clone(),
                 msg.message_id,
+                msg.message_kind,
                 msg.request_id,
             ));
         }

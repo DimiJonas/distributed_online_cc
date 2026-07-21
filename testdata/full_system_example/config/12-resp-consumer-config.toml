@@ -1,3 +1,4 @@
+mode = "distributed"
 node_id = 12
 tcp_listen_address = "127.0.0.1:19012"
 unix_socket = "/tmp/event_listener_rc.sock"

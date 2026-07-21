@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
@@ -46,16 +45,6 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             event
         );
 
-        let event_time = match event.timestamp_utc() {
-            Some(timestamp) => timestamp,
-            None => {
-                log::warn!(
-                    "not coexistence a handler: event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         // get claim token or create one
         let meta_token = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
@@ -73,7 +62,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                     event.case_id.clone(),
                     self.constraint_id.clone(),
                     ConstraintType::NotCoexistence,
-                    Some(event_time),
+                    Some(event.timestamp),
                     state.config.node_id,
                 );
 
@@ -126,12 +115,12 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             // set execution permission
             match other_event_time {
                 Some(other_time) => {
-                    if event_time <= other_time {
+                    if event.timestamp <= other_time {
                         claim_token.payload.grant_execution_permission();
                         log::info!(
                             "not coexistence a handler: set execution permission to {} because {} <= {}",
                             claim_token.payload.is_execution_allowed(),
-                            event_time,
+                            event.timestamp,
                             other_time
                         );
                     } else {
@@ -139,7 +128,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         log::info!(
                             "not coexistence a handler: set execution permission to {} because {} > {}",
                             claim_token.payload.is_execution_allowed(),
-                            event_time,
+                            event.timestamp,
                             other_time
                         );
                     }
@@ -149,7 +138,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                     log::info!(
                         "not coexistence a handler: set execution to {} because {} <= NONE",
                         claim_token.payload.is_execution_allowed(),
-                        event_time
+                        event.timestamp
                     );
                 }
             }
@@ -391,16 +380,6 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             event
         );
 
-        let event_time = match event.timestamp_utc() {
-            Some(timestamp) => timestamp,
-            None => {
-                log::warn!(
-                    "not coexistence b handler: event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         // get claim token or create one
         let meta_token = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
@@ -418,7 +397,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     event.case_id.clone(),
                     self.constraint_id.clone(),
                     ConstraintType::NotCoexistence,
-                    Some(event_time),
+                    Some(event.timestamp),
                     state.config.node_id,
                 );
 
@@ -471,12 +450,12 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             // set execution permission
             match other_event_time {
                 Some(other_time) => {
-                    if event_time <= other_time {
+                    if event.timestamp <= other_time {
                         claim_token.payload.grant_execution_permission();
                         log::info!(
                             "not coexistence b handler: set execution permission to {} because {} <= {}",
                             claim_token.payload.is_execution_allowed(),
-                            event_time,
+                            event.timestamp,
                             other_time
                         );
                     } else {
@@ -484,7 +463,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         log::info!(
                             "not coexistence b handler: set execution permission to {} because {} > {}",
                             claim_token.payload.is_execution_allowed(),
-                            event_time,
+                            event.timestamp,
                             other_time
                         );
                     }
@@ -494,7 +473,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     log::info!(
                         "not coexistence b handler: set execution to {} because {} <= NONE",
                         claim_token.payload.is_execution_allowed(),
-                        event_time
+                        event.timestamp
                     );
                 }
             }

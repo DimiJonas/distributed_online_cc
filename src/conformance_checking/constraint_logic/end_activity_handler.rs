@@ -4,7 +4,6 @@ use crate::impl_constraint_handler_fields;
 use crate::state::app_state::AppState;
 use crate::types::{CaseEnd, ConstraintId, ConstraintRole, EventId, HandlerIndex, TracedEvent};
 use async_trait::async_trait;
-use chrono::Utc;
 
 pub struct EndActivityHandler {
     pub index: HandlerIndex,
@@ -24,16 +23,6 @@ impl ConstraintHandler for EndActivityHandler {
             event.case_id
         );
 
-        let event_time = match event.timestamp_utc() {
-            Some(timestamp) => timestamp,
-            None => {
-                log::warn!(
-                    "end ativity handler: event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         let case_id = event.case_id.clone();
 
         // signal case end
@@ -41,7 +30,7 @@ impl ConstraintHandler for EndActivityHandler {
             state.clone(),
             CaseEnd {
                 case_id,
-                timestamp: event_time,
+                timestamp: event.timestamp,
             },
         )
         .await;

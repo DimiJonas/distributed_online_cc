@@ -1,9 +1,0 @@
-node_id = 3
-tcp_listen_address = "127.0.0.1:8003"
-unix_socket = "/tmp/event_listener_f2.sock"
-log_file = "forwarder2.log"
-
-[forwarder]
-central_node_address = "127.0.0.1:8001"
-include_event_attributes = ["lt_value", "gt_value", "lte_value", "gte_value", "eq_value"]
-include_event_ids = ["dummy_end_activity", "appearance_counter_event", "appearance_trigger_event", "distributed_appearance_counter1_event", "distributed_appearance_counter2_event", "distributed_appearance_trigger_event", "not_coexistence_a_event", "not_coexistence_b_event", "order_first_event", "order_second_event", "precedence_consumer_event", "precedence_producer_event", "sensor_collector_event", "sensor_trigger_event", "time_start_event", "time_stop_event"]

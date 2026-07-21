@@ -52,29 +52,35 @@ pub async fn handle_event(
             };
 
             for event in trace.events {
-                let traced_event = TracedEvent {
-                    case_id: trace_id.clone(),
-                    event,
-                };
+                let traced_event = TracedEvent::new(trace_id.clone(), event);
                 log::debug!("handle_event: handling event {}", traced_event);
 
                 if let Some(event_id) = traced_event.name() {
+                    let event_id = &event_id.to_string();
                     if configured_events.contains(event_id) {
                         if let Some(forwarder_config) = &state.config.forwarder {
                             // forward the event to the central node
                             let message = PeerMessage::event(traced_event);
-                            if let Err(e) = send_to_conformance_peer(
+                            match send_to_conformance_peer(
                                 forwarder_config.central_node_address,
                                 message,
                                 state.clone(),
                             )
                             .await
                             {
-                                log::error!(
-                                    "handle_event: error sending the event to the central node: {}",
-                                    e
-                                );
-                                continue;
+                                Err(e) => {
+                                    log::error!(
+                                        "handle_event: error sending the event to the central node: {}",
+                                        e
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    log::info!(
+                                        "handle_event: forwarded event '{}' to central node",
+                                        event_id
+                                    );
+                                }
                             }
                         } else {
                             // put the event directly in the event q
@@ -88,7 +94,7 @@ pub async fn handle_event(
                         }
                     } else {
                         log::warn!(
-                            "event {} received on event listener socket, but no constraint was configured for it",
+                            "no constraint was configured for '{}'. ignoring event",
                             event_id
                         );
                     }

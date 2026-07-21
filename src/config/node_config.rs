@@ -48,9 +48,10 @@ pub struct NodeConfig {
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigMode {
+    #[default]
     Distributed,
     Central,
 }
@@ -338,7 +339,7 @@ pub enum AppearanceCounterReset {
     Keep,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum DistributedAppearanceCounterReset {
     Zero,
     Keep,

@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use crate::config::node_config::DistributedAppearanceCounterReset;
 use crate::network::message_types::CCMessage;
 use crate::state::app_state::AppState;
 use crate::types::{CaseId, ConstraintRole, RequestId, TracedEvent};
@@ -10,6 +11,11 @@ pub trait ConstraintHandler: Send + Sync {
     fn event_id(&self) -> &str;
     fn constraint_id(&self) -> &str;
     fn role(&self) -> ConstraintRole;
+    fn index(&self) -> usize;
+    fn counter_reset(&self) -> Option<DistributedAppearanceCounterReset> {
+        None
+    }
+
     // return a list of peers that are configured to be connected to in order to coordinate the constraint check
     fn configured_peers(&self) -> Vec<SocketAddr> {
         vec![]
@@ -48,6 +54,9 @@ macro_rules! impl_constraint_handler_fields {
         }
         fn role(&self) -> $crate::types::ConstraintRole {
             self.role
+        }
+        fn index(&self) -> usize {
+            self.index
         }
     };
 }

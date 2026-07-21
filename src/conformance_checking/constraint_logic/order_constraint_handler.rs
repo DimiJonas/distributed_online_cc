@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     conformance_checking::{
@@ -39,17 +38,6 @@ impl ConstraintHandler for OrderFirstHandler {
             event
         );
 
-        let order_first_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "order first handler: order first event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         if let Some(blocking_token) = {
             let token_in = state.token_in.lock().unwrap();
             token_in.get_in_cloned(&event.case_id, self.index)
@@ -71,11 +59,11 @@ impl ConstraintHandler for OrderFirstHandler {
                 }
             };
 
-            if order_first_event_time >= order_second_event_time {
+            if event.timestamp >= order_second_event_time {
                 // produce negative result
                 let info = format!(
                     "order first event happened at {} after order second event at {}",
-                    order_first_event_time, order_second_event_time
+                    event.timestamp, order_second_event_time
                 );
                 emit_result(
                     &event.case_id,
@@ -97,21 +85,17 @@ impl ConstraintHandler for OrderFirstHandler {
 
             match token_out.get_out_mut(&event.case_id, self.index) {
                 // a token for recording the order first executions already exists
-                Some(recording_token) => recording_token
-                    .payload
-                    .push_timestamp(order_first_event_time),
+                Some(recording_token) => recording_token.payload.push_timestamp(event.timestamp),
 
                 None => {
                     let mut recording_token = Token::new(
                         event.case_id.clone(),
                         self.constraint_id.clone(),
                         ConstraintType::Order,
-                        event.timestamp_utc(),
+                        Some(event.timestamp),
                         state.config.node_id,
                     );
-                    recording_token
-                        .payload
-                        .push_timestamp(order_first_event_time);
+                    recording_token.payload.push_timestamp(event.timestamp);
                     token_out.produce_without_overwrite(recording_token, self.index);
                 }
             };
@@ -286,17 +270,6 @@ impl ConstraintHandler for OrderSecondHandler {
             event
         );
 
-        let order_second_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "order second handler: order second event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         // check if this is the first time receiving such event for the case
         // keep the token store lock for that time, but release lock before notifying order first peers
         let notify_peers = {
@@ -307,7 +280,7 @@ impl ConstraintHandler for OrderSecondHandler {
                     event.case_id.clone(),
                     self.constraint_id.clone(),
                     ConstraintType::Order,
-                    Some(order_second_event_time),
+                    Some(event.timestamp),
                     state.config.node_id,
                 );
                 token_out.produce_without_overwrite(remembering_token, self.index);
@@ -328,7 +301,7 @@ impl ConstraintHandler for OrderSecondHandler {
                     peer_addr,
                     event.case_id.clone(),
                     self.constraint_id.clone(),
-                    order_second_event_time,
+                    event.timestamp,
                     state.clone(),
                 )
                 .await;

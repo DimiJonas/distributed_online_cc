@@ -8,7 +8,7 @@ use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
-        CaseEnd, CaseId, ConstraintRole, ConstraintId, ConstraintResultType, ConstraintType,
+        CaseEnd, CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType,
         EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
     },
 };
@@ -290,6 +290,16 @@ impl CCMessage {
 
     pub fn pull_token_request(case_id: CaseId, constraint_id: ConstraintId) -> Self {
         Self::base(CCMessageType::PullTokenRequest, case_id, constraint_id)
+    }
+
+    pub fn pull_token_request_with_creator(
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        creator: ConstraintRole,
+    ) -> Self {
+        let mut msg = Self::base(CCMessageType::PullTokenRequest, case_id, constraint_id);
+        msg.creating_handler = Some(creator);
+        msg
     }
 
     pub fn pull_token_response(token: Token) -> Self {

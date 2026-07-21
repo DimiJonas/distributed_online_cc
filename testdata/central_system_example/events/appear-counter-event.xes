@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<log xes.version="1.0" xmlns="http://www.xes-standard.org/">
+  <trace>
+    <string key="concept:name" value="case-13"/>
+    <event>
+      <string key="concept:name" value="appearance_counter_event"/>
+    </event>
+  </trace>
+</log>

@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     conformance_checking::{
@@ -43,18 +42,6 @@ impl ConstraintHandler for PrecedenceProducerHandler {
             event
         );
 
-        let producer_event_time = {
-            match event.timestamp_utc() {
-                Some(timestamp) => timestamp,
-                None => {
-                    log::warn!(
-                        "precedence producer handler: precedence producer event did not contain a timestamp - using current time as event time"
-                    );
-                    Utc::now()
-                }
-            }
-        };
-
         // check if token already exists
         let token = {
             let mut token_out = state.token_out.lock().unwrap();
@@ -70,7 +57,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
                 event.case_id.clone(),
                 self.constraint_id.clone(),
                 ConstraintType::Precedence,
-                Some(producer_event_time),
+                Some(event.timestamp),
                 state.config.node_id,
             );
             token_out.produce_without_overwrite(producer_token.clone(), self.index);
@@ -130,17 +117,6 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             event
         );
 
-        let consumer_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "precedence consumer handler: precedence consumer event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         let producer_token = {
             let token_in = state.token_in.lock().unwrap();
             token_in.get_in_cloned(&event.case_id, self.index)
@@ -165,7 +141,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         };
 
         // evaluate timestamps
-        if consumer_event_time <= producer_event_time {
+        if event.timestamp <= producer_event_time {
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
@@ -173,7 +149,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 ConstraintResultType::Violated,
                 format!(
                     "consumer event happened before producer event: {} <= {}",
-                    consumer_event_time, producer_event_time
+                    event.timestamp, producer_event_time
                 ),
                 state.clone(),
             )

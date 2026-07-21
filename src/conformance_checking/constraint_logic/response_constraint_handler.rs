@@ -34,7 +34,6 @@ use crate::types::{
     HandlerIndex, RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
-use chrono::Utc;
 
 pub struct ResponseProducerHandler {
     pub index: HandlerIndex,
@@ -55,22 +54,11 @@ impl ConstraintHandler for ResponseProducerHandler {
             event
         );
 
-        let producer_event_time = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "response producer handler: response producer event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         let producer_token = Token::new(
             event.case_id.clone(),
             self.constraint_id.clone(),
             ConstraintType::Response,
-            Some(producer_event_time),
+            Some(event.timestamp),
             state.config.node_id,
         );
         {
@@ -98,7 +86,7 @@ impl ConstraintHandler for ResponseProducerHandler {
                 ConstraintResultType::Violated,
                 format!(
                     "producer token from {} for {}/{} was not consumed",
-                    producer_event_time, event.case_id, self.constraint_id,
+                    event.timestamp, event.case_id, self.constraint_id,
                 ),
                 state.clone(),
             )
@@ -192,7 +180,7 @@ impl ConstraintHandler for ResponseProducerHandler {
                 ),
                 None => (
                     ConstraintResultType::Satisfied,
-                    "all producer tokens were consumed".to_string(),
+                    "no producer tokens exist".to_string(),
                 ),
             }
         };
@@ -247,17 +235,6 @@ impl ConstraintHandler for ResponseConsumerHandler {
             event
         );
 
-        let event_timestamp = {
-            if let Some(timestamp) = event.timestamp_utc() {
-                timestamp
-            } else {
-                log::warn!(
-                    "response consumer handler: response consumer event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
-
         log::info!(
             "response consumer handler: triggering token deletion on response producer peers"
         );
@@ -266,7 +243,7 @@ impl ConstraintHandler for ResponseConsumerHandler {
                 peer_addr,
                 event.case_id.clone(),
                 self.constraint_id.clone(),
-                event_timestamp,
+                event.timestamp,
                 state.clone(),
             )
             .await;

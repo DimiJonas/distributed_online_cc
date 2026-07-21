@@ -1,3 +1,4 @@
+mode = "central"
 node_id = 1
 tcp_listen_address = "127.0.0.1:8001"
 unix_socket = "/tmp/event_listener_c.sock"
@@ -84,6 +85,16 @@ constraint_id = "precedence_test"
 event_id = "precedence_producer_event"
 consumer_peers = ["127.0.0.1:8001"]
 
+[[constraints]]
+constraint_role = "ResponseConsumer"
+constraint_id = "response_test"
+event_id = "response_consumer_event"
+producer_peers = ["127.0.0.1:8001"]
+
+[[constraints]]
+constraint_role = "ResponseProducer"
+constraint_id = "response_test"
+event_id = "response_producer_event"
 
 [[constraints]]
 constraint_role = "SensorCollector"
