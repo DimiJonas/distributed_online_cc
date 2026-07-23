@@ -15,7 +15,7 @@ use crate::{
     state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
+        EventTime, HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
@@ -75,41 +75,23 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             }
         };
 
+        // the token may have been created while answering the other sides negotiation, before this handler saw its own event
+        // record the event time now, so later negotiations and the case end fallback emit correct results
+        if claim_token.event_time.is_none() {
+            claim_token.event_time = Some(event.timestamp);
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+        }
+
         if claim_token.payload == TokenPayload::None {
             // negotiate execution permission
 
-            let message = PeerMessage::conformance_req(
-                Uuid::new_v4(),
-                CCMessage::push_claim_token(claim_token.clone(), self.role),
-            );
-            let other_event_time = match send_and_receive_conformance(
-                self.b_peer,
-                message,
-                state.clone(),
-            )
-            .await
+            let other_event_time = match self
+                .fetch_other_event_time(&claim_token, state.clone())
+                .await
             {
-                Ok(response) => match response.payload {
-                    PeerMessagePayload::Conformance(cc_message) => match cc_message.token {
-                        Some(token) => token.event_time,
-                        None => None,
-                    },
-                    _ => {
-                        log::error!(
-                            "not coexistence a handler: received wrong message type: \"{}\"; expected type: \"conformance\"",
-                            response.payload
-                        );
-                        return;
-                    }
-                },
-                Err(e) => {
-                    log::error!(
-                        "not coexistence a handler: error receiving token from {}: {}",
-                        self.b_peer,
-                        e
-                    );
-                    return;
-                }
+                Ok(t) => t,
+                Err(()) => return,
             };
 
             // set execution permission
@@ -277,10 +259,11 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         // set execution permissions
         match claim_token.event_time {
             Some(event_time) => {
-                if event_time < other_event_time {
+                // <=: on a timestamp tie the A side deterministically wins
+                if event_time <= other_event_time {
                     claim_token.payload.grant_execution_permission();
                     log::info!(
-                        "not coexistence a handler: set execution permission to {} because {} < {}",
+                        "not coexistence a handler: set execution permission to {} because {} <= {}",
                         claim_token.payload.is_execution_allowed(),
                         event_time,
                         other_event_time
@@ -288,7 +271,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 } else {
                     claim_token.payload.deny_execution_permission();
                     log::info!(
-                        "not coexistence a handler: set execution permission to {} because {} >= {}",
+                        "not coexistence a handler: set execution permission to {} because {} > {}",
                         claim_token.payload.is_execution_allowed(),
                         event_time,
                         other_event_time
@@ -312,7 +295,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         }
     }
 
-    /// emit a result if none of the events happened
+    // emit the satisfied fallback when the constraint was not violated
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "not coexistence a handler: received case end signal for constraint {}; case={}",
@@ -320,23 +303,58 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             case_id
         );
 
-        let claim_token_exists = {
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if result_exists {
+            return;
+        }
+
+        let claim_token = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(case_id, self.index).is_some()
+            meta_tokens.get_token_cloned(case_id, self.index)
         };
 
-        if !claim_token_exists {
-            // produce positive result because none was emitted yet and both handlers did not receive any events
-            emit_result(
-                case_id,
-                &self.constraint_id,
-                ConstraintType::NotCoexistence,
-                ConstraintResultType::Satisfied,
-                "none of the not coexistence events happened until case end".to_string(),
-                state.clone(),
-            )
-            .await;
-        }
+        let info: String = match &claim_token {
+            None => "none of the not coexistence events happened until case end".to_string(),
+            Some(token) if token.event_time.is_none() => {
+                "only the not coexistence B event happened until case end".to_string()
+            }
+            Some(token) if token.payload == TokenPayload::None => {
+                // incomplete negotiation - ask the B side as a best effort
+                match self.fetch_other_event_time(token, state.clone()).await {
+                    Ok(None) => {
+                        "only the not coexistence A event happened until case end".to_string()
+                    }
+                    Ok(Some(_)) | Err(()) => {
+                        log::warn!(
+                            "not coexistence a handler: claim token for ({}/{}) has an undecided permission at case end; emitting no fallback",
+                            case_id,
+                            self.constraint_id
+                        );
+                        return;
+                    }
+                }
+            }
+            Some(_) => {
+                // A happened and was allowed - the B side is responsible for
+                // the remaining outcome
+                return;
+            }
+        };
+
+        emit_result(
+            case_id,
+            &self.constraint_id,
+            ConstraintType::NotCoexistence,
+            ConstraintResultType::Satisfied,
+            info,
+            state.clone(),
+        )
+        .await;
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
@@ -350,6 +368,43 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.remove_meta_token(case_id, self.index);
+        }
+    }
+}
+
+impl NotCoexistenceAHandler {
+    /// ask the B side for its claim token and return the B events timestamp
+    async fn fetch_other_event_time(
+        &self,
+        claim_token: &Token,
+        state: AppState,
+    ) -> Result<Option<EventTime>, ()> {
+        let message = PeerMessage::conformance_req(
+            Uuid::new_v4(),
+            CCMessage::push_claim_token(claim_token.clone(), self.role),
+        );
+        match send_and_receive_conformance(self.b_peer, message, state.clone()).await {
+            Ok(response) => match response.payload {
+                PeerMessagePayload::Conformance(cc_message) => match cc_message.token {
+                    Some(token) => Ok(token.event_time),
+                    None => Ok(None),
+                },
+                _ => {
+                    log::error!(
+                        "not coexistence a handler: received wrong message type: \"{}\"; expected type: \"conformance\"",
+                        response.payload
+                    );
+                    Err(())
+                }
+            },
+            Err(e) => {
+                log::error!(
+                    "not coexistence a handler: error receiving token from {}: {}",
+                    self.b_peer,
+                    e
+                );
+                Err(())
+            }
         }
     }
 }
@@ -410,6 +465,14 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             }
         };
 
+        // the token may have been created while answering the other sides negotiation, before this handler saw its own event
+        // record the event time now, so later negotiations and the case end fallback emit correct results
+        if claim_token.event_time.is_none() {
+            claim_token.event_time = Some(event.timestamp);
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+        }
+
         if claim_token.payload == TokenPayload::None {
             // negotiate execution permission
 
@@ -450,10 +513,11 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             // set execution permission
             match other_event_time {
                 Some(other_time) => {
-                    if event.timestamp <= other_time {
+                    // strict <: on a timestamp tie the B side deterministically loses
+                    if event.timestamp < other_time {
                         claim_token.payload.grant_execution_permission();
                         log::info!(
-                            "not coexistence b handler: set execution permission to {} because {} <= {}",
+                            "not coexistence b handler: set execution permission to {} because {} < {}",
                             claim_token.payload.is_execution_allowed(),
                             event.timestamp,
                             other_time
@@ -461,7 +525,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     } else {
                         claim_token.payload.deny_execution_permission();
                         log::info!(
-                            "not coexistence b handler: set execution permission to {} because {} > {}",
+                            "not coexistence b handler: set execution permission to {} because {} >= {}",
                             claim_token.payload.is_execution_allowed(),
                             event.timestamp,
                             other_time
@@ -647,6 +711,44 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         }
     }
 
+    /// mirror of the A side fallback
+    async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
+        log::info!(
+            "not coexistence b handler: received case end signal for constraint {}; case={}",
+            self.constraint_id,
+            case_id
+        );
+
+        let result_exists = {
+            let results = state.cc_results.lock().unwrap();
+            results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+        };
+        if result_exists {
+            return;
+        }
+
+        let claim_token = {
+            let meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.get_token_cloned(case_id, self.index)
+        };
+
+        if let Some(token) = &claim_token
+            && token.event_time.is_none()
+        {
+            emit_result(
+                case_id,
+                &self.constraint_id,
+                ConstraintType::NotCoexistence,
+                ConstraintResultType::Satisfied,
+                "only the not coexistence A event happened until case end".to_string(),
+                state.clone(),
+            )
+            .await;
+        }
+    }
+
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
         log::info!(
             "not coexistence b handler: clean up state for ({}/{})",
@@ -670,7 +772,7 @@ mod tests {
         config::node_config::ConstraintConfig,
         conformance_checking::constraint_logic::{
             constraint_handler_trait::ConstraintHandler,
-            not_coexistence_handler::NotCoexistenceAHandler,
+            not_coexistence_handler::{NotCoexistenceAHandler, NotCoexistenceBHandler},
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
@@ -748,6 +850,207 @@ mod tests {
             result_type(&state, case),
             Some(ConstraintResultType::Satisfied)
         ));
+    }
+
+    /// only A happened: the A side (token with event_time, decided
+    /// permission) stays SILENT at case end - the Satisfied fallback for this
+    /// state is the B side's responsibility (see b_side test below).
+    #[tokio::test]
+    async fn only_a_a_side_silent_at_case_end() {
+        let case = "c10";
+        let (state, b_peer) = a_state(24100, 24101, case);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
+        let h = handler(b_peer);
+
+        // A event with mocked "B never ran" negotiation
+        let ev = make_traced_event_at(case, EID, 10);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, None));
+        tokio::join!(run, mock);
+        assert!(result_type(&state, case).is_none());
+
+        h.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(
+            result_type(&state, case).is_none(),
+            "A side must stay silent; the B side emits the fallback for this state"
+        );
+    }
+
+    /// only A happened, seen from the B side: B's token was created while
+    /// answering A's negotiation (no event_time) -> B emits the Satisfied.
+    #[tokio::test]
+    async fn only_a_b_side_emits_satisfied_at_case_end() {
+        let case = "c14";
+        let (state, a_peer) = a_state(24140, 24141, case);
+        let b = NotCoexistenceBHandler {
+            index: 1,
+            role: ConstraintRole::NotCoexistenceB,
+            event_id: "not_coexistence_b_event".to_string(),
+            constraint_id: CID.to_string(),
+            a_peer,
+        };
+
+        // as created by B's handle_message while answering A
+        let token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::NotCoexistence,
+            None,
+            2,
+        );
+        state
+            .meta_token_store
+            .lock()
+            .unwrap()
+            .insert_meta_token(token, b.index);
+
+        b.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// B side with no token at case end stays silent (the A side owns the
+    /// "neither happened" fallback, avoiding duplicate rows).
+    #[tokio::test]
+    async fn neither_b_side_silent_at_case_end() {
+        let case = "c15";
+        let (state, a_peer) = a_state(24150, 24151, case);
+        let b = NotCoexistenceBHandler {
+            index: 1,
+            role: ConstraintRole::NotCoexistenceB,
+            event_id: "not_coexistence_b_event".to_string(),
+            constraint_id: CID.to_string(),
+            a_peer,
+        };
+        b.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(result_type(&state, case).is_none());
+    }
+
+    /// A then B (B side emitted the violation remotely) -> case end emits NOTHING here,
+    /// so the remote Violated is never contradicted.
+    #[tokio::test]
+    async fn a_then_b_case_end_emits_nothing() {
+        let case = "c11";
+        let (state, b_peer) = a_state(24110, 24111, case);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
+        let h = handler(b_peer);
+
+        let ev = make_traced_event_at(case, EID, 10);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, None));
+        tokio::join!(run, mock);
+
+        // A's token has an event_time and a decided permission -> the A side
+        // must stay silent without any query; if B ran later, B's node holds
+        // the violation, and if B never ran, B's node emits the fallback
+        h.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(
+            result_type(&state, case).is_none(),
+            "A side must not emit a fallback once its token is decided"
+        );
+    }
+
+    /// only B happened: the local token was created while answering B's
+    /// negotiation (no event_time) -> Satisfied without any query.
+    #[tokio::test]
+    async fn only_b_satisfied_at_case_end() {
+        let case = "c12";
+        let (state, b_peer) = a_state(24120, 24121, case);
+        let h = handler(b_peer);
+
+        // simulate the token A's handle_message creates while answering B
+        let token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::NotCoexistence,
+            None,
+            2,
+        );
+        state
+            .meta_token_store
+            .lock()
+            .unwrap()
+            .insert_meta_token(token, h.index());
+
+        h.handle_case_end(&case.to_string(), state.clone()).await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
+    /// a claim token created while answering the other side's negotiation
+    /// (event_time None) gets the local event's timestamp recorded when that
+    /// event arrives - otherwise the case end fallback query would wrongly
+    /// conclude the event never happened.
+    #[tokio::test]
+    async fn handle_event_records_time_into_negotiated_token() {
+        let case = "c13";
+        let (state, b_peer) = a_state(24130, 24131, case);
+        let h = handler(b_peer);
+
+        // as created by handle_message while answering the other side
+        let mut token = Token::new(
+            case.to_string(),
+            CID.to_string(),
+            ConstraintType::NotCoexistence,
+            None,
+            2,
+        );
+        token.payload.deny_execution_permission();
+        state
+            .meta_token_store
+            .lock()
+            .unwrap()
+            .insert_meta_token(token, h.index());
+
+        // permission already set -> no negotiation round-trip needed
+        let ev = make_traced_event_at(case, EID, 30);
+        h.handle_event(&ev, state.clone()).await;
+
+        // denied -> local violation, and the token now carries the time
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+        let stored = state
+            .meta_token_store
+            .lock()
+            .unwrap()
+            .get_token_cloned(&case.to_string(), h.index())
+            .unwrap();
+        assert_eq!(stored.event_time, Some(at(30)));
+    }
+
+    /// exact timestamp tie: role-deterministic - the A side wins the tie in
+    /// both negotiation paths, so B is denied and would emit the violation.
+    #[tokio::test]
+    async fn timestamp_tie_a_wins() {
+        let case = "c16";
+        let (state, b_peer) = a_state(24160, 24161, case);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
+        let h = handler(b_peer);
+
+        // A and B carry the same timestamp; B's mocked answer reports t=10
+        let ev = make_traced_event_at(case, EID, 10);
+        let run = h.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, Some(10)));
+        tokio::join!(run, mock);
+
+        // A granted on the tie -> no violation from the A side
+        assert!(result_type(&state, case).is_none());
+        let token = state
+            .meta_token_store
+            .lock()
+            .unwrap()
+            .get_token_cloned(&case.to_string(), h.index())
+            .unwrap();
+        assert!(token.payload.is_execution_allowed());
     }
 
     /// only A ran (B never ran -> other time None) -> A gets execution right -> no violation/result.

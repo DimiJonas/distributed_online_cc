@@ -295,13 +295,13 @@ fn sfx(stem: &str, copy: u64) -> String {
 // the built-in constraint catalog - one entry per logical constraint
 fn catalog() -> Vec<Template> {
     // small function to create sensor templates
-    let sensor = |stem: &'static str, attr: &'static str, op: SensorConstraintMode| Template {
+    let sensor = |stem: &'static str, threshold: f64, op: SensorConstraintMode| Template {
         constraint_stem: stem,
         roles: vec![
             (
                 Role::SensorCollector {
-                    attribute_key: attr.to_string(),
-                    value: 10.0,
+                    attribute_key: "value".to_string(),
+                    value: threshold,
                     mode: op,
                     max_value_age: Duration::from_hours(96),
                 },
@@ -408,11 +408,11 @@ fn catalog() -> Vec<Template> {
                 ),
             ],
         },
-        sensor("sensor_lt_test", "lt_value", SensorConstraintMode::Lt),
-        sensor("sensor_gt_test", "gt_value", SensorConstraintMode::Gt),
-        sensor("sensor_lte_test", "lte_value", SensorConstraintMode::Lte),
-        sensor("sensor_gte_test", "gte_value", SensorConstraintMode::Gte),
-        sensor("sensor_eq_test", "eq_value", SensorConstraintMode::Eq),
+        sensor("sensor_lt_test", 15.0, SensorConstraintMode::Lt),
+        sensor("sensor_gt_test", 5.0, SensorConstraintMode::Gt),
+        sensor("sensor_lte_test", 12.0, SensorConstraintMode::Lte),
+        sensor("sensor_gte_test", 8.0, SensorConstraintMode::Gte),
+        sensor("sensor_eq_test", 10.0, SensorConstraintMode::Eq),
         Template {
             constraint_stem: "time_test",
             roles: vec![
