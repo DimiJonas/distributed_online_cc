@@ -162,11 +162,11 @@ impl NodeConfigBuilder {
         self.config.case_end_retention_period = p;
         self
     }
-    pub fn default_buffer(mut self, b: ResultBufferConfig) -> Self {
+    pub fn default_result_buffer(mut self, b: ResultBufferConfig) -> Self {
         self.config.default_result_buffer = b;
         self
     }
-    pub fn buffer(mut self, id: impl Into<String>, b: ResultBufferConfig) -> Self {
+    pub fn result_buffer(mut self, id: impl Into<String>, b: ResultBufferConfig) -> Self {
         self.config.result_buffers.insert(id.into(), b);
         self
     }

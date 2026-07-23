@@ -48,18 +48,30 @@ pub fn setup_logging(
 
     // read desired level from env var, default to Info
     // e.g. RUST_LOG=info cargo run
-    let level = std::env::var("RUST_LOG")
+    // log levels, configurable independently:
+    //   RUST_LOG      -> stdout level (default: Info)
+    //   RUST_LOG_FILE -> log file level (default: same as RUST_LOG)
+    let stdout_level = std::env::var("RUST_LOG")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(LevelFilter::Info);
+    let file_level = std::env::var("RUST_LOG_FILE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(stdout_level);
 
     fern::Dispatch::new()
         .format(format)
-        .level(level)
-        // stdout for Info and above
-        .chain(std::io::stdout())
-        // file gets everything
-        .chain(fern::log_file(log_file_str)?)
+        .chain(
+            fern::Dispatch::new()
+                .level(stdout_level)
+                .chain(std::io::stdout()),
+        )
+        .chain(
+            fern::Dispatch::new()
+                .level(file_level)
+                .chain(fern::log_file(log_file_str)?),
+        )
         .apply()?;
 
     Ok(())

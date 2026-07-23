@@ -67,9 +67,8 @@ pub async fn initiate_tcp_connection(
         return;
     }
 
-    log::debug!("initiate_tcp_connection: handshake successful");
-    log::info!(
-        "initiate_tcp_connection: tcp channel to {} initiated",
+    log::debug!(
+        "initiate_tcp_connection: handshake successful. tcp channel to {} initiated",
         peer_address
     );
     notify_manager(
@@ -146,7 +145,7 @@ pub async fn accept_incoming_tcp_connection(
         }
     };
 
-    log::info!(
+    log::debug!(
         "accept_incoming_tcp_connection: accepted tcp connection from peer {}",
         peer_address
     );
@@ -210,7 +209,7 @@ async fn tcp_channel(
                 }
             };
 
-            log::info!(
+            log::debug!(
                 "tcp_channel: decoded message from peer {}: {}",
                 peer_address,
                 msg
@@ -243,7 +242,7 @@ async fn tcp_channel(
             result = stream.read_buf(&mut read_buf) => {
                 match result {
                     Ok(0) => {
-                        log::info!("tcp_channel: got zero bytes. peer {} probably disconnected", peer_address);
+                        log::debug!("tcp_channel: got zero bytes. peer {} probably disconnected", peer_address);
                         break;
                     }
                     Ok(_) => {
@@ -258,13 +257,13 @@ async fn tcp_channel(
             // idle: if an idle timeout is configured, the channel will be torn down if no messages were sent or received for a configured timeout duration
             // idle timeout is only configurable for the overlay network, where the connectionLost signal to the peer manager will never try to reconnect
             _ = sleep(idle_duration), if idle_enabled => {
-                log::info!("tcp_channel: channel to {} has been in idle for {}. closing channel", peer_address, humantime::format_duration(idle_duration));
+                log::debug!("tcp_channel: channel to {} has been in idle for {}. closing channel", peer_address, humantime::format_duration(idle_duration));
                 break;
             }
         }
     }
 
-    log::info!("tcp_channel: peer connection to {} closed", peer_address);
+    log::debug!("tcp_channel: peer connection to {} closed", peer_address);
     notify_manager(
         state.clone(),
         peer_address,
@@ -307,7 +306,7 @@ fn ensure_manager_exists(state: AppState, peer_address: PeerAddress) {
         manager_receiver,
         state.clone(),
     ));
-    log::info!(
+    log::debug!(
         "ensure_manager_exists: created manager task for peer {}",
         peer_address
     );

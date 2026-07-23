@@ -170,7 +170,21 @@ impl ConstraintHandler for SensorCollectorHandler {
         };
 
         // evaluate value and produce result result
-        if !self.mode.evaluate_condition(attribute_value, self.value) {
+        let condition_met = self.mode.evaluate_condition(attribute_value, self.value);
+        log::info!(
+            "sensor collector handler: evaluated ({}/{}): {} {} {} -> {}",
+            message.case_id,
+            self.constraint_id,
+            attribute_value,
+            self.mode,
+            self.value,
+            if condition_met {
+                "condition met, no violation emitted"
+            } else {
+                "condition not met, emitting violation"
+            }
+        );
+        if !condition_met {
             // produce negative result
             emit_result(
                 &message.case_id,

@@ -144,7 +144,7 @@ pub fn peer_manager_task(
                 }
 
                 PeerManagerMessage::ConnectionReady(sender) => {
-                    log::info!(
+                    log::debug!(
                         "connection to {} ready, flushing {} queued messages",
                         peer_address,
                         queue.len()
@@ -176,7 +176,7 @@ pub fn peer_manager_task(
                         conn,
                         ConnectionState::Idle | ConnectionState::WaitingReconnect
                     ) {
-                        log::info!("connect requested for {}, attempting", peer_address);
+                        log::debug!("connect requested for {}, attempting", peer_address);
                         conn = ConnectionState::Connecting;
                         do_connect(peer_address, state.clone()).await;
                     }

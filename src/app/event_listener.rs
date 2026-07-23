@@ -18,7 +18,7 @@ pub fn spawn_event_listener(state: AppState) {
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-            log::info!("received input on event listener unix socket");
+            log::debug!("received input on event listener unix socket");
 
             tokio::spawn(handle_event(
                 stream,

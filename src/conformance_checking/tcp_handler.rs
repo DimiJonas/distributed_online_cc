@@ -192,14 +192,11 @@ pub async fn handle_overlay_message(
     }
 
     // received a shuffle request
-    log::info!(
-        "cyclon overlay: received shuffle request from {} with request id {}",
-        msg.sender_address,
-        request_id.unwrap_or_default()
-    );
     log::debug!(
-        "cyclon overlay: subset received from P: {:?}",
-        msg.peer_batch
+        "cyclon overlay: received shuffle request from {} with request id {}: {:?}",
+        msg.sender_address,
+        request_id.unwrap_or_default(),
+        msg.peer_batch,
     );
 
     // pick random subset from peer cache
@@ -229,12 +226,12 @@ pub async fn handle_overlay_message(
         }
     };
 
-    log::info!(
-        "cyclon overlay: answering request from {} with subset of size {}",
+    log::debug!(
+        "cyclon overlay: answering request from {} with subset of size {}: {:?}",
         msg.sender_address,
-        subset.len()
+        subset.len(),
+        subset,
     );
-    log::debug!("cyclon overlay: response subset: {:?}", subset);
 
     // build response
     let response = PeerMessage::overlay_res(

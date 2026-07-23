@@ -25,7 +25,7 @@ pub fn spawn_case_end_gossip_manager(
                 // anti entropy ticks
                 _ = anti_entropy_interval.tick() => {
                     let now = Utc::now();
-                    log::info!("anti entropy: running anti entropy mechanism");
+                    log::debug!("anti entropy: running anti entropy mechanism");
                     let digest = {
                         let mut ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
                         // prune expired records
@@ -42,7 +42,7 @@ pub fn spawn_case_end_gossip_manager(
                     }
                     let digest_message = PeerMessage::ce_gossip(CEGossipMessage::new_ae_digest(state.config.overlay().listen_address, digest));
                     for address in addresses {
-                        log::info!("anti entropy: sending digest {} to {}", digest, address);
+                        log::debug!("anti entropy: sending digest {} to {}", digest, address);
                         if let Err(e) = send_to_overlay_peer(address, digest_message.clone(), state.clone()).await {
                             log::error!(
                                 "case_end_gossip: error sending cache digest to {}: {}",
@@ -102,7 +102,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
     let payload_name = message.payload.name();
     match message.payload {
         CEGossipPayload::Push(data) | CEGossipPayload::AeSet(data) => {
-            log::info!(
+            log::debug!(
                 "handle_inbound_message: received {} data of length {}",
                 payload_name,
                 data.len()

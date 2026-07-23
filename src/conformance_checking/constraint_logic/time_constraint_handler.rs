@@ -181,6 +181,23 @@ impl ConstraintHandler for TimeStartHandler {
                 .get_constraint(case_id, &self.constraint_id)
                 .is_some()
         };
+
+        // if a timer is still running its watchdog task will emit the result
+        // once it fires (or a late stop event cancels it and evaluates)
+        let live_timers = {
+            let timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.timer_token_count(case_id, &self.constraint_id)
+        };
+        if live_timers > 0 {
+            log::info!(
+                "time start handler: case end for ({}/{}) with {} live timer(s) - watchdog will emit the result",
+                case_id,
+                self.constraint_id,
+                live_timers
+            );
+            return;
+        }
+
         if !result_exists {
             // produce result because none was emitted yet
             emit_result(
@@ -188,7 +205,7 @@ impl ConstraintHandler for TimeStartHandler {
                 &self.constraint_id,
                 ConstraintType::Time,
                 ConstraintResultType::Satisfied,
-                "neither time start event nor time stop event happened".to_string(),
+                "no time constraint result was produced until case end".to_string(),
                 state.clone(),
             )
             .await;
@@ -675,5 +692,46 @@ mod tests {
         let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
         // Should not panic, should not touch token_store
         stop.clean_up_state(&CASE.to_string(), state.clone()).await;
+    }
+
+    // ── case end fallback ────────────────────────────────────────────────
+
+    // regression: case end arriving while a timer is still live must not  emit the fallback result - the watchdog owns the result
+    // emitting here would produce a second (misleading) result row in the central system
+    // while the distributed system produces only the watchdog result because case end arrives later via gossip
+    #[tokio::test]
+    async fn case_end_with_live_timer_emits_nothing() {
+        let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Min);
+
+        // start a timer, then signal case end while it is still live
+        let event = make_traced_event_at(CASE, "start", 0);
+        handler.handle_event(&event, state.clone()).await;
+
+        handler
+            .handle_case_end(&CASE.to_string(), state.clone())
+            .await;
+
+        assert!(
+            read_result(&state).is_none(),
+            "no fallback result may be emitted while a timer is live"
+        );
+    }
+
+    /// case end with no timer activity and no prior result emits the
+    /// satisfied fallback so every constraint has at least one result per case
+    #[tokio::test]
+    async fn case_end_without_activity_emits_satisfied_fallback() {
+        let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Min);
+
+        handler
+            .handle_case_end(&CASE.to_string(), state.clone())
+            .await;
+
+        assert!(matches!(
+            read_result(&state),
+            Some(ConstraintResultType::Satisfied)
+        ));
     }
 }

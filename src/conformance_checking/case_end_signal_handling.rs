@@ -49,6 +49,17 @@ async fn apply_merge(res: MergeResult, state: AppState) {
 }
 
 fn spawn_case_closing_task(state: AppState, case_id: CaseId) {
+    // dont spawn a case closing task if the case is already closed (a case closing task already ran)
+    {
+        let case_state = state.case_state.lock().unwrap();
+        if case_state.is_closed(&case_id) {
+            log::debug!(
+                "case end signal handling: case {} is already closed; not spawning another closing task",
+                case_id
+            );
+            return;
+        }
+    }
     // spawn case closing task
     let handle = tokio::spawn(case_closing_task(state.clone(), case_id.clone()));
     // spawn a task that logs the error if the case closing task panics

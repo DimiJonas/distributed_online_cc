@@ -11,7 +11,9 @@ SESSIONS=()                                  # explicit sessions (override prefi
 SOCKET_GLOB="/tmp/event_listener*.sock"
 CLEAN_SOCKETS=true
 CLEAN_LOGS=false
+CLEAN_DB=false
 LOG_DIR="run/logs"
+DB_DIR="run"
  
 usage() {
   cat <<EOF
@@ -23,7 +25,10 @@ Usage: $0 [options]
       --socket-glob PAT  socket pattern to remove      (default: $SOCKET_GLOB)
       --keep-sockets     do NOT remove unix sockets
       --clean-logs       also remove \$LOG_DIR/*.log
+      --clean-db	 also remove \$DB_DIR/*.db, \$DB_DIR/*.db-wal and \$DB_DIR/*.db-shm
       --log-dir DIR      log directory for --clean-logs (default: $LOG_DIR)
+      --db-dir DIR	 db directory for --clean-db (default: $DB_DIR)
+      --full		 does a full clean killing sessions and deleting sockets, logs and databases
   -h, --help             show this help
 EOF
 }
@@ -36,7 +41,10 @@ while [[ $# -gt 0 ]]; do
     --socket-glob)    SOCKET_GLOB="$2"; shift 2 ;;
     --keep-sockets)   CLEAN_SOCKETS=false; shift ;;
     --clean-logs)     CLEAN_LOGS=true; shift ;;
+    --clean-db)       CLEAN_DB=true; shift ;;
     --log-dir)        LOG_DIR="$2"; shift 2 ;;
+    --db-dir)         DB_DIR="$2"; shift 2 ;;
+    --full)	      CLEAN_LOGS=true CLEAN_DB=true; shift ;;
     -h|--help)        usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -90,3 +98,17 @@ if $CLEAN_LOGS; then
   fi
 fi
 
+# ---- optional: clean db (off by default) ----
+if $CLEAN_DB; then
+  db_files=()
+  if [[ -d "$DB_DIR" ]]; then
+    while IFS= read -r f; do db_files+=("$f"); done \
+	    < <(find "$DB_DIR" -maxdepth 1 \( -name '*.db' -o -name '*.db-wal' -o -name '*.db-shm' \))
+  fi
+  if [[ ${#db_files[@]} -gt 0 ]]; then
+    rm -f "${db_files[@]}"
+    echo "removed ${#db_files[@]} db file(s) from $DB_DIR"
+  else
+    echo "no *.db, *.db-wal or *.db-shm files in $DB_DIR"
+  fi
+fi

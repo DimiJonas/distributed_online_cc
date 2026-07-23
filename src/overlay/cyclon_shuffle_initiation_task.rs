@@ -37,7 +37,7 @@ pub async fn cyclon_shuffle_initiation_task(state: AppState) {
 }
 
 async fn initiate_shuffle(state: AppState) {
-    log::info!("cyclon overlay: initiating shuffle");
+    log::debug!("cyclon overlay: initiating shuffle");
 
     let (subset, q_address) = {
         let mut peer_cache = state.dist().peer_cache.lock().unwrap();
@@ -76,7 +76,7 @@ async fn initiate_shuffle(state: AppState) {
     );
 
     // send peer subset to Q and receive another subset from Q
-    log::info!(
+    log::debug!(
         "cyclon overlay: sending subset of size {} to {}",
         sent.len(),
         q_address,
@@ -103,14 +103,11 @@ async fn initiate_shuffle(state: AppState) {
             return;
         }
     };
-    log::info!(
-        "cyclone overlay: received subset of size {} from {}",
-        received_subset.len(),
-        q_address
-    );
     log::debug!(
-        "cyclon overlay: subset received from Q: {:?}",
-        received_subset
+        "cyclone overlay: received subset of size {} from {}: {:?}",
+        received_subset.len(),
+        q_address,
+        received_subset,
     );
 
     {

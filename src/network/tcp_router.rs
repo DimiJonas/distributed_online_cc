@@ -117,7 +117,7 @@ pub async fn send_and_receive(
     }
 
     send_to_peer(peer_address, message, state.clone()).await?;
-    log::info!(
+    log::debug!(
         "send_and_receive: waiting for response to request id {}",
         &request_id
     );
@@ -135,7 +135,7 @@ pub async fn send_and_receive(
         result = waiting_channel_receiver => {
             match result {
                 Ok(peer_message) => {
-                    log::info!("send_and_receive: received response for request {}", request_id);
+                    log::debug!("send_and_receive: received response for request {}", request_id);
                     Ok(peer_message)
                 }
                 Err(e) => {
@@ -180,8 +180,8 @@ async fn get_or_create_manager(
         manager_sender
     };
 
-    log::info!(
-        "get_or_create_manager: created peer manager task fo {}",
+    log::debug!(
+        "get_or_create_manager: created peer manager task for {}",
         peer_address
     );
 

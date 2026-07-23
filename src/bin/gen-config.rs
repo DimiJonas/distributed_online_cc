@@ -2,7 +2,7 @@
 //!
 //! Two orthogonal axes:
 //!
-//!   * Addressing (`--placement`)
+//!   * Addressing (`--addressing`)
 //!       - `local`  : every node on one host, ports offset by node id
 //!       - `remote` : one host per node, fixed ports (one IP per node)
 //!
@@ -12,7 +12,7 @@
 //!
 //! A single invocation always emits BOTH a distributed system and a central
 //! system built from the same set of constraints, into
-//! `<out-dir>/distributed` and `<out-dir>/central`
+//! `<out-dir>/distributed` and `<out-dir>/central`placement
 
 use clap::Parser;
 use online_cc::config::config_builder::NodeConfigBuilder;
@@ -294,6 +294,7 @@ fn sfx(stem: &str, copy: u64) -> String {
 
 // the built-in constraint catalog - one entry per logical constraint
 fn catalog() -> Vec<Template> {
+    // small function to create sensor templates
     let sensor = |stem: &'static str, attr: &'static str, op: SensorConstraintMode| Template {
         constraint_stem: stem,
         roles: vec![
@@ -302,7 +303,7 @@ fn catalog() -> Vec<Template> {
                     attribute_key: attr.to_string(),
                     value: 10.0,
                     mode: op,
-                    max_value_age: Duration::from_secs(10),
+                    max_value_age: Duration::from_hours(96),
                 },
                 "sensor_collector_event",
                 None,
@@ -640,6 +641,9 @@ fn emit_distributed(
             .overlay_listen(addressing.listen_overlay(id))
             .initial_peers(peers)
             .case_end_retention_period(common.case_end_retention)
+            .default_result_buffer(ResultBufferConfig::GracePeriod {
+                duration: Duration::from_secs(10),
+            })
             .unix_socket(format!("/tmp/event_listener_{id}.sock"))
             .log_file(format!("node-{id}.log"))
             .shuffle_interval(common.cyclon.shuffle_interval)
@@ -678,7 +682,7 @@ fn emit_distributed(
             for (cfg, buf, cid) in constraints {
                 b = b.constraint(cfg);
                 if let Some(policy) = buf {
-                    b = b.buffer(cid, policy);
+                    b = b.result_buffer(cid, policy);
                 }
             }
         }
@@ -708,6 +712,9 @@ fn emit_central(
         .tcp_listen(addressing.listen_conformance(central_id))
         .unix_socket("/tmp/event_listener_central.sock")
         .log_file("central-node.log")
+        .default_result_buffer(ResultBufferConfig::GracePeriod {
+            duration: Duration::from_secs(10),
+        })
         .result_sink(ResultSinkConfig {
             db_path: db_path.to_string(),
             mpsc_channel_size: 1024,
@@ -730,7 +737,7 @@ fn emit_central(
             }
             central = central.constraint(cfg);
             if let Some(policy) = &role.buffer {
-                central = central.buffer(role.constraint_id.clone(), policy.clone());
+                central = central.result_buffer(role.constraint_id.clone(), policy.clone());
             }
         }
     }
