@@ -10,9 +10,20 @@
 //!       - distributed : constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
 //!       - central     : forwarders receive events and forward them to a single central node that holds all constraints
 //!
-//! A single invocation always emits BOTH a distributed system and a central
-//! system built from the same set of constraints, into
-//! `<out-dir>/distributed` and `<out-dir>/central`placement
+//! A single invocation always emits both a distributed system and a central system built from the same set of constraints
+//! Each system is self contained under its own directory:
+//!
+//! <out-dir>/
+//!   distributed/
+//!     configs/   node-<id>-config.toml
+//!     logs/      node-<id>.log
+//!     results.db
+//!   central/
+//!     configs/   node-0-central-config.toml, node-<id>-forwarder-config.toml
+//!     logs/      central-node.log, forwarder-<id>.log
+//!     results.db
+//!
+//! The db paths written into the configs are relative to the launch cwd, so the nodes must be started from the same directory `gen-config` was run from
 
 use clap::Parser;
 use online_cc::config::config_builder::NodeConfigBuilder;
@@ -622,7 +633,7 @@ fn emit_distributed(
     layout: &Layout,
     role_nodes: u64,
     addressing: &Addressing,
-    db_path: &str,
+    db_path: &Path,
     common: &CommonParams,
     out_dir: &Path,
 ) {
@@ -658,7 +669,7 @@ fn emit_distributed(
         if node_id == sink_id {
             // dedicated result sink: no constraints, owns the database
             builder = builder.result_sink(ResultSinkConfig {
-                db_path: db_path.to_string(),
+                db_path: db_path.to_string_lossy().into_owned(),
                 mpsc_channel_size: 1024,
                 retry_interval: Duration::from_secs(15),
                 retry_buffer_size: 4096,
@@ -701,7 +712,7 @@ fn emit_central(
     instances: &[Instance],
     forwarders: u64,
     addressing: &Addressing,
-    db_path: &str,
+    db_path: &Path,
     out_dir: &Path,
 ) {
     std::fs::create_dir_all(out_dir).unwrap();
@@ -718,7 +729,7 @@ fn emit_central(
             duration: Duration::from_secs(10),
         })
         .result_sink(ResultSinkConfig {
-            db_path: db_path.to_string(),
+            db_path: db_path.to_string_lossy().into_owned(),
             mpsc_channel_size: 1024,
             retry_interval: Duration::from_secs(15),
             retry_buffer_size: 4096,
@@ -818,13 +829,15 @@ struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     no_bind_all: bool,
 
-    // base output dir
+    // base output dir for both systems
     #[arg(long, default_value = "run")]
     out_dir: PathBuf,
 
-    // directory (relative to the launch cwd) for the result sqlite dbs
-    #[arg(long, default_value = "run")]
-    db_dir: String,
+    // override for the result sqlite dbs (relative to the launch cwd)
+    // default: <out-dir>/<mode>/results.db, with the override they become
+    // <db-dir>/{distributed,central}-results.db
+    #[arg(long)]
+    db_dir: Option<PathBuf>,
 
     #[arg(long, default_value_t = 180)]
     case_end_retention_period_secs: u64,
@@ -936,13 +949,29 @@ fn main() {
         );
     }
 
-    let dist_dir = args.out_dir.join("distributed");
-    let central_dir = args.out_dir.join("central");
-    let dist_db = format!(
-        "{}/distributed-results.db",
-        args.db_dir.trim_end_matches('/')
-    );
-    let central_db = format!("{}/central-results.db", args.db_dir.trim_end_matches('/'));
+    let dist_root = args.out_dir.join("distributed");
+    let central_root = args.out_dir.join("central");
+    let dist_config_dir = dist_root.join("configs");
+    let central_config_dir = central_root.join("configs");
+
+    // create the log dirs up front so the node never has to
+    for root in [&dist_root, &central_root] {
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+    }
+
+    let (dist_db, central_db) = match &args.db_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir).unwrap();
+            (
+                dir.join("distributed-results.db"),
+                dir.join("central-results.db"),
+            )
+        }
+        None => (
+            dist_root.join("results.db"),
+            central_root.join("results.db"),
+        ),
+    };
 
     emit_distributed(
         &instances,
@@ -951,25 +980,25 @@ fn main() {
         &addressing,
         &dist_db,
         &common,
-        &dist_dir,
+        &dist_config_dir,
     );
     emit_central(
         &instances,
         forwarders,
         &central_addressing,
         &central_db,
-        &central_dir,
+        &central_config_dir,
     );
 
     println!(
-        "generated:\n  distributed: {} nodes ({} constraint + 1 sink), {} constraints -> {}\n  central:     {} nodes (1 central + {} forwarders), {} constraints -> {}",
-        dist_nodes,
-        role_nodes,
-        total_roles,
-        dist_dir.display(),
-        forwarders + 1,
-        forwarders,
-        total_roles,
-        central_dir.display(),
+        "generated configs (in {:?}/<system>/configs/:",
+        args.out_dir
+    );
+    println!(
+        "  distributed: {dist_nodes} nodes ({role_nodes} constraint + 1 sink), {total_roles} constraints"
+    );
+    println!(
+        "  central:     {} nodes (1 central + {forwarders} forwarders), {total_roles} constraints",
+        forwarders + 1
     );
 }
