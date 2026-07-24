@@ -154,6 +154,118 @@ class Pacer:
         return s
 
 
+# ---- progress ----
+
+def count_events(path):
+    # number of non-blank lines in the stream, for the x/N denominator
+    n = 0
+    with open(path) as fh:
+        for line in fh:
+            if line.strip():
+                n += 1
+    return n
+
+
+def fmt_dur(sec):
+    if sec < 60:
+        return f"{sec:.0f}s"
+    if sec < 3600:
+        return f"{int(sec // 60)}m{int(sec % 60):02d}s"
+    return f"{int(sec // 3600)}h{int(sec % 3600 // 60):02d}m"
+
+
+def progress_enabled(when, stream=sys.stderr):
+    if when == "off":
+        return False
+    if when == "on":
+        return True
+    # auto: only when someone is watching, so calls from another script stay quiet
+    return hasattr(stream, "isatty") and stream.isatty()
+
+
+class Progress:
+    """one-line send progress on stderr, redrawn in place
+
+    goes to stderr so stdout stays clean
+
+    on a terminal the line is rewritten with \\r
+    when forced on with --progress on
+    while output is redirected, it falls back to one line every few seconds so the
+    log does not fill up with control characters
+    """
+
+    BAR = 24
+
+    def __init__(self, total, enabled=True, stream=sys.stderr):
+        self.total = total
+        self.stream = stream
+        self.enabled = enabled
+        self.tty = hasattr(stream, "isatty") and stream.isatty()
+        self.every = 0.1 if self.tty else 2.0
+        self.n = 0
+        self.t0 = time.monotonic()
+        self.last = -1.0
+        self.width = 0
+        self.drawn = 0
+
+    def _render(self, counts):
+        elapsed = time.monotonic() - self.t0
+        rate = self.n / elapsed if elapsed > 0 else 0.0
+        if self.total:
+            done = int(self.BAR * self.n / self.total)
+            bar = "#" * done + "." * (self.BAR - done)
+            s = (f"event {self.n}/{self.total} [{bar}] "
+                 f"{100.0 * self.n / self.total:3.0f}%")
+        else:
+            s = f"event {self.n}"
+        if elapsed >= 0.5:  # before that the measured rate is meaningless
+            s += f"  {rate:.0f}/s" if rate >= 1000 else f"  {rate:.3g}/s"
+            if self.total and self.n < self.total:
+                s += f"  eta {fmt_dur((self.total - self.n) / rate)}"
+        extra = " ".join(f"{k}={v}" for k, v in counts.items() if v)
+        if extra:
+            s += f"  {extra}"
+        return s
+
+    def _draw(self, s):
+        if self.tty:
+            pad = " " * max(0, self.width - len(s))
+            self.width = len(s)
+            self.stream.write("\r" + s + pad)
+        else:
+            self.stream.write(s + "\n")
+        self.stream.flush()
+
+    def advance(self, counts):
+        self.n += 1
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if now - self.last < self.every and self.n != self.total:
+            return
+        self.last = now
+        self.drawn = self.n
+        self._draw(self._render(counts))
+
+    def note(self, msg):
+        # write a message without leaving half a progress line behind it
+        if self.tty and self.width:
+            self.stream.write("\r" + " " * self.width + "\r")
+            self.width = 0
+        self.stream.write(msg if msg.endswith("\n") else msg + "\n")
+        self.stream.flush()
+
+    def close(self, counts):
+        if not self.enabled or not self.n:
+            return
+        if self.drawn != self.n:
+            self._draw(self._render(counts))
+        if self.tty:
+            self.stream.write("\n")
+            self.width = 0
+        self.stream.flush()
+
+
 # ---- delivery ----
 
 def deliver_event(sock_path, payload):
@@ -180,6 +292,8 @@ def main():
     ap.add_argument("--pace-dry-run", action="store_true", help="also apply pacing during --dry-run")
     ap.add_argument("--dry-run", action="store_true", help="resolve + log routing without sending")
     ap.add_argument("--print-routes", action="store_true", help="print event_id -> node/socket and exit")
+    ap.add_argument("--progress", choices=["auto", "on", "off"], default="auto",
+                    help="show send progress on stderr (auto = only when stderr is a terminal)")
     ap.add_argument("--log", default="send_log.jsonl")
     args = ap.parse_args()
 
@@ -217,6 +331,9 @@ def main():
         interval = 0.0
     pacer = Pacer(interval, burst=args.burst, jitter=args.jitter)
 
+    show_progress = progress_enabled(args.progress)
+    total = count_events(args.stream) if show_progress else 0
+    prog = Progress(total, enabled=show_progress)
 
     counts = {"sent": 0, "dry-run": 0, "no_route": 0, "error": 0}
     with open(args.log, "w") as logf, open(args.stream) as fh:
@@ -252,7 +369,8 @@ def main():
                 logf.write(json.dumps({"seq": ev["seq"], "case_id": ev["case_id"],
                     "event_id": event_id, "constraint_id": constraint_id,
                     "node_id": None, "socket": None, "status": "no_route"}) + "\n")
-                sys.stderr.write(f"no route for '{event_id}' (seq {ev['seq']})\n")
+                prog.note(f"no route for '{event_id}' (seq {ev['seq']})")
+                prog.advance(counts)
                 continue
 
             for n in targets:
@@ -271,7 +389,9 @@ def main():
                     "bytes": len(payload), "status": status,
                     "t": round(t, 6)}) + "\n")
 
+            prog.advance(counts)
 
+    prog.close(counts)
     print(f"system={kind}  sent={counts['sent']} dry-run={counts['dry-run']} "
           f"no_route={counts['no_route']} error={counts['error']}")
     print(pacer.summary())

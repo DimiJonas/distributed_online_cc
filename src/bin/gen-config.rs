@@ -20,6 +20,7 @@ use online_cc::config::node_config::{
     AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset, ForwarderConfig,
     MinMaxMode, ResultBufferConfig, ResultSinkConfig, SensorConstraintMode,
 };
+use online_cc::types::{ConstraintId, EventId, SensorAttributeKey, SensorAttributeThreshold};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -173,20 +174,20 @@ impl Addressing {
 
 /// generates a list of node ids for the initial_peers of the overlay
 /// constructs a Chord like ring
-fn bootstrap_ids(id: u64, n: u64, ring_degree: u64) -> Vec<u64> {
+fn bootstrap_ids(node_id: u64, modulus: u64, ring_degree: u64) -> Vec<u64> {
     use std::collections::BTreeSet;
     let mut peers = BTreeSet::new();
-    let rd = ring_degree.min(n.saturating_sub(1)); // avoid u64 underflow when rd >= n
-    for k in 1..=rd {
-        peers.insert((id + k) % n); // successors
-        peers.insert((id + n - k) % n); // predecessors
+    let ring_degree = ring_degree.min(modulus.saturating_sub(1)); // avoid u64 underflow when ring degree >= n
+    for distance in 1..=ring_degree {
+        peers.insert((node_id + distance) % modulus); // successors
+        peers.insert((node_id + modulus - distance) % modulus); // predecessors
     }
     let mut jump = 1u64;
-    while jump < n {
-        peers.insert((id + jump) % n); // chord-style fingers
+    while jump < modulus {
+        peers.insert((node_id + jump) % modulus); // chord-style fingers
         jump = jump.saturating_mul(2);
     }
-    peers.remove(&id);
+    peers.remove(&node_id);
     peers.into_iter().collect()
 }
 
@@ -194,18 +195,16 @@ fn bootstrap_ids(id: u64, n: u64, ring_degree: u64) -> Vec<u64> {
 // constraint catalog
 // --------------------
 //
-// A template is one constraint decomposed into multiple roles
-// Instantiating a template produces concrete roles that share a `constraint_id`
-// and each carry their own `event_id`. Roles reference sibling roles by their
-// index within the instance (e.g. a trigger references its counter), so peer
-// addresses can be filled in after the roles are placed on nodes.
+// a template is one constraint decomposed into multiple roles
+// instantiating a template produces concrete roles that share a `constraint_id` and each carry their own `event_id`
+// roles reference sibling roles by their index within the instance (e.g. a trigger references its counter), so peer
+// addresses can be filled in after the roles are placed on nodes
 //
-// To spread more constraints across a system we simply instantiate the whole
-// catalog `--repeat` times; copy `c > 0` gets a `_c` suffix on every
-// constraint_id and event_id
+// to spread more constraints across a system the whole catalog is instantiated `--repeat` times
+// copy `c > 0` gets a `_c` suffix on every constraint_id and event_id
 
-/// A role within a constraint instance. `usize` fields are indices of sibling
-/// roles within the same instance that are resolved to peer addresses later
+// a role within a constraint instance
+// `usize` fields are indices of sibling roles within the same instance that are resolved to peer addresses later
 #[derive(Clone)]
 enum Role {
     AppearanceCounter {
@@ -243,8 +242,8 @@ enum Role {
         producer: usize,
     },
     SensorCollector {
-        attribute_key: String,
-        value: f64,
+        attribute_key: SensorAttributeKey,
+        value: SensorAttributeThreshold,
         mode: SensorConstraintMode,
         max_value_age: Duration,
     },
@@ -263,17 +262,17 @@ enum Role {
 
 // one concrete role after instantiation
 #[derive(Clone)]
-struct RoleInst {
+struct RoleInstance {
     kind: Role,
-    constraint_id: String,
-    event_id: String,
+    constraint_id: ConstraintId,
+    event_id: EventId,
     buffer: Option<ResultBufferConfig>,
 }
 
 // a constraint instance is a group of roles sharing one constraint_id
 #[derive(Clone)]
 struct Instance {
-    roles: Vec<RoleInst>,
+    roles: Vec<RoleInstance>,
 }
 
 // template used to create instances with unique ids
@@ -284,7 +283,7 @@ struct Template {
     roles: Vec<(Role, &'static str, Option<ResultBufferConfig>)>,
 }
 
-fn sfx(stem: &str, copy: u64) -> String {
+fn suffix(stem: &str, copy: u64) -> String {
     if copy == 0 {
         stem.to_string()
     } else {
@@ -295,7 +294,9 @@ fn sfx(stem: &str, copy: u64) -> String {
 // the built-in constraint catalog - one entry per logical constraint
 fn catalog() -> Vec<Template> {
     // small function to create sensor templates
-    let sensor = |stem: &'static str, threshold: f64, op: SensorConstraintMode| Template {
+    let sensor = |stem: &'static str,
+                  threshold: SensorAttributeThreshold,
+                  op: SensorConstraintMode| Template {
         constraint_stem: stem,
         roles: vec![
             (
@@ -439,24 +440,24 @@ fn catalog() -> Vec<Template> {
 // instantiate the catalog `repeat` times into concrete instances
 fn build_instances(repeat: u64) -> Vec<Instance> {
     let templates = catalog();
-    let mut out = Vec::new();
+    let mut repeated_catalog = Vec::new();
     for copy in 0..repeat {
-        for t in &templates {
-            let cid = sfx(t.constraint_stem, copy);
-            let roles = t
+        for template in &templates {
+            let constraint_id = suffix(template.constraint_stem, copy);
+            let roles = template
                 .roles
                 .iter()
-                .map(|(kind, ev, buf)| RoleInst {
+                .map(|(kind, event, buf)| RoleInstance {
                     kind: kind.clone(),
-                    constraint_id: cid.clone(),
-                    event_id: sfx(ev, copy),
+                    constraint_id: constraint_id.clone(),
+                    event_id: suffix(event, copy),
                     buffer: buf.clone(),
                 })
                 .collect();
-            out.push(Instance { roles });
+            repeated_catalog.push(Instance { roles });
         }
     }
-    out
+    repeated_catalog
 }
 
 // turn a role into a concrete ConstraintConfig
@@ -467,28 +468,28 @@ fn to_constraint(
     event_id: &str,
     peer: &dyn Fn(usize) -> SocketAddr,
 ) -> ConstraintConfig {
-    let id = constraint_id.to_string();
-    let ev = event_id.to_string();
+    let constraint_id = constraint_id.to_string();
+    let event_id = event_id.to_string();
     match role {
         Role::AppearanceCounter {
             mode,
             frequency,
             reset,
         } => ConstraintConfig::AppearanceCounter {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             mode: mode.clone(),
             frequency: *frequency,
             reset: reset.clone(),
         },
         Role::AppearanceTrigger { counters } => ConstraintConfig::AppearanceTrigger {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             counter_peers: counters.iter().map(|&i| peer(i)).collect(),
         },
         Role::DistAppearanceCounter { reset } => ConstraintConfig::DistributedAppearanceCounter {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             reset: *reset,
         },
         Role::DistAppearanceTrigger {
@@ -496,47 +497,47 @@ fn to_constraint(
             frequency,
             counters,
         } => ConstraintConfig::DistributedAppearanceTrigger {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             mode: mode.clone(),
             frequency: *frequency,
             counter_peers: counters.iter().map(|&i| peer(i)).collect(),
         },
         Role::NotCoexistenceA { b } => ConstraintConfig::NotCoexistenceA {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             b_peer: peer(*b),
         },
         Role::NotCoexistenceB { a } => ConstraintConfig::NotCoexistenceB {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             a_peer: peer(*a),
         },
         Role::OrderFirst => ConstraintConfig::OrderFirst {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
         },
         Role::OrderSecond { first } => ConstraintConfig::OrderSecond {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             order_first_peers: vec![peer(*first)],
         },
         Role::PrecedenceConsumer => ConstraintConfig::PrecedenceConsumer {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
         },
         Role::PrecedenceProducer { consumer } => ConstraintConfig::PrecedenceProducer {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             consumer_peers: vec![peer(*consumer)],
         },
         Role::ResponseProducer => ConstraintConfig::ResponseProducer {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
         },
         Role::ResponseConsumer { producer } => ConstraintConfig::ResponseConsumer {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             producer_peers: vec![peer(*producer)],
         },
         Role::SensorCollector {
@@ -545,32 +546,32 @@ fn to_constraint(
             mode,
             max_value_age,
         } => ConstraintConfig::SensorCollector {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             attribute_key: attribute_key.clone(),
             value: *value,
             mode: mode.clone(),
             max_value_age: *max_value_age,
         },
         Role::SensorTrigger { collector } => ConstraintConfig::SensorTrigger {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             collector_peers: vec![peer(*collector)],
         },
         Role::TimeStart { duration, mode } => ConstraintConfig::TimeStart {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             duration: *duration,
             mode: mode.clone(),
         },
         Role::TimeStop { start } => ConstraintConfig::TimeStop {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
             time_start_peers: vec![peer(*start)],
         },
         Role::EndActivity => ConstraintConfig::EndActivity {
-            constraint_id: id,
-            event_id: ev,
+            constraint_id,
+            event_id,
         },
     }
 }
@@ -626,26 +627,26 @@ fn emit_distributed(
     out_dir: &Path,
 ) {
     let sink_id = role_nodes; // sink is the extra node after the role nodes
-    let n = role_nodes + 1; // total nodes incl. sink
+    let total_nodes = role_nodes + 1; // total nodes incl. sink
     std::fs::create_dir_all(out_dir).unwrap();
 
-    for id in 0..n {
-        let peers: Vec<SocketAddr> = bootstrap_ids(id, n, common.cyclon.ring_degree)
+    for node_id in 0..total_nodes {
+        let peers: Vec<SocketAddr> = bootstrap_ids(node_id, total_nodes, common.cyclon.ring_degree)
             .into_iter()
-            .map(|p| addressing.reachable_overlay(p))
+            .map(|peer| addressing.reachable_overlay(peer))
             .collect();
 
-        let mut b = NodeConfigBuilder::distributed_base()
-            .node_id(id)
-            .tcp_listen(addressing.listen_conformance(id))
-            .overlay_listen(addressing.listen_overlay(id))
+        let mut builder = NodeConfigBuilder::distributed_base()
+            .node_id(node_id)
+            .tcp_listen(addressing.listen_conformance(node_id))
+            .overlay_listen(addressing.listen_overlay(node_id))
             .initial_peers(peers)
             .case_end_retention_period(common.case_end_retention)
             .default_result_buffer(ResultBufferConfig::GracePeriod {
                 duration: Duration::from_secs(10),
             })
-            .unix_socket(format!("/tmp/event_listener_{id}.sock"))
-            .log_file(format!("node-{id}.log"))
+            .unix_socket(format!("/tmp/event_listener_{node_id}.sock"))
+            .log_file(format!("node-{node_id}.log"))
             .shuffle_interval(common.cyclon.shuffle_interval)
             .shuffle_length(common.cyclon.shuffle_length)
             .max_peer_cache_size(common.cyclon.cache_size)
@@ -654,9 +655,9 @@ fn emit_distributed(
             .anti_entropy_fanout(common.gossip.anti_entropy_fanout)
             .push_fanout(common.gossip.push_fanout);
 
-        if id == sink_id {
+        if node_id == sink_id {
             // dedicated result sink: no constraints, owns the database
-            b = b.result_sink(ResultSinkConfig {
+            builder = builder.result_sink(ResultSinkConfig {
                 db_path: db_path.to_string(),
                 mpsc_channel_size: 1024,
                 retry_interval: Duration::from_secs(15),
@@ -665,31 +666,32 @@ fn emit_distributed(
         } else {
             // gather the roles placed on this node
             let mut constraints = Vec::new();
-            for (inst_idx, inst) in instances.iter().enumerate() {
-                let role_nodes_here = &layout[inst_idx];
-                for (role_idx, role) in inst.roles.iter().enumerate() {
-                    if role_nodes_here[role_idx] != id {
+            for (instance_index, instance) in instances.iter().enumerate() {
+                let role_nodes_here = &layout[instance_index];
+                for (role_index, role) in instance.roles.iter().enumerate() {
+                    if role_nodes_here[role_index] != node_id {
                         continue;
                     }
                     let resolve =
                         |sib: usize| addressing.reachable_conformance(role_nodes_here[sib]);
-                    let cfg =
+                    let config =
                         to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
-                    constraints.push((cfg, role.buffer.clone(), role.constraint_id.clone()));
+                    constraints.push((config, role.buffer.clone(), role.constraint_id.clone()));
                 }
             }
-            b = b.result_sink_addresses(vec![addressing.reachable_conformance(sink_id)]);
-            for (cfg, buf, cid) in constraints {
-                b = b.constraint(cfg);
-                if let Some(policy) = buf {
-                    b = b.result_buffer(cid, policy);
+            builder =
+                builder.result_sink_addresses(vec![addressing.reachable_conformance(sink_id)]);
+            for (config, result_buffer, constraint_id) in constraints {
+                builder = builder.constraint(config);
+                if let Some(policy) = result_buffer {
+                    builder = builder.result_buffer(constraint_id, policy);
                 }
             }
         }
 
-        let cfg = b.build();
-        let path = out_dir.join(format!("node-{id}-config.toml"));
-        std::fs::write(&path, toml::to_string(&cfg).unwrap()).unwrap();
+        let config = builder.build();
+        let path = out_dir.join(format!("node-{node_id}-config.toml"));
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
     }
 }
 
@@ -704,7 +706,7 @@ fn emit_central(
 ) {
     std::fs::create_dir_all(out_dir).unwrap();
     let central_id = 0u64;
-    let central_addr = addressing.reachable_conformance(central_id);
+    let central_address = addressing.reachable_conformance(central_id);
 
     // ---- central node ----
     let mut central = NodeConfigBuilder::central_base()
@@ -721,21 +723,21 @@ fn emit_central(
             retry_interval: Duration::from_secs(15),
             retry_buffer_size: 4096,
         })
-        .result_sink_addresses(vec![central_addr]);
+        .result_sink_addresses(vec![central_address]);
 
     // collected filter inputs for the forwarders
-    let mut event_ids: HashSet<String> = HashSet::new();
+    let mut event_ids: HashSet<EventId> = HashSet::new();
     let mut attributes: HashSet<String> = HashSet::new();
 
-    for inst in instances {
-        let resolve = |_sib: usize| central_addr; // everything is local to central
-        for role in &inst.roles {
-            let cfg = to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
+    for instance in instances {
+        let resolve = |_sib: usize| central_address; // everything is local to central
+        for role in &instance.roles {
+            let config = to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
             event_ids.insert(role.event_id.clone());
             if let Role::SensorCollector { attribute_key, .. } = &role.kind {
                 attributes.insert(attribute_key.clone());
             }
-            central = central.constraint(cfg);
+            central = central.constraint(config);
             if let Some(policy) = &role.buffer {
                 central = central.result_buffer(role.constraint_id.clone(), policy.clone());
             }
@@ -756,21 +758,21 @@ fn emit_central(
     };
     let include_event_ids: Vec<String> = event_ids.into_iter().collect();
 
-    for f in 1..=forwarders {
-        let cfg = NodeConfigBuilder::central_base()
-            .node_id(f)
-            .tcp_listen(addressing.listen_conformance(f))
-            .unix_socket(format!("/tmp/event_listener_forwarder{f}.sock"))
-            .log_file(format!("forwarder-{f}.log"))
+    for forwarder_id in 1..=forwarders {
+        let config = NodeConfigBuilder::central_base()
+            .node_id(forwarder_id)
+            .tcp_listen(addressing.listen_conformance(forwarder_id))
+            .unix_socket(format!("/tmp/event_listener_forwarder{forwarder_id}.sock"))
+            .log_file(format!("forwarder-{forwarder_id}.log"))
             .forwarder(ForwarderConfig {
-                central_node_address: central_addr,
+                central_node_address: central_address,
                 include_event_attributes: include_event_attributes.clone(),
                 include_event_ids: Some(include_event_ids.clone()),
             })
             .build();
         std::fs::write(
-            out_dir.join(format!("node-{f}-forwarder-config.toml")),
-            toml::to_string(&cfg).unwrap(),
+            out_dir.join(format!("node-{forwarder_id}-forwarder-config.toml")),
+            toml::to_string(&config).unwrap(),
         )
         .unwrap();
     }
@@ -882,7 +884,7 @@ fn main() {
         case_end_retention: Duration::from_secs(args.case_end_retention_period_secs),
     };
 
-    let make_placement = |conformance_base: u16| match args.addressing.as_str() {
+    let make_addressing = |conformance_base: u16| match args.addressing.as_str() {
         "local" => Addressing::Local {
             ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             overlay_base: args.overlay_port,
@@ -894,13 +896,13 @@ fn main() {
             conformance_port: conformance_base,
             bind_all: !args.no_bind_all,
         },
-        m => panic!("unknown placement: {m} (expected `local` or `remote`)"),
+        unknown => panic!("unknown addressing: {unknown} (expected `local` or `remote`)"),
     };
-    let placement = make_placement(args.conformance_port);
-    let central_placement = make_placement(args.central_port);
+    let addressing = make_addressing(args.conformance_port);
+    let central_addressing = make_addressing(args.central_port);
 
     // node counts
-    let dist_nodes = match placement.capacity() {
+    let dist_nodes = match addressing.capacity() {
         Some(cap) => cap, // spread: derive from host count
         None => args.nodes,
     };
@@ -914,7 +916,7 @@ fn main() {
 
     // spread constraints
     let instances = build_instances(args.repeat);
-    let total_roles: usize = instances.iter().map(|i| i.roles.len()).sum();
+    let total_roles: usize = instances.iter().map(|instance| instance.roles.len()).sum();
     let layout = spread_layout(&instances, role_nodes);
 
     if (role_nodes as usize) > total_roles {
@@ -925,7 +927,7 @@ fn main() {
     }
 
     // check spread capacity covers the larger of the two systems
-    if let Some(cap) = placement.capacity() {
+    if let Some(cap) = addressing.capacity() {
         let central_nodes = forwarders + 1;
         let need = dist_nodes.max(central_nodes);
         assert!(
@@ -943,12 +945,18 @@ fn main() {
     let central_db = format!("{}/central-results.db", args.db_dir.trim_end_matches('/'));
 
     emit_distributed(
-        &instances, &layout, role_nodes, &placement, &dist_db, &common, &dist_dir,
+        &instances,
+        &layout,
+        role_nodes,
+        &addressing,
+        &dist_db,
+        &common,
+        &dist_dir,
     );
     emit_central(
         &instances,
         forwarders,
-        &central_placement,
+        &central_addressing,
         &central_db,
         &central_dir,
     );

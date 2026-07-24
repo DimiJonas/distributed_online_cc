@@ -111,7 +111,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
             handle_case_end_info(state.clone(), data).await;
         }
         CEGossipPayload::AeDigest(their_digest) => {
-            log::info!(
+            log::debug!(
                 "handle_inbound_message: received anti entropy digest: {}",
                 their_digest
             );
@@ -122,7 +122,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
             log::debug!("my digest: {}; their digest: {}", my_digest, their_digest);
             if my_digest != their_digest {
                 // reply with live cache entries
-                log::info!(
+                log::debug!(
                     "digests differ - sending {} live cache entries to {}",
                     live.len(),
                     message.sender_address

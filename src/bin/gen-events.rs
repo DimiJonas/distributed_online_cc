@@ -27,7 +27,7 @@ use clap::Parser;
 use online_cc::config::node_config::{
     ConstraintConfig, MinMaxMode, NodeConfig, SensorConstraintMode,
 };
-use online_cc::types::{ConstraintId, EventId, SensorEventKey, SensorEventValue};
+use online_cc::types::{ConstraintId, EventId, SensorAttributeKey, SensorAttributeThreshold};
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -64,7 +64,7 @@ struct Args {
     seed: u64,
 
     /// RFC3339 base timestamp of the stream
-    #[arg(long, default_value = "2024-01-01T00:00:00Z")]
+    #[arg(long, default_value = "2026-07-23T00:00:00Z")]
     start: String,
 
     /// mean time seconds between consecutive events of a case
@@ -122,7 +122,7 @@ struct SensorSpec {
 struct SensorGroup {
     collector_event_id: EventId,
     trigger_event_id: EventId,
-    key: SensorEventKey,
+    key: SensorAttributeKey,
     specs: Vec<SensorSpec>,
 }
 
@@ -213,7 +213,7 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
         ConstraintId,
         (Vec<EventId>, Option<(EventId, MinMaxMode, u64)>),
     > = BTreeMap::new();
-    let mut sensors: BTreeMap<(EventId, SensorEventKey), (Option<EventId>, Vec<SensorSpec>)> =
+    let mut sensors: BTreeMap<(EventId, SensorAttributeKey), (Option<EventId>, Vec<SensorSpec>)> =
         BTreeMap::new();
     let mut sensor_triggers: BTreeMap<ConstraintId, EventId> = BTreeMap::new(); // constraint_id -> trigger_event_id
     #[allow(clippy::type_complexity)]
@@ -446,8 +446,8 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
 }
 
 /// a value for the groups shared attribute that satisfies every spec
-fn happy_sensor_value(group: &SensorGroup) -> SensorEventValue {
-    let mut candidates: Vec<SensorEventValue> = Vec::new();
+fn happy_sensor_value(group: &SensorGroup) -> SensorAttributeThreshold {
+    let mut candidates: Vec<SensorAttributeThreshold> = Vec::new();
     for spec in &group.specs {
         candidates.extend([spec.threshold, spec.threshold - 1.0, spec.threshold + 1.0]);
     }
@@ -467,8 +467,8 @@ fn happy_sensor_value(group: &SensorGroup) -> SensorEventValue {
 }
 
 /// a value violating at least one spec of the group (random among candidates)
-fn violating_sensor_value(group: &SensorGroup, rng: &mut StdRng) -> SensorEventValue {
-    let mut candidates: Vec<SensorEventValue> = Vec::new();
+fn violating_sensor_value(group: &SensorGroup, rng: &mut StdRng) -> SensorAttributeThreshold {
+    let mut candidates: Vec<SensorAttributeThreshold> = Vec::new();
     for spec in &group.specs {
         candidates.extend([
             spec.threshold - 1.0,
