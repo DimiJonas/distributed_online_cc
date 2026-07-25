@@ -11,7 +11,7 @@ set -euo pipefail
 
 # ---- defaults ----
 BIN="./target/debug/node"                    # node binary (override with -b)
-OUT_DIR="run"                                # base dir; systems are in $OUT_DIR/{distributed,central}
+RUN_DIR="run"                                # base dir; systems are in $OUT_DIR/{distributed,central}
 LOG_DIR=""                                   # empty => $RUN_DIR/<mode>/logs
 GENERATE=false
 NODES=19                                     # total nodes per system when generating
@@ -92,9 +92,6 @@ if [[ ! -x "$BIN" ]]; then
   echo "node binary '$BIN' not found or not executable (build it, or pass --bin)" >&2
   exit 1
 fi
-
-# ---- ensure log dir exists ----
-mkdir -p "$LOG_DIR"
 
 # ---- tmux session ----
 # launch_system <config-subdir> <session-name>

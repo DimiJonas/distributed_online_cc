@@ -59,9 +59,16 @@ struct Args {
     #[arg(long, default_value_t = 0.2)]
     violation_rate: f64,
 
-    /// rng seed - the whole stream is deterministic given the seed
-    #[arg(long, default_value_t = 0)]
-    seed: u64,
+    /// how deviant cases are chosen:
+    ///   exact:     exactly round(cases * violation_rate) cases deviate so the deviant count identical for every seed
+    ///   bernoulli: every case deviates independently with p = violation_rate, which is more realistic because the deviant count varies binomially between seeds
+    #[arg(long, value_enum, default_value_t = ViolationSampling::Exact)]
+    violation_sampling: ViolationSampling,
+
+    /// rng seed (the whole stream is deterministic given the seed)
+    /// defaults to a random seed that will be printed (so it can be reproduced)
+    #[arg(long)]
+    seed: Option<u64>,
 
     /// RFC3339 base timestamp of the stream
     #[arg(long, default_value = "2026-07-23T00:00:00Z")]
@@ -72,7 +79,7 @@ struct Args {
     step_secs: f64,
 
     /// seconds between case starts (cases overlap when this is smaller than a cases duration)
-    #[arg(long, default_value_t = 6.0)]
+    #[arg(long, default_value_t = 10.0)]
     case_gap_secs: f64,
 
     /// disable the +-40% jitter on event gaps
@@ -86,6 +93,12 @@ struct Args {
 // ---------------------------------------------------------------------------
 // catalog: the constraint set derived from the node configs
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+enum ViolationSampling {
+    Exact,
+    Bernoulli,
+}
 
 struct PairSpec {
     constraint_id: ConstraintId,
@@ -910,8 +923,25 @@ fn main() {
         .unwrap_or_else(|e| panic!("bad --start {:?}: {e}", args.start))
         .with_timezone(&Utc);
 
-    let mut rng = StdRng::seed_from_u64(args.seed);
+    let seed = args.seed.unwrap_or_else(|| rand::rng().random());
+    let mut rng = StdRng::seed_from_u64(seed);
     let pool = deviation_pool(&catalog);
+
+    // choose which cases deviate before any trace is built
+    let violation_rate = args.violation_rate.clamp(0.0, 1.0);
+    let deviant_cases: HashSet<u64> = match args.violation_sampling {
+        // exactly round(cases * rate) deviate
+        ViolationSampling::Exact => {
+            let n_deviant = ((args.cases as f64) * violation_rate).round() as usize;
+            let mut indices: Vec<u64> = (0..args.cases).collect();
+            indices.shuffle(&mut rng);
+            indices.into_iter().take(n_deviant).collect()
+        }
+        // independent coin flip per case, drawn in case order
+        ViolationSampling::Bernoulli => (0..args.cases)
+            .filter(|_| rng.random_bool(violation_rate))
+            .collect(),
+    };
 
     // plan all cases
     struct EventWithTimestamp {
@@ -929,7 +959,7 @@ fn main() {
 
         // pick deviations for a deviant case: 1..=2 distinct-target deviations
         let mut deviations: Vec<Deviation> = Vec::new();
-        if !pool.is_empty() && rng.random_bool(args.violation_rate.clamp(0.0, 1.0)) {
+        if !pool.is_empty() && deviant_cases.contains(&case_number) {
             let max_amount_of_deviations = rng.random_range(1..=2usize);
             let mut taken_targets: HashSet<String> = HashSet::new();
             let mut attempts = 0;
@@ -1036,15 +1066,23 @@ fn main() {
         manifest.push_str(&record.to_string());
         manifest.push('\n');
     }
+
+    let mut seed_text = String::new();
+    seed_text.push_str(&json!({"seed": seed}).to_string());
+    seed_text.push('\n');
+
     fs::write(args.out_dir.join(&args.manifest), manifest).unwrap();
     fs::write(args.out_dir.join("expected_results.jsonl"), expected_out).unwrap();
     fs::write(args.out_dir.join("cases.jsonl"), cases_meta).unwrap();
+    fs::write(args.out_dir.join("seed.txt"), seed_text).unwrap();
 
     println!(
-        "wrote {} events across {} case(s) ({} constraints) to {}\n  manifest: {}\n  ground truth: expected_results.jsonl, cases.jsonl",
+        "wrote {} events across {} case(s), {} deviant ({} constraints, seed {}) to {}\n  manifest: {}\n  ground truth: expected_results.jsonl, cases.jsonl",
         stream.len(),
         args.cases,
+        deviant_cases.len(),
         constraint_ids.len(),
+        seed,
         args.out_dir.display(),
         args.out_dir.join(&args.manifest).display(),
     );

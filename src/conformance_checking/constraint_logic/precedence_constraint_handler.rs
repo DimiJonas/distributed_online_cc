@@ -126,7 +126,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             Some(token) => token.event_time.unwrap(),
             None => {
                 // producer event has not happened yet
-                let info = "producer event has not happened yet".to_string();
+                let info = "producer event has not happened (yet)".to_string();
                 emit_result(
                     &event.case_id,
                     &self.constraint_id,
