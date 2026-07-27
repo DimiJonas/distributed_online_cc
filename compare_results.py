@@ -59,8 +59,8 @@ def load_expected(path: str):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--distributed", default="run/distributed-results.db", help="path to the distributed system's sqlite db")
-    ap.add_argument("--central", default="run/central-results.db", help="path to the central system's sqlite db")
+    ap.add_argument("--distributed", default="run/distributed/results.db", help="path to the distributed system's sqlite db")
+    ap.add_argument("--central", default="run/central/results.db", help="path to the central system's sqlite db")
     ap.add_argument("--expected", default=None, help="optional expected_results.jsonl from gen-events")
     ap.add_argument("--show-info", action="store_true", help="print the info text of differing results")
     ap.add_argument("--show-matches", action="store_true", help="also list all matching pairs")
