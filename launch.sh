@@ -14,7 +14,7 @@ BIN="./target/debug/node"                    # node binary (override with -b)
 RUN_DIR="run"                                # base dir; systems are in $OUT_DIR/{distributed,central}
 LOG_DIR=""                                   # empty => $RUN_DIR/<mode>/logs
 GENERATE=false
-NODES=19                                     # total nodes per system when generating
+NODES=20                                    # total nodes per system when generating
 REPEAT=1                                     # copies of the constraint catalog to spread
 ADDRESSING="local"                           # local | remote
 SYSTEM="both"                                # distributed | central | both

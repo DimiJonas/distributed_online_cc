@@ -15,7 +15,10 @@ pub fn spawn_conformance_network_listener(state: AppState) {
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-
+            // turn of the tcp nagle algorithm to be able to send small messages immediately
+            if let Err(e) = stream.set_nodelay(true) {
+                log::warn!("could not set TCP_NODELAY on incoming connection: {}", e);
+            }
             tokio::spawn(accept_incoming_tcp_connection(
                 stream,
                 NetworkType::Conformance,
@@ -37,7 +40,10 @@ pub fn spawn_overlay_network_listener(state: AppState) {
 
         loop {
             let (stream, _) = listener.accept().await.unwrap();
-
+            // turn of the tcp nagle algorithm to be able to send small messages immediately
+            if let Err(e) = stream.set_nodelay(true) {
+                log::warn!("could not set TCP_NODELAY on incoming connection: {}", e);
+            }
             tokio::spawn(accept_incoming_tcp_connection(
                 stream,
                 NetworkType::Overlay,

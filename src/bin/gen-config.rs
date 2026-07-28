@@ -797,7 +797,7 @@ fn emit_central(
 #[command(about = "Generate comparable distributed + central conformance-checker configs")]
 struct Args {
     /// total nodes in the distributed system (constraint nodes + 1 sink)
-    #[arg(short, long, default_value_t = 19)]
+    #[arg(short, long, default_value_t = 20)]
     nodes: u64,
 
     // instantiate the whole constraint catalog this many times (spreads more constraints across the system)
@@ -963,13 +963,13 @@ fn main() {
         Some(dir) => {
             std::fs::create_dir_all(dir).unwrap();
             (
-                dir.join("distributed-results.db"),
-                dir.join("central-results.db"),
+                dir.join("distributed-cc-results.db"),
+                dir.join("central-cc-results.db"),
             )
         }
         None => (
-            dist_root.join("results.db"),
-            central_root.join("results.db"),
+            dist_root.join("cc-results.db"),
+            central_root.join("cc-results.db"),
         ),
     };
 

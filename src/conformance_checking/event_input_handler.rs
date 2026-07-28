@@ -1,13 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::network::message_types::PeerMessage;
 use crate::network::tcp_router::send_to_conformance_peer;
 use crate::state::app_state::AppState;
-use crate::types::{CaseId, EventId, TracedEvent};
+use crate::types::{AttributeKey, CaseId, EventId, TracedEvent};
 use bytes::BytesMut;
+use chrono::{DateTime, Utc};
 use process_mining::core::event_data::case_centric::xes::{XESImportOptions, import_xes_slice};
-use process_mining::core::event_data::case_centric::{Trace, XESEditableAttribute};
+use process_mining::core::event_data::case_centric::{
+    AttributeValue, Event, Trace, XESEditableAttribute,
+};
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -52,12 +55,28 @@ pub async fn handle_event(
             };
 
             for event in trace.events {
-                let traced_event = TracedEvent::new(trace_id.clone(), event);
-                log::debug!("handle_event: handling event {}", traced_event);
+                if let Some(event_id) = get_event_id(&event) {
+                    if configured_events.contains(&event_id) {
+                        // build traced event
+                        let timestamp = match get_timestamp_utc(&event) {
+                            Some(event_time) => event_time,
+                            None => {
+                                log::warn!(
+                                    "XES event did not contain a timestamp - using current time as event time"
+                                );
+                                Utc::now()
+                            }
+                        };
+                        let attributes = get_attributes(&event);
 
-                if let Some(event_id) = traced_event.name() {
-                    let event_id = &event_id.to_string();
-                    if configured_events.contains(event_id) {
+                        let traced_event = TracedEvent::new(
+                            trace_id.clone(),
+                            event_id.clone(),
+                            timestamp,
+                            attributes,
+                        );
+                        log::debug!("handle_event: received event {:?}", traced_event);
+
                         if let Some(forwarder_config) = &state.config.forwarder {
                             // forward the event to the central node
                             let message = PeerMessage::event(traced_event);
@@ -101,7 +120,7 @@ pub async fn handle_event(
                 } else {
                     log::warn!(
                         "received event does not contain an event_id (concept:name). ignoring event {:?}",
-                        traced_event.event
+                        event
                     );
                 }
             }
@@ -115,6 +134,30 @@ fn get_trace_id(trace: &Trace) -> Option<String> {
         .get_by_key("concept:name")
         .and_then(|a| a.value.try_as_string())
         .cloned()
+}
+
+fn get_timestamp_utc(event: &Event) -> Option<DateTime<Utc>> {
+    event
+        .attributes
+        .get_by_key("time:timestamp")
+        .and_then(|a| a.value.try_as_date())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn get_event_id(event: &Event) -> Option<EventId> {
+    event
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+}
+
+fn get_attributes(event: &Event) -> HashMap<AttributeKey, AttributeValue> {
+    event
+        .attributes
+        .iter()
+        .map(|a| (a.key.clone(), a.value.clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -172,7 +215,7 @@ mod tests {
             .expect("channel closed");
 
         assert_eq!(event.case_id, "case-xes");
-        assert_eq!(event.name().unwrap_or(""), "event-a");
+        assert_eq!(event.event_id, "event-a");
 
         let _ = std::fs::remove_file(socket_path);
     }
@@ -299,8 +342,8 @@ mod tests {
             .expect("timed out")
             .expect("closed");
 
-        assert_eq!(first.name().unwrap_or(""), "first");
-        assert_eq!(second.name().unwrap_or(""), "second");
+        assert_eq!(first.event_id, "first");
+        assert_eq!(second.event_id, "second");
 
         let _ = std::fs::remove_file(socket_path);
     }

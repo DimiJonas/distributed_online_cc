@@ -45,7 +45,7 @@ impl ConstraintHandler for SensorCollectorHandler {
         let attribute_value = match event.get_attribute_by_key(&self.attribute_key) {
             Some(value) => match value {
                 AttributeValue::Float(f) => f,
-                AttributeValue::Int(i) => i as f64,
+                AttributeValue::Int(i) => &(*i as f64),
                 _ => {
                     log::error!(
                         "sensor constraint handler: cannot compare attribute {} with value {}, because it is not a numeric value",
@@ -71,7 +71,7 @@ impl ConstraintHandler for SensorCollectorHandler {
             match sensor_events.insert_or_update(
                 event.case_id.clone(),
                 self.attribute_key.clone(),
-                attribute_value,
+                *attribute_value,
                 event.timestamp,
             ) {
                 Some(_) => {

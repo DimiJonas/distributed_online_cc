@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Display, net::SocketAddr};
 
 use chrono::{DateTime, Utc};
-use process_mining::core::event_data::case_centric::{AttributeValue, Event, XESEditableAttribute};
+use process_mining::core::event_data::case_centric::AttributeValue;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,6 +15,7 @@ pub type EventInstanceId = Uuid;
 pub type MessageId = Uuid;
 pub type EventTime = DateTime<Utc>;
 pub type SensorAttributeKey = String;
+pub type AttributeKey = String;
 pub type SensorAttributeThreshold = f64;
 pub type Age = u64;
 pub type PeerBatch = HashMap<SocketAddr, Age>;
@@ -67,65 +68,30 @@ impl Display for PeerAddress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TracedEvent {
     pub case_id: CaseId,
+    pub event_id: EventId,
     pub timestamp: EventTime,
-    pub event: Event,
+    pub instance_id: EventInstanceId,
+    pub attributes: HashMap<AttributeKey, AttributeValue>,
 }
 
 impl TracedEvent {
-    pub fn new(case_id: CaseId, event: Event) -> Self {
-        let timestamp = match Self::timestamp_utc_from_xes(&event) {
-            Some(event_time) => event_time,
-            None => {
-                log::warn!(
-                    "XES event did not contain a timestamp - using current time as event time"
-                );
-                Utc::now()
-            }
-        };
+    pub fn new(
+        case_id: CaseId,
+        event_id: EventId,
+        timestamp: EventTime,
+        attributes: HashMap<AttributeKey, AttributeValue>,
+    ) -> Self {
         Self {
             case_id,
+            event_id,
             timestamp,
-            event,
+            instance_id: EventInstanceId::new_v4(),
+            attributes,
         }
     }
 
-    fn timestamp_utc_from_xes(event: &Event) -> Option<DateTime<Utc>> {
-        event
-            .attributes
-            .get_by_key("time:timestamp")
-            .and_then(|a| a.value.try_as_date())
-            .map(|dt| dt.with_timezone(&Utc))
-    }
-
-    pub fn xes_timestamp_utc(&self) -> Option<DateTime<Utc>> {
-        self.event
-            .attributes
-            .get_by_key("time:timestamp")
-            .and_then(|a| a.value.try_as_date())
-            .map(|dt| dt.with_timezone(&Utc))
-    }
-
-    pub fn xes_timestamp_utc_as_str(&self) -> String {
-        if let Some(timestamp) = self.xes_timestamp_utc() {
-            timestamp.clone().to_string()
-        } else {
-            "None".to_string()
-        }
-    }
-
-    pub fn get_attribute_by_key(&self, key: &str) -> Option<AttributeValue> {
-        self.event
-            .attributes
-            .get_by_key(key)
-            .map(|a| a.value.clone())
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.event
-            .attributes
-            .get_by_key("concept:name")
-            .and_then(|a| a.value.try_as_string())
-            .map(|s| s.as_str())
+    pub fn get_attribute_by_key(&self, key: &AttributeKey) -> Option<&AttributeValue> {
+        self.attributes.get(key)
     }
 }
 
@@ -133,10 +99,8 @@ impl Display for TracedEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Event: name={} case={} time={}",
-            self.name().unwrap_or_default(),
-            self.case_id,
-            self.timestamp,
+            "Event: name={} case={} time={}, instance_id={}",
+            self.event_id, self.case_id, self.timestamp, self.instance_id,
         )
     }
 }

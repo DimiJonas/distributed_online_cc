@@ -228,8 +228,6 @@ pub enum CCMessageType {
     DeleteToken,
     // trigger constraint check for a case on another node
     TriggerCheck,
-    // notify case termination
-    CaseTerminated,
 }
 
 // message envelope for conformance checking communication
@@ -330,14 +328,6 @@ impl CCMessage {
         let mut msg = Self::base(CCMessageType::TriggerCheck, case_id, constraint_id);
         msg.timestamp = Some(event_timestamp);
         msg
-    }
-
-    pub fn case_terminated(case_id: CaseId) -> Self {
-        Self::base(
-            CCMessageType::CaseTerminated,
-            case_id,
-            String::new(), // no specific constraint addresses
-        )
     }
 }
 
@@ -503,13 +493,6 @@ mod tests {
         let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string(), Utc::now());
         assert_eq!(msg.message_type, CCMessageType::TriggerCheck);
         assert!(msg.token.is_none());
-    }
-
-    #[test]
-    fn case_terminated_has_empty_constraint_id() {
-        let msg = CCMessage::case_terminated("case-5".to_string());
-        assert_eq!(msg.message_type, CCMessageType::CaseTerminated);
-        assert!(msg.constraint_id.is_empty());
     }
 
     #[test]

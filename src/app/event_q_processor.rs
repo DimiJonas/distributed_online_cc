@@ -49,7 +49,7 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                 }
 
                 // dispatch relevant handlers
-                let event_id = event.name().unwrap_or("");
+                let event_id = &event.event_id;
                 for handler in state.handlers.get_by_event_id(event_id) {
                     handler.handle_event(&event, state.clone()).await;
                 }

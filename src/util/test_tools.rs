@@ -200,12 +200,18 @@ pub fn make_traced_event(case_id: &str, event_name: &str) -> TracedEvent {
         .cloned()
         .unwrap_or_default();
 
-    let event = trace.events.into_iter().next().unwrap();
-    TracedEvent {
-        case_id: case_id_val,
-        timestamp: Utc::now(),
-        event,
-    }
+    let event_id_val = trace
+        .events
+        .into_iter()
+        .next()
+        .unwrap()
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    TracedEvent::new(case_id_val, event_id_val, Utc::now(), HashMap::new())
 }
 
 pub fn make_traced_event_with_fixed_timestamp(case_id: &str, event_name: &str) -> TracedEvent {
@@ -237,12 +243,27 @@ pub fn make_traced_event_with_fixed_timestamp(case_id: &str, event_name: &str) -
         .cloned()
         .unwrap_or_default();
 
-    let event = trace.events.into_iter().next().unwrap();
-    TracedEvent {
-        case_id: case_id_val,
-        timestamp: Utc::now(),
-        event,
-    }
+    let event_id_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let timestamp_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("time:timestamp")
+        .and_then(|a| a.value.try_as_date())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_default();
+
+    TracedEvent::new(case_id_val, event_id_val, timestamp_val, HashMap::new())
 }
 
 pub fn minimal_xes(case_id: &str, event_name: &str) -> String {
@@ -326,8 +347,27 @@ pub fn make_traced_event_at(case_id: &str, event_name: &str, seconds_offset: i64
         .cloned()
         .unwrap_or_default();
 
-    let event = trace.events.into_iter().next().unwrap();
-    TracedEvent::new(case_id_val, event)
+    let event_id_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let timestamp_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("time:timestamp")
+        .and_then(|a| a.value.try_as_date())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_default();
+
+    TracedEvent::new(case_id_val, event_id_val, timestamp_val, HashMap::new())
 }
 
 /// Build a TracedEvent that carries a numeric sensor reading as a `<float>`
@@ -373,8 +413,35 @@ pub fn make_sensor_event(
         .cloned()
         .unwrap_or_default();
 
-    let event = trace.events.into_iter().next().unwrap();
-    TracedEvent::new(case_id_val, event)
+    let event_id_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("concept:name")
+        .and_then(|a| a.value.try_as_string())
+        .cloned()
+        .unwrap_or_default();
+
+    let timestamp_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .get_by_key("time:timestamp")
+        .and_then(|a| a.value.try_as_date())
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_default();
+
+    let attributes_val = trace
+        .events
+        .first()
+        .unwrap()
+        .attributes
+        .iter()
+        .map(|a| (a.key.clone(), a.value.clone()))
+        .collect();
+    TracedEvent::new(case_id_val, event_id_val, timestamp_val, attributes_val)
 }
 
 /// Build a `Token` carrying a `Counter` payload, used to answer pull-token

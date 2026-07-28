@@ -230,6 +230,10 @@ fn do_connect(
             Ok(Ok(stream)) => {
                 let (tcp_channel_sender, tcp_channel_receiver) =
                     mpsc::channel(state.config.tcp_channels.tcp_channel_mpsc_channel_size);
+                // turn of the tcp nagle algorithm to be able to send small messages immediately
+                if let Err(e) = stream.set_nodelay(true) {
+                    log::warn!("could not set TCP_NODELAY for {}: {}", peer_address, e);
+                }
                 tokio::spawn(initiate_tcp_connection(
                     peer_address,
                     stream,
