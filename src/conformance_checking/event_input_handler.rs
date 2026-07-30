@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::measurement::api::{event_input, timed};
 use crate::network::message_types::PeerMessage;
 use crate::network::tcp_router::send_to_conformance_peer;
 use crate::state::app_state::AppState;
@@ -41,8 +42,15 @@ pub async fn handle_event(
             ..XESImportOptions::default()
         };
 
-        let log = import_xes_slice(&read_buf, false, import_options).unwrap();
-        for trace in log.traces {
+        let (parsed, parse_us) = timed(|| import_xes_slice(&read_buf, false, import_options));
+        let event_log = match parsed {
+            Ok(event_log) => event_log,
+            Err(e) => {
+                log::error!("handle_event: error importing xes slice: {}", e);
+                break;
+            }
+        };
+        for trace in event_log.traces {
             let trace_id: CaseId = match get_trace_id(&trace) {
                 Some(id) => id,
                 None => {
@@ -76,6 +84,15 @@ pub async fn handle_event(
                             attributes,
                         );
                         log::debug!("handle_event: received event {:?}", traced_event);
+
+                        // record event
+                        event_input(
+                            &traced_event.case_id,
+                            &traced_event.event_id,
+                            traced_event.instance_id,
+                            parse_us,
+                            state.config.forwarder.is_some(),
+                        );
 
                         if let Some(forwarder_config) = &state.config.forwarder {
                             // forward the event to the central node

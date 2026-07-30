@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS results (
     constraint_id TEXT NOT NULL REFERENCES constraints(constraint_id),
     result        TEXT NOT NULL CHECK (result IN ('Violated', 'TemporarilyViolated', 'Satisfied')),
     info          TEXT NOT NULL,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    inserted_at   TEXT NOT NULL DEFAULT '',
 );
 
 -- Supports "all results for a case" ordered by created_at without a full

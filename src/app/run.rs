@@ -1,9 +1,10 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use tokio::sync::mpsc;
 
 use crate::{
     config::node_config::{ConfigMode, NodeConfig},
+    measurement::api::meta,
     network::tcp_router::connect_peer,
     state::app_state::AppState,
     types::PeerAddress,
@@ -19,6 +20,9 @@ pub async fn run(config: NodeConfig) {
         }
     );
     log::debug!("configuration: {:?}", config);
+
+    // initialize measurement and spawn the record writer (if enabled)
+    crate::measurement::record_writer::spawn_record_writer(config.node_id);
 
     let (event_q_tx, event_q_rx) = mpsc::channel(config.event_queue_size);
     let (loopback_q_tx, loopback_q_rx) = mpsc::channel(config.loopback_queue_size);
@@ -56,6 +60,21 @@ pub async fn run(config: NodeConfig) {
 
     setup_tcp_channels(state.clone()).await;
 
+    // record some meta info
+    meta(
+        match state.config.mode {
+            ConfigMode::Central => "central",
+            ConfigMode::Distributed => "distributed",
+        },
+        state.config.constraints.len(),
+        state.config.tcp_listen_address,
+        if state.config.is_distributed() {
+            Some(state.config.overlay().listen_address)
+        } else {
+            None
+        },
+    );
+
     crate::app::tcp_listener::spawn_conformance_network_listener(state.clone());
     crate::app::cli::spawn_cli(state.clone());
     crate::app::event_listener::spawn_event_listener(state.clone());
@@ -77,6 +96,12 @@ pub async fn run(config: NodeConfig) {
             inbound_gossip_rx.unwrap(),
         );
     }
+
+    // periodically record queue depth (if enabled)
+    crate::measurement::queue_depth_sampler::spawn_queue_depth_sampler(
+        state.clone(),
+        Duration::from_millis(100),
+    );
 
     // keeps main alive until i shut it down
     tokio::signal::ctrl_c().await.unwrap();

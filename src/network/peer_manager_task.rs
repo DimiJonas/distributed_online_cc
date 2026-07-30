@@ -7,6 +7,7 @@ use tokio::{
 };
 
 use crate::{
+    measurement::api::{dropped_message, peer_churn, tcp_channel_queue_depth},
     network::{
         message_types::{PeerMessage, PeerMessagePayload},
         tcp_channel::initiate_tcp_connection,
@@ -68,6 +69,12 @@ pub fn peer_manager_task(
                     }
                     match &conn {
                         ConnectionState::Connected(sender) => {
+                            // record tcp channel queue depth
+                            tcp_channel_queue_depth(
+                                peer_address,
+                                sender.max_capacity() - sender.capacity(),
+                                sender.max_capacity(),
+                            );
                             if let Err(e) = sender.send(*peer_msg.clone()).await {
                                 log::error!(
                                     "send to tcp_channel failed for {}: {}",
@@ -107,6 +114,8 @@ pub fn peer_manager_task(
                                 let mut managers = state.peer_managers.lock().unwrap();
                                 managers.remove(&peer_address.address);
                             }
+                            // record churn
+                            peer_churn("removed", peer_address);
                             break; // task returns
                         }
                         NetworkType::Conformance => {
@@ -126,6 +135,8 @@ pub fn peer_manager_task(
                                     let mut managers = state.peer_managers.lock().unwrap();
                                     managers.remove(&peer_address.address);
                                 }
+                                // record churn
+                                peer_churn("removed", peer_address);
                                 break; // task returns
                             }
 
@@ -197,7 +208,10 @@ fn enqueue(
             "message queue full for {}, dropping oldest message",
             peer_address
         );
-        queue.pop_front();
+        if let Some(evicted_message) = queue.pop_front() {
+            // record dropped message
+            dropped_message("manager_queue_full", &evicted_message, Some(peer_address))
+        }
     }
     queue.push_back(msg);
     log::debug!("{} messages queued for {}", queue.len(), peer_address);

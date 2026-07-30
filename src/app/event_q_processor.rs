@@ -1,4 +1,10 @@
-use crate::{state::app_state::AppState, types::TracedEvent};
+use std::time::Instant;
+
+use crate::{
+    measurement::api::{event_dequeue, event_handled},
+    state::app_state::AppState,
+    types::TracedEvent,
+};
 
 use tokio::sync::mpsc;
 
@@ -20,6 +26,15 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
             if let Some(event) = event_q.recv().await {
                 log::info!("processing event: {}", event);
                 log::debug!("event ({:?})", event);
+
+                // record the event dequeue
+                event_dequeue(
+                    &event.case_id,
+                    &event.event_id,
+                    event.instance_id,
+                    state.handlers.get_by_event_id(&event.event_id).len(),
+                    event_q.len(),
+                );
 
                 // is the case already closed? -> drop event
                 // is it a new case? -> register it in case state and result store
@@ -49,9 +64,16 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                 }
 
                 // dispatch relevant handlers
-                let event_id = &event.event_id;
-                for handler in state.handlers.get_by_event_id(event_id) {
+                for handler in state.handlers.get_by_event_id(&event.event_id) {
+                    // record event handling start time
+                    let started = Instant::now();
                     handler.handle_event(&event, state.clone()).await;
+                    event_handled(
+                        &event.case_id,
+                        &handler.constraint_id().to_string(),
+                        event.instance_id,
+                        started.elapsed().as_micros() as u64,
+                    );
                 }
             }
         }

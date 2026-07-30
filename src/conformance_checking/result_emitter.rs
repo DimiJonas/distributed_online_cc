@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 ///     - grace period
 ///     - revocable result
 use crate::{
+    measurement::api::result_emitted,
     network::{
         message_types::{CCResultMessage, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -42,6 +43,15 @@ pub async fn emit_result(
     );
 
     let policy = state.config.result_buffer_policy(constraint_id);
+    // record result emitted
+    result_emitted(
+        case_id,
+        constraint_id,
+        constraint_type,
+        result,
+        &policy,
+        None,
+    );
 
     match policy {
         ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
@@ -271,6 +281,18 @@ pub async fn emit_result_immediate(
     state: AppState,
 ) {
     let result_receive_time = Utc::now();
+
+    // record result emitted
+    result_emitted(
+        case_id,
+        constraint_id,
+        constraint_type,
+        result,
+        &ResultBufferPolicy::GracePeriod {
+            duration: Duration::ZERO,
+        },
+        None,
+    );
 
     {
         let mut results = state.cc_results.lock().unwrap();

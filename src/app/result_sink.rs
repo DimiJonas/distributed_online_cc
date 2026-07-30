@@ -1,6 +1,10 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use crate::{config::node_config::ResultSinkConfig, network::message_types::CCResultMessage};
+use crate::{
+    config::node_config::ResultSinkConfig, measurement::api::result_persisted,
+    network::message_types::CCResultMessage,
+};
+use chrono::Utc;
 use rusqlite::Connection;
 use thiserror::Error;
 use tokio::{sync::mpsc, time::MissedTickBehavior};
@@ -275,19 +279,27 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
     )?;
 
     // insert result with info and timestamp into db
+    let inserted_at = Utc::now().to_rfc3339();
     tx.execute(
-        "INSERT INTO results (case_id, constraint_id, result, info, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO results (case_id, constraint_id, result, info, created_at, inserted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             result_message.case_id,
             result_message.constraint_id,
             result_message.result.to_string(),
             result_message.info,
             created_at,
+            inserted_at,
         ],
     )?;
 
     tx.commit()?;
+    // record persisted result
+    result_persisted(
+        &result_message.case_id,
+        &result_message.constraint_id,
+        &created_at,
+    );
     Ok(())
 }
 

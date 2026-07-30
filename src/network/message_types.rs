@@ -186,7 +186,7 @@ impl Display for PeerMessagePayload {
             PeerMessagePayload::Cli(_) => write!(f, "cli"),
             PeerMessagePayload::Conformance(_) => write!(f, "conformance"),
             PeerMessagePayload::Overlay(_) => write!(f, "overlay"),
-            PeerMessagePayload::CEGossip(_) => write!(f, "case-end-gossip"),
+            PeerMessagePayload::CEGossip(_) => write!(f, "ce_gossip"),
             PeerMessagePayload::Result(_) => write!(f, "result"),
             PeerMessagePayload::Event(_) => write!(f, "event"),
         }
@@ -228,6 +228,18 @@ pub enum CCMessageType {
     DeleteToken,
     // trigger constraint check for a case on another node
     TriggerCheck,
+}
+
+impl Display for CCMessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CCMessageType::PushToken => write!(f, "push_token"),
+            CCMessageType::PullTokenRequest => write!(f, "pull_token_request"),
+            CCMessageType::PullTokenResponse => write!(f, "pull_token_response"),
+            CCMessageType::DeleteToken => write!(f, "delete_token"),
+            CCMessageType::TriggerCheck => write!(f, "trigger_check"),
+        }
+    }
 }
 
 // message envelope for conformance checking communication

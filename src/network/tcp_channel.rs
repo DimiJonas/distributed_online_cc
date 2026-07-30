@@ -1,4 +1,6 @@
 use crate::conformance_checking::tcp_handler::*;
+use crate::measurement::api::{dropped_message, message, peer_churn, timed};
+use crate::measurement::record::Direction;
 use crate::network::framing::*;
 use crate::network::message_types::{HelloMessage, MessageKind, PeerMessage, PeerMessagePayload};
 use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
@@ -189,7 +191,12 @@ async fn tcp_channel(
         // this can happen when a tcp channel is created on demand because a message send is requested.
         // in this case the hello message for the handshake is probably sent together with the actual message by the kernel in one frame
         while check_frame(&read_buf) {
-            let msg = match decode(&mut read_buf) {
+            // record message size and serialization time
+            let before = read_buf.len();
+            let (decoded, serde_us) = timed(|| decode(&mut read_buf));
+            let frame_bytes = before - read_buf.len();
+
+            let msg = match decoded {
                 Ok(m) => m,
                 Err(e) => {
                     log::error!(
@@ -209,6 +216,15 @@ async fn tcp_channel(
                 }
             };
 
+            // record message
+            message(
+                Direction::Received,
+                peer_address,
+                &msg,
+                frame_bytes,
+                serde_us,
+            );
+
             log::debug!(
                 "tcp_channel: decoded message from peer {}: {}",
                 peer_address,
@@ -223,15 +239,22 @@ async fn tcp_channel(
             Some(msg) = tcp_channel_receiver.recv() => {
                 if msg.is_expired() {
                     log::warn!("tcp_channel: dropping expired message {} for {}", msg.message_id, peer_address);
+                    dropped_message("ttl_expired", &msg, Some(peer_address));
                     continue;
                 }
-                let encoded = match encode(&msg) {
+                // record serialization time and message size
+                let (encoded, serde_us) = timed(|| encode(&msg));
+                let encoded = match encoded {
                     Ok(b) => b,
                     Err(e) => {
                         log::error!("tcp_channel: failed to encode message for peer {}: {}", peer_address, e);
+                        dropped_message("encode_failed", &msg, Some(peer_address));
                         continue;
                     }
                 };
+
+                // record message
+                message(Direction::Sent, peer_address, &msg, encoded.len(), serde_us);
 
                 if stream.write_all(&encoded).await.is_err() {
                     log::error!("tcp_channel: writing to tcp stream failed to peer {}", peer_address);
@@ -310,6 +333,8 @@ fn ensure_manager_exists(state: AppState, peer_address: PeerAddress) {
         "ensure_manager_exists: created manager task for peer {}",
         peer_address
     );
+    // record churn
+    peer_churn("created", peer_address);
 }
 
 pub async fn dispatch_message(msg: PeerMessage, address: SocketAddr, state: AppState) {

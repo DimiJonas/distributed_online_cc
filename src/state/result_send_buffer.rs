@@ -21,6 +21,18 @@ pub enum ResultBufferPolicy {
     Revocable { duration: Duration },
 }
 
+impl Display for ResultBufferPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
+                write!(f, "immediate")
+            }
+            ResultBufferPolicy::GracePeriod { .. } => write!(f, "grace_period"),
+            ResultBufferPolicy::Revocable { .. } => write!(f, "revocable"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PendingResult {
     pub result: ConstraintResultType,
