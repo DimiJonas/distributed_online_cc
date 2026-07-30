@@ -4,14 +4,15 @@ compare the result databases of the distributed and the central system (and opti
 
 for every (case_id, constraint_id) pair the final result is compared (the last row written for that pair)
 
-Reported per pair, in three categories:
-  DIFFERENT  - both systems have a result but they disagree
+Reported per pair:
+  DIFFERENT  - both systems have a result but they disagree (with --expected: also says which side matches the ground truth)
   MISSING    - one system has a result, the other has no row at all
-  WRONG      - (only with --expected) the systems agree with each other but not with the generated 'ground truth'
+  ABSENT     - (only with --expected) neither system produced a result
+  WRONG      - (only with --expected) the systems agree with each other but not with the ground truth
 
 Usage:
-  compare_results.py --distributed run/distributed-results.db \
-                     --central run/central-results.db \
+  compare_results.py --distributed run/distributed/cc-results.db \
+                     --central run/central/cc-results.db \
                      [--expected run/events/expected_results.jsonl] \
                      [--show-info] [--show-matches]
 """
@@ -72,37 +73,53 @@ def main():
 
     keys = sorted(set(dist) | set(cent) | (set(expected) if expected else set()))
 
-    different, missing, wrong, matches = [], [], [], []
+    different, missing, absent, wrong, matches = [], [], [], [], []
     for k in keys:
         d = dist.get(k)
         c = cent.get(k)
         d_res = d[0] if d else None
         c_res = c[0] if c else None
+        e = expected.get(k) if expected else None
 
+        if d_res is None and c_res is None:
+            absent.append((k, e))
+            continue
         if d_res is None or c_res is None:
-            missing.append((k, d_res, c_res))
+            missing.append((k, d_res, c_res, e))
             continue
         if d_res != c_res:
-            different.append((k, d, c))
+            different.append((k, d, c, e))
             continue
-        # the systems agree; check against the ground truth if provided
-        if expected is not None:
-            e = expected.get(k)
-            if e is not None and e != d_res:
-                wrong.append((k, e, d_res))
-                continue
+        # central and distributed are equal - check against the ground truth if provided
+        if e is not None and e != d_res:
+            wrong.append((k, e, d_res))
+            continue
         matches.append((k, d_res))
 
-    for (case, cid), d, c in different:
-        print(f"DIFFERENT {case}/{cid}: distributed={d[0]} central={c[0]}")
+    for (case, cid), d, c, e in different:
+        line = f"DIFFERENT {case}/{cid}: distributed={d[0]} central={c[0]}"
+        if e is not None:
+            if e == d[0]:
+                line += f"  -> ground truth {e}: distributed is right, central is wrong"
+            elif e == c[0]:
+                line += f"  -> ground truth {e}: central is right, distributed is wrong"
+            else:
+                line += f"  -> ground truth {e}: both are wrong"
+        print(line)
         if args.show_info:
             print(f"    distributed: {d[1]}  ({d[2]}, {d[3]} row(s))")
             print(f"    central:     {c[1]}  ({c[2]}, {c[3]} row(s))")
-    for (case, cid), d_res, c_res in missing:
+    for (case, cid), d_res, c_res, e in missing:
         side = "central" if d_res else "distributed"
         have = d_res or c_res
-        print(f"MISSING   {case}/{cid}: no result in the {side} db "
-              f"(other side says {have})")
+        line = (f"MISSING   {case}/{cid}: no result in the {side} db "
+                f"(other side says {have})")
+        if e is not None:
+            line += f"  [ground truth {e}]"
+        print(line)
+    for (case, cid), e in absent:
+        print(f"ABSENT    {case}/{cid}: neither system produced a result "
+              f"(ground truth expects {e})")
     for (case, cid), e, got in wrong:
         print(f"WRONG     {case}/{cid}: both systems say {got}, "
               f"ground truth expects {e}")
@@ -110,11 +127,20 @@ def main():
         for (case, cid), res in matches:
             print(f"MATCH     {case}/{cid}: {res}")
 
-    n_bad = len(different) + len(missing) + len(wrong)
-    print(f"\n{len(keys)} (case, constraint) pairs compared: "
-          f"{len(matches)} match, {len(different)} differ, "
-          f"{len(missing)} missing on one side"
-          + (f", {len(wrong)} wrong vs ground truth" if expected else ""))
+    n_bad = len(different) + len(missing) + len(absent) + len(wrong)
+    summary = (f"\n{len(keys)} (case, constraint) pairs compared: "
+               f"{len(matches)} match, {len(different)} differ, "
+               f"{len(missing)} missing on one side")
+    if expected:
+        summary += f", {len(absent)} absent from both, {len(wrong)} wrong vs ground truth"
+        d_right = sum(1 for _, d, _, e in different if e is not None and e == d[0])
+        c_right = sum(1 for _, _, c, e in different if e is not None and e == c[0])
+        both_wrong = len(different) - d_right - c_right
+        if different:
+            summary += (f"\nof the {len(different)} disagreements: "
+                        f"distributed correct {d_right}x, central correct {c_right}x, "
+                        f"both wrong {both_wrong}x")
+    print(summary)
     sys.exit(1 if n_bad else 0)
 
 

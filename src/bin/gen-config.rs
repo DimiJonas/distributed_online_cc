@@ -3,12 +3,14 @@
 //! Two orthogonal axes:
 //!
 //!   * Addressing (`--addressing`)
-//!       - `local`  : every node on one host, ports offset by node id
-//!       - `remote` : one host per node, fixed ports (one IP per node)
+//!       - `local`: every node on one host, ports offset by node id
+//!       - `remote`: one host per node, fixed ports (one IP per node)
 //!
 //!   * MODE (how conformance is checked)
-//!       - distributed : constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
-//!       - central     : forwarders receive events and forward them to a single central node that holds all constraints
+//!       - distributed: constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
+//!         node 0 is the dedicated result sink, nodes 1..N have the constraints
+//!       - central: forwarders receive events and forward them to a single central node (node 0) that has all constraints
+//!         forwarder f mirrors distributed node f: it accepts exactly the event ids placed on that node
 //!
 //! A single invocation always emits both a distributed system and a central system built from the same set of constraints
 //! Each system is self contained under its own directory:
@@ -17,11 +19,11 @@
 //!   distributed/
 //!     configs/   node-<id>-config.toml
 //!     logs/      node-<id>.log
-//!     results.db
+//!     cc-results.db
 //!   central/
 //!     configs/   node-0-central-config.toml, node-<id>-forwarder-config.toml
 //!     logs/      central-node.log, forwarder-<id>.log
-//!     results.db
+//!     cc-results.db
 //!
 //! The db paths written into the configs are relative to the launch cwd, so the nodes must be started from the same directory `gen-config` was run from
 
@@ -32,7 +34,7 @@ use online_cc::config::node_config::{
     MinMaxMode, ResultBufferConfig, ResultSinkConfig, SensorConstraintMode,
 };
 use online_cc::types::{ConstraintId, EventId, SensorAttributeKey, SensorAttributeThreshold};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -186,7 +188,6 @@ impl Addressing {
 /// generates a list of node ids for the initial_peers of the overlay
 /// constructs a Chord like ring
 fn bootstrap_ids(node_id: u64, modulus: u64, ring_degree: u64) -> Vec<u64> {
-    use std::collections::BTreeSet;
     let mut peers = BTreeSet::new();
     let ring_degree = ring_degree.min(modulus.saturating_sub(1)); // avoid u64 underflow when ring degree >= n
     for distance in 1..=ring_degree {
@@ -306,25 +307,24 @@ fn suffix(stem: &str, copy: u64) -> String {
 fn catalog() -> Vec<Template> {
     // small function to create sensor templates
     let sensor = |stem: &'static str,
+                  collector_event: &'static str,
+                  trigger_event: &'static str,
+                  attribute_key: &'static str,
                   threshold: SensorAttributeThreshold,
                   op: SensorConstraintMode| Template {
         constraint_stem: stem,
         roles: vec![
             (
                 Role::SensorCollector {
-                    attribute_key: "value".to_string(),
+                    attribute_key: attribute_key.to_string(),
                     value: threshold,
                     mode: op,
                     max_value_age: Duration::from_hours(96),
                 },
-                "sensor_collector_event",
+                collector_event,
                 None,
             ),
-            (
-                Role::SensorTrigger { collector: 0 },
-                "sensor_trigger_event",
-                None,
-            ),
+            (Role::SensorTrigger { collector: 0 }, trigger_event, None),
         ],
     };
 
@@ -420,11 +420,30 @@ fn catalog() -> Vec<Template> {
                 ),
             ],
         },
-        sensor("sensor_lt_test", 15.0, SensorConstraintMode::Lt),
-        sensor("sensor_gt_test", 5.0, SensorConstraintMode::Gt),
-        sensor("sensor_lte_test", 12.0, SensorConstraintMode::Lte),
-        sensor("sensor_gte_test", 8.0, SensorConstraintMode::Gte),
-        sensor("sensor_eq_test", 10.0, SensorConstraintMode::Eq),
+        sensor(
+            "sensor_gt_test",
+            "sensor_gt_collector_event",
+            "sensor_gt_trigger_event",
+            "value_gt",
+            5.0,
+            SensorConstraintMode::Gt,
+        ),
+        sensor(
+            "sensor_lt_test",
+            "sensor_lt_collector_event",
+            "sensor_lt_trigger_event",
+            "value_lt",
+            15.0,
+            SensorConstraintMode::Lt,
+        ),
+        sensor(
+            "sensor_gte_test",
+            "sensor_gte_collector_event",
+            "sensor_gte_trigger_event",
+            "value_gte",
+            8.0,
+            SensorConstraintMode::Gte,
+        ),
         Template {
             constraint_stem: "time_test",
             roles: vec![
@@ -448,6 +467,25 @@ fn catalog() -> Vec<Template> {
     ]
 }
 
+// clone a catalog role for copy `copy`
+// needed because for sensor collector roles the attribute key must also get a suffix
+fn instantiate_role(kind: &Role, copy: u64) -> Role {
+    match kind {
+        Role::SensorCollector {
+            attribute_key,
+            value,
+            mode,
+            max_value_age,
+        } => Role::SensorCollector {
+            attribute_key: suffix(attribute_key, copy),
+            value: *value,
+            mode: mode.clone(),
+            max_value_age: *max_value_age,
+        },
+        other => other.clone(),
+    }
+}
+
 // instantiate the catalog `repeat` times into concrete instances
 fn build_instances(repeat: u64) -> Vec<Instance> {
     let templates = catalog();
@@ -459,7 +497,7 @@ fn build_instances(repeat: u64) -> Vec<Instance> {
                 .roles
                 .iter()
                 .map(|(kind, event, buf)| RoleInstance {
-                    kind: kind.clone(),
+                    kind: instantiate_role(kind, copy),
                     constraint_id: constraint_id.clone(),
                     event_id: suffix(event, copy),
                     buffer: buf.clone(),
@@ -591,9 +629,22 @@ fn to_constraint(
 // placement of roles onto distributed nodes
 // -------------------------------------------
 
-// for each instance, the node id that hosts each of its roles
+// for each instance, the 0-based slot that has the result sink
 // in distributed mode roles are round-robined across the non-sink nodes
+// slots map to node ids via `dist_node_of` so the forwarders mirror the distributed nodes in which events they accept/expect
 type Layout = Vec<Vec<u64>>;
+
+// layout slot -> distributed node id (node 0 is the sink)
+fn dist_node_of(slot: u64) -> u64 {
+    slot + 1
+}
+
+// layout slot -> forwarder id in the central system
+// id mapping onto the distributed node ids when forwarders == role_nodes
+// wraps around when there are fewer forwarders than constraint nodes
+fn mirror_forwarder_of(slot: u64, forwarders: u64) -> u64 {
+    (slot % forwarders) + 1
+}
 
 fn spread_layout(instances: &[Instance], role_node_count: u64) -> Layout {
     assert!(
@@ -626,7 +677,6 @@ struct CommonParams {
     case_end_retention: Duration,
 }
 
-// emit the distributed system: `role_nodes` constraint-carrying nodes plus one dedicated result-sink node (the last id)
 // constraints are placed per `layout`and peers resolve to the conformance address of the hosting node
 fn emit_distributed(
     instances: &[Instance],
@@ -637,7 +687,7 @@ fn emit_distributed(
     common: &CommonParams,
     out_dir: &Path,
 ) {
-    let sink_id = role_nodes; // sink is the extra node after the role nodes
+    let sink_id = 0u64;
     let total_nodes = role_nodes + 1; // total nodes incl. sink
     std::fs::create_dir_all(out_dir).unwrap();
 
@@ -675,16 +725,17 @@ fn emit_distributed(
                 retry_buffer_size: 4096,
             });
         } else {
-            // gather the roles placed on this node
+            // gather the roles placed on this node (layout slots start at 0, node ids start at 1)
             let mut constraints = Vec::new();
             for (instance_index, instance) in instances.iter().enumerate() {
-                let role_nodes_here = &layout[instance_index];
+                let role_slots_here = &layout[instance_index];
                 for (role_index, role) in instance.roles.iter().enumerate() {
-                    if role_nodes_here[role_index] != node_id {
+                    if dist_node_of(role_slots_here[role_index]) != node_id {
                         continue;
                     }
-                    let resolve =
-                        |sib: usize| addressing.reachable_conformance(role_nodes_here[sib]);
+                    let resolve = |sib: usize| {
+                        addressing.reachable_conformance(dist_node_of(role_slots_here[sib]))
+                    };
                     let config =
                         to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
                     constraints.push((config, role.buffer.clone(), role.constraint_id.clone()));
@@ -710,6 +761,7 @@ fn emit_distributed(
 // all remaining nodes are forwarders whose filter lists (attributes, event ids) are derived from the central constraints
 fn emit_central(
     instances: &[Instance],
+    layout: &Layout,
     forwarders: u64,
     addressing: &Addressing,
     db_path: &Path,
@@ -736,17 +788,30 @@ fn emit_central(
         })
         .result_sink_addresses(vec![central_address]);
 
-    // collected filter inputs for the forwarders
-    let mut event_ids: HashSet<EventId> = HashSet::new();
-    let mut attributes: HashSet<String> = HashSet::new();
+    // per-forwarder filter inputs, mirroring the distributed placement:
+    // forwarder f accepts the events of the roles that the `layout` puts on distributed node f
+    // BTreeMap/BTreeSet keep the emitted configs deterministic
+    let mut forwarder_event_ids: BTreeMap<u64, BTreeSet<EventId>> = BTreeMap::new();
+    let mut forwarder_attributes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    for forwarder_id in 1..=forwarders {
+        forwarder_event_ids.insert(forwarder_id, BTreeSet::new());
+        forwarder_attributes.insert(forwarder_id, BTreeSet::new());
+    }
 
-    for instance in instances {
+    for (instance_index, instance) in instances.iter().enumerate() {
         let resolve = |_sib: usize| central_address; // everything is local to central
-        for role in &instance.roles {
+        for (role_index, role) in instance.roles.iter().enumerate() {
             let config = to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
-            event_ids.insert(role.event_id.clone());
+            let forwarder_id = mirror_forwarder_of(layout[instance_index][role_index], forwarders);
+            forwarder_event_ids
+                .get_mut(&forwarder_id)
+                .unwrap()
+                .insert(role.event_id.clone());
             if let Role::SensorCollector { attribute_key, .. } = &role.kind {
-                attributes.insert(attribute_key.clone());
+                forwarder_attributes
+                    .get_mut(&forwarder_id)
+                    .unwrap()
+                    .insert(attribute_key.clone());
             }
             central = central.constraint(config);
             if let Some(policy) = &role.buffer {
@@ -762,14 +827,17 @@ fn emit_central(
     .unwrap();
 
     // ---- forwarders ----
-    let include_event_attributes = if attributes.is_empty() {
-        None
-    } else {
-        Some(attributes.into_iter().collect())
-    };
-    let include_event_ids: Vec<String> = event_ids.into_iter().collect();
-
+    // a forwarder that mirrors a constraint-free distributed node gets an empty include list
     for forwarder_id in 1..=forwarders {
+        let attributes = &forwarder_attributes[&forwarder_id];
+        let include_event_attributes = if attributes.is_empty() {
+            None
+        } else {
+            Some(attributes.iter().cloned().collect())
+        };
+        let include_event_ids: Vec<EventId> =
+            forwarder_event_ids[&forwarder_id].iter().cloned().collect();
+
         let config = NodeConfigBuilder::central_base()
             .node_id(forwarder_id)
             .tcp_listen(addressing.listen_conformance(forwarder_id))
@@ -777,8 +845,8 @@ fn emit_central(
             .log_file(format!("forwarder-{forwarder_id}.log"))
             .forwarder(ForwarderConfig {
                 central_node_address: central_address,
-                include_event_attributes: include_event_attributes.clone(),
-                include_event_ids: Some(include_event_ids.clone()),
+                include_event_attributes,
+                include_event_ids: Some(include_event_ids),
             })
             .build();
         std::fs::write(
@@ -797,7 +865,8 @@ fn emit_central(
 #[command(about = "Generate comparable distributed + central conformance-checker configs")]
 struct Args {
     /// total nodes in the distributed system (constraint nodes + 1 sink)
-    #[arg(short, long, default_value_t = 20)]
+    /// 23 nodes because 22 constraint roles + 1 sink
+    #[arg(short, long, default_value_t = 23)]
     nodes: u64,
 
     // instantiate the whole constraint catalog this many times (spreads more constraints across the system)
@@ -805,7 +874,7 @@ struct Args {
     repeat: u64,
 
     // forwarders in the central system
-    // default: match the distributed node count (nodes - 1) so both systems have the same number of nodes
+    // default: match the distributed constraint node count so both systems have the same node count and forwarder f mirrors distributed node f
     #[arg(long)]
     forwarders: Option<u64>,
 
@@ -938,6 +1007,31 @@ fn main() {
             role_nodes as usize - total_roles
         );
     }
+    if forwarders != role_nodes {
+        eprintln!(
+            "note: {forwarders} forwarders != {role_nodes} constraint nodes - forwarders cannot mirror \
+             the distributed nodes 1:1 (distributed node s+1 maps to forwarder (s % {forwarders}) + 1)"
+        );
+    }
+
+    // check that every event_id is received by exactly one distributed node, so events can be routed by event_id alone and the central mirror is exact
+    {
+        let mut event_slot: BTreeMap<&str, u64> = BTreeMap::new();
+        for (instance_index, instance) in instances.iter().enumerate() {
+            for (role_index, role) in instance.roles.iter().enumerate() {
+                let slot = layout[instance_index][role_index];
+                if let Some(&previous) = event_slot.get(role.event_id.as_str()) {
+                    assert_eq!(
+                        previous, slot,
+                        "event_id '{}' is placed on two different nodes - every event id in the catalog must belong to exactly one role (or all its roles must co-locate)",
+                        role.event_id
+                    );
+                } else {
+                    event_slot.insert(role.event_id.as_str(), slot);
+                }
+            }
+        }
+    }
 
     // check spread capacity covers the larger of the two systems
     if let Some(cap) = addressing.capacity() {
@@ -984,6 +1078,7 @@ fn main() {
     );
     emit_central(
         &instances,
+        &layout,
         forwarders,
         &central_addressing,
         &central_db,
@@ -995,10 +1090,10 @@ fn main() {
         args.out_dir
     );
     println!(
-        "  distributed: {dist_nodes} nodes ({role_nodes} constraint + 1 sink), {total_roles} constraints"
+        "  distributed: {dist_nodes} nodes (sink on node 0 + {role_nodes} constraint nodes), {total_roles} constraints"
     );
     println!(
-        "  central:     {} nodes (1 central + {forwarders} forwarders), {total_roles} constraints",
+        "  central:     {} nodes (central on node 0 + {forwarders} forwarders), {total_roles} constraints",
         forwarders + 1
     );
 }

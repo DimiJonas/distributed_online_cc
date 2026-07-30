@@ -9,11 +9,9 @@ reads the configs to work out routing
 reads the manifest from gen-events.rs
 delivers to each nodes unix socket
 
-    distributed : each event goes to the nodes whose constraints watch its event_id
-        a split sensor event that carries a constraint_id goes to the one node holding that exact constraint
-    central     : every forwarder accepts any event -> round-robin the forwarders
-
-events are delivered to each nodes unix socket
+routing is by event_id in both systems:
+    distributed : an event goes to the node whose constraints watch its event_id
+    central     : an event goes to the forwarder whose include_event_ids lists it
 
 usage:
   send_stream.py --config-dir run/distributed --stream events_gen/manifest.jsonl
@@ -27,12 +25,10 @@ import json
 import os
 import random
 import socket
-import subprocess
 import sys
 import time
 import tomllib
 from glob import glob
-from itertools import cycle
 
 
 # ---- read configs -> nodes + routing ----
@@ -59,12 +55,23 @@ def load_nodes(config_dir):
             kind = "constraint-node"
         else:
             kind = "sink"
+        # events this node accepts on its unix socket:
+        #   constraint nodes -> the event ids of their constraints
+        #   forwarders       -> their include_event_ids filter list
+        #   central / sink   -> never a direct delivery target
+        if kind == "forwarder":
+            events = list(cfg.get("forwarder", {}).get("include_event_ids") or [])
+        elif kind == "constraint-node":
+            events = list({c["event_id"] for c in cons})
+        else:
+            events = []
         nodes.append({
             "node_id": int(cfg.get("node_id", -1)),
             "kind": kind, "mode": mode,
             "tcp": str(cfg.get("tcp_listen_address", "")),
             "socket": str(cfg.get("unix_socket", "")),
             "constraints": cons,
+            "events": events,
         })
     return nodes
 
@@ -75,20 +82,12 @@ def system_kind(nodes):
 
 
 def build_routing(nodes):
-    """(event_id -> nodes), ((event_id,constraint_id) -> nodes), forwarders."""
-    by_event, by_constraint = {}, {}
+    # event_id -> nodes that accept it on their unix socket
+    by_event = {}
     for n in nodes:
-        seen_e, seen_c = set(), set()
-        for c in n["constraints"]:
-            if c["event_id"] not in seen_e:
-                seen_e.add(c["event_id"])
-                by_event.setdefault(c["event_id"], []).append(n)
-            key = (c["event_id"], c["constraint_id"])
-            if key not in seen_c:
-                seen_c.add(key)
-                by_constraint.setdefault(key, []).append(n)
-    fwd = [n for n in nodes if n["kind"] == "forwarder"]
-    return by_event, by_constraint, fwd
+        for event_id in n["events"]:
+            by_event.setdefault(event_id, []).append(n)
+    return by_event
 
 
 # ---- pacing ----
@@ -284,7 +283,6 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config-dir", required=True)
     ap.add_argument("--stream", help="manifest.jsonl from gen-events (or an embedded-xes .jsonl stream)")
-    ap.add_argument("--mode", choices=["auto", "distributed", "central"], default="auto")
     ap.add_argument("--rate", type=float, default=0.0, help="events per second (0 = as fast as possible)")
     ap.add_argument("--interval", type=float, default=None, help="seconds between events (alternative to --rate)")
     ap.add_argument("--burst", type=int, default=1, help="release this many events at once, then wait (default 1)")
@@ -299,15 +297,12 @@ def main():
 
 
     nodes = load_nodes(args.config_dir)
-    kind = args.mode if args.mode != "auto" else system_kind(nodes)
-    by_event, by_constraint, fwd = build_routing(nodes)
+    kind = system_kind(nodes)
+
+    by_event = build_routing(nodes)
 
     if args.print_routes:
         print(f"system: {kind}")
-        if kind == "central":
-            print("forwarders (any event -> any forwarder):")
-            for n in fwd:
-                print(f"  node {n['node_id']}  {n['socket']}")
         print("event routing:")
         for ev in sorted(by_event):
             where = "  ".join(f"node {n['node_id']} ({n['socket']})" for n in by_event[ev])
@@ -317,7 +312,6 @@ def main():
     if not args.stream:
         sys.exit("need --stream manifest.jsonl (or --print-routes)")
     stream_dir = os.path.dirname(os.path.abspath(args.stream))
-    fwd_cycle = cycle(fwd) if fwd else None
 
     if args.interval is not None and args.rate:
         ap.error("use either --rate or --interval, not both")
@@ -343,7 +337,6 @@ def main():
                 continue
             ev = json.loads(line)
             event_id = ev["event_id"]
-            constraint_id = ev.get("constraint_id")
 
             # payload + file (embedded xes or a referenced file)
             file_path = None
@@ -356,18 +349,12 @@ def main():
             # wait for this event's slot
             t = pacer.wait()
 
-            # resolve targets
-            if kind == "central":
-                targets = [next(fwd_cycle)] if fwd_cycle else []
-            elif constraint_id:
-                targets = by_constraint.get((event_id, constraint_id), [])
-            else:
-                targets = by_event.get(event_id, [])
+            targets = by_event.get(event_id, [])
 
             if not targets:
                 counts["no_route"] += 1
                 logf.write(json.dumps({"seq": ev["seq"], "case_id": ev["case_id"],
-                    "event_id": event_id, "constraint_id": constraint_id,
+                    "event_id": event_id,
                     "node_id": None, "socket": None, "status": "no_route"}) + "\n")
                 prog.note(f"no route for '{event_id}' (seq {ev['seq']})")
                 prog.advance(counts)
@@ -384,7 +371,7 @@ def main():
                 counts["sent" if status == "sent" else
                        "dry-run" if status == "dry-run" else "error"] += 1
                 logf.write(json.dumps({"seq": ev["seq"], "case_id": ev["case_id"],
-                    "event_id": event_id, "constraint_id": constraint_id,
+                    "event_id": event_id,
                     "node_id": n["node_id"], "socket": n["socket"],
                     "bytes": len(payload), "status": status,
                     "t": round(t, 6)}) + "\n")

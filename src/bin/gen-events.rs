@@ -60,8 +60,8 @@ struct Args {
     violation_rate: f64,
 
     /// how deviant cases are chosen:
-    ///   exact:     exactly round(cases * violation_rate) cases deviate so the deviant count identical for every seed
-    ///   bernoulli: every case deviates independently with p = violation_rate, which is more realistic because the deviant count varies binomially between seeds
+    ///     exact = exactly round(cases * violation_rate) cases deviate so the deviant count identical for every seed
+    ///     bernoulli: every case deviates independently with p = violation_rate, which is more realistic because the deviant count varies binomially between seeds
     #[arg(long, value_enum, default_value_t = ViolationSampling::Exact)]
     violation_sampling: ViolationSampling,
 
@@ -70,8 +70,8 @@ struct Args {
     #[arg(long)]
     seed: Option<u64>,
 
-    /// RFC3339 base timestamp of the stream
-    #[arg(long, default_value = "2026-07-23T00:00:00Z")]
+    /// RFC3339 base timestamp of the stream e.g. "2026-07-23T00:00:00Z"
+    #[arg(long, default_value = "2026-07-30T00:00:00Z")]
     start: String,
 
     /// mean time seconds between consecutive events of a case
@@ -127,16 +127,11 @@ struct DistAppearanceSpec {
 #[derive(Clone)]
 struct SensorSpec {
     constraint_id: ConstraintId,
-    mode: SensorConstraintMode,
-    threshold: f64,
-}
-
-/// sensor constraints that share the same collector event + attribute key
-struct SensorGroup {
     collector_event_id: EventId,
     trigger_event_id: EventId,
-    key: SensorAttributeKey,
-    specs: Vec<SensorSpec>,
+    attribute_key: SensorAttributeKey,
+    mode: SensorConstraintMode,
+    threshold: SensorAttributeThreshold,
 }
 
 struct TimeSpec {
@@ -155,7 +150,7 @@ struct Catalog {
     notcoex: Vec<PairSpec>,
     appearance: Vec<AppearanceSpec>,
     dist_appearance: Vec<DistAppearanceSpec>,
-    sensor_groups: Vec<SensorGroup>,
+    sensor: Vec<SensorSpec>,
     time: Vec<TimeSpec>,
     end_event_id: Option<EventId>,
 }
@@ -175,9 +170,7 @@ impl Catalog {
         }
         constraint_ids.extend(self.appearance.iter().map(|a| a.constraint_id.clone()));
         constraint_ids.extend(self.dist_appearance.iter().map(|a| a.constraint_id.clone()));
-        for g in &self.sensor_groups {
-            constraint_ids.extend(g.specs.iter().map(|s| s.constraint_id.clone()));
-        }
+        constraint_ids.extend(self.sensor.iter().map(|s| s.constraint_id.clone()));
         constraint_ids.extend(self.time.iter().map(|t| t.constraint_id.clone()));
         constraint_ids.sort();
         constraint_ids.dedup();
@@ -226,9 +219,17 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
         ConstraintId,
         (Vec<EventId>, Option<(EventId, MinMaxMode, u64)>),
     > = BTreeMap::new();
-    let mut sensors: BTreeMap<(EventId, SensorAttributeKey), (Option<EventId>, Vec<SensorSpec>)> =
-        BTreeMap::new();
-    let mut sensor_triggers: BTreeMap<ConstraintId, EventId> = BTreeMap::new(); // constraint_id -> trigger_event_id
+    #[allow(clippy::type_complexity)]
+    let mut sensor_collectors: BTreeMap<
+        ConstraintId,
+        (
+            EventId,
+            SensorAttributeKey,
+            SensorConstraintMode,
+            SensorAttributeThreshold,
+        ),
+    > = BTreeMap::new();
+    let mut sensor_triggers: BTreeMap<ConstraintId, EventId> = BTreeMap::new();
     #[allow(clippy::type_complexity)]
     let mut times: BTreeMap<
         ConstraintId,
@@ -330,16 +331,15 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
                     mode,
                     ..
                 } => {
-                    let entry = sensors
-                        .entry((event_id.clone(), attribute_key.clone()))
-                        .or_default();
-                    if !entry.1.iter().any(|s| s.constraint_id == *constraint_id) {
-                        entry.1.push(SensorSpec {
-                            constraint_id: constraint_id.clone(),
-                            mode: mode.clone(),
-                            threshold: *value,
-                        });
-                    }
+                    sensor_collectors.insert(
+                        constraint_id.clone(),
+                        (
+                            event_id.clone(),
+                            attribute_key.clone(),
+                            mode.clone(),
+                            *value,
+                        ),
+                    );
                 }
                 ConstraintConfig::SensorTrigger {
                     constraint_id,
@@ -429,19 +429,18 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
             });
         }
     }
-    for ((collector_event_id, key), (_, specs)) in sensors {
-        // the trigger event of the first spec in the group (they share it in practice)
-        let trigger_event_id = specs
-            .iter()
-            .find_map(|s| sensor_triggers.get(&s.constraint_id).cloned())
-            .unwrap_or_else(|| {
-                panic!("sensor group {collector_event_id}/{key} has no trigger role")
-            });
-        catalog.sensor_groups.push(SensorGroup {
+    for (constraint_id, (collector_event_id, attribute_key, mode, threshold)) in sensor_collectors {
+        let trigger_event_id = sensor_triggers
+            .get(&constraint_id)
+            .cloned()
+            .unwrap_or_else(|| panic!("sensor constraint {constraint_id} has no trigger role"));
+        catalog.sensor.push(SensorSpec {
+            constraint_id,
             collector_event_id,
             trigger_event_id,
-            key,
-            specs,
+            attribute_key,
+            mode,
+            threshold,
         });
     }
     for (constraint_id, (start, stop)) in times {
@@ -458,48 +457,25 @@ fn build_catalog(configs: &[NodeConfig]) -> Catalog {
     catalog
 }
 
-/// a value for the groups shared attribute that satisfies every spec
-fn happy_sensor_value(group: &SensorGroup) -> SensorAttributeThreshold {
-    let mut candidates: Vec<SensorAttributeThreshold> = Vec::new();
-    for spec in &group.specs {
-        candidates.extend([spec.threshold, spec.threshold - 1.0, spec.threshold + 1.0]);
-    }
-    for candidate in &candidates {
-        if group
-            .specs
-            .iter()
-            .all(|s| s.mode.evaluate_condition(*candidate, s.threshold))
-        {
-            return *candidate;
+/// a value that satisfies the constraint
+fn happy_sensor_value(spec: &SensorSpec) -> SensorAttributeThreshold {
+    match spec.mode {
+        SensorConstraintMode::Gt => spec.threshold + 1.0,
+        SensorConstraintMode::Lt => spec.threshold - 1.0,
+        SensorConstraintMode::Gte | SensorConstraintMode::Lte | SensorConstraintMode::Eq => {
+            spec.threshold
         }
     }
-    panic!(
-        "no single value satisfies all sensor constraints on {}/{} - thresholds are contradictory",
-        group.collector_event_id, group.key
-    );
 }
 
-/// a value violating at least one spec of the group (random among candidates)
-fn violating_sensor_value(group: &SensorGroup, rng: &mut StdRng) -> SensorAttributeThreshold {
-    let mut candidates: Vec<SensorAttributeThreshold> = Vec::new();
-    for spec in &group.specs {
-        candidates.extend([
-            spec.threshold - 1.0,
-            spec.threshold + 1.0,
-            spec.threshold * 2.0 + 7.0,
-        ]);
-    }
-    candidates.shuffle(rng);
-    for candidate in &candidates {
-        if group
-            .specs
-            .iter()
-            .any(|s| !s.mode.evaluate_condition(*candidate, s.threshold))
-        {
-            return *candidate;
+/// a value that violates the constraint
+fn violating_sensor_value(spec: &SensorSpec) -> SensorAttributeThreshold {
+    match spec.mode {
+        SensorConstraintMode::Gt | SensorConstraintMode::Gte => spec.threshold - 1.0,
+        SensorConstraintMode::Lt | SensorConstraintMode::Lte | SensorConstraintMode::Eq => {
+            spec.threshold + 1.0
         }
     }
-    unreachable!("some candidate always violates at least one spec");
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +534,7 @@ fn deviation_pool(catalog: &Catalog) -> Vec<Deviation> {
     for i in 0..catalog.dist_appearance.len() {
         pool.push(Deviation::DistAppearanceOffCount(i));
     }
-    for i in 0..catalog.sensor_groups.len() {
+    for i in 0..catalog.sensor.len() {
         pool.push(Deviation::SensorBadValue(i));
         pool.push(Deviation::SensorMissingValue(i));
     }
@@ -588,7 +564,7 @@ fn deviation_target(deviation: &Deviation, catalog: &Catalog) -> Option<String> 
             Some(catalog.dist_appearance[*i].constraint_id.clone())
         }
         Deviation::SensorBadValue(i) | Deviation::SensorMissingValue(i) => {
-            Some(format!("__sensor_group_{i}"))
+            Some(catalog.sensor[*i].constraint_id.clone())
         }
         Deviation::TimeOffDuration(i) => Some(catalog.time[*i].constraint_id.clone()),
         Deviation::EarlyEnd => None,
@@ -757,32 +733,30 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
         }
     }
     // sensors
-    for (i, sensor_group) in catalog.sensor_groups.iter().enumerate() {
+    for (i, sensor_spec) in catalog.sensor.iter().enumerate() {
         let missing = dev(&|d| matches!(d, Deviation::SensorMissingValue(j) if *j == i));
         let bad = dev(&|d| matches!(d, Deviation::SensorBadValue(j) if *j == i));
         if missing {
-            for sensor_spec in &sensor_group.specs {
-                expected.insert(sensor_spec.constraint_id.clone(), "Violated");
-            }
+            expected.insert(sensor_spec.constraint_id.clone(), "Violated");
         } else {
             let value = if bad {
-                violating_sensor_value(sensor_group, rng)
+                violating_sensor_value(sensor_spec)
             } else {
-                happy_sensor_value(sensor_group)
+                happy_sensor_value(sensor_spec)
             };
-            let mut event = Planned::plain(&sensor_group.collector_event_id);
-            event.attributes.insert(sensor_group.key.clone(), value);
+            let mut event = Planned::plain(&sensor_spec.collector_event_id);
+            event
+                .attributes
+                .insert(sensor_spec.attribute_key.clone(), value);
             early.push(event);
-            for sensor_spec in &sensor_group.specs {
-                if !sensor_spec
-                    .mode
-                    .evaluate_condition(value, sensor_spec.threshold)
-                {
-                    expected.insert(sensor_spec.constraint_id.clone(), "Violated");
-                }
+            if !sensor_spec
+                .mode
+                .evaluate_condition(value, sensor_spec.threshold)
+            {
+                expected.insert(sensor_spec.constraint_id.clone(), "Violated");
             }
         }
-        late.push(Planned::plain(&sensor_group.trigger_event_id));
+        late.push(Planned::plain(&sensor_spec.trigger_event_id));
     }
     // timers
     for (i, time_spec) in catalog.time.iter().enumerate() {

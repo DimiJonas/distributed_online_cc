@@ -71,8 +71,9 @@ pub struct TracedEvent {
     pub case_id: CaseId,
     pub event_id: EventId,
     pub timestamp: EventTime,
-    pub instance_id: EventInstanceId,
     pub attributes: HashMap<AttributeKey, AttributeValue>,
+    // for measurement purposes only
+    pub instance_id: EventInstanceId,
 }
 
 impl TracedEvent {

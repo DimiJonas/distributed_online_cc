@@ -16,7 +16,7 @@ use crate::{
     state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        HandlerIndex, RequestId, TracedEvent,
+        HandlerIndex, RequestId, SensorAttributeThreshold, TracedEvent,
     },
 };
 
@@ -26,7 +26,7 @@ pub struct SensorCollectorHandler {
     pub constraint_id: ConstraintId,
     pub event_id: EventId,
     pub attribute_key: String,
-    pub value: f64,
+    pub value: SensorAttributeThreshold,
     pub mode: SensorConstraintMode,
     pub max_value_age: Duration,
 }
@@ -128,7 +128,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                 Some(entry) => {
                     // check if entry is outdated
                     let value_age = trigger_event_time - entry.timestamp;
-                    if value_age.to_std().unwrap_or(std::time::Duration::MAX) > self.max_value_age {
+                    if value_age.to_std().unwrap_or(Duration::MAX) > self.max_value_age {
                         let info = format!(
                             "sensor value for case={} key={} is outdated. value age relative to trigger event: {} > {} (max allowed age)",
                             message.case_id,
@@ -218,7 +218,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                 &self.constraint_id,
                 ConstraintType::Sensor,
                 ConstraintResultType::Satisfied,
-                "sensor trigger event never happened".to_string(),
+                "condition was met or sensor trigger event never happened".to_string(),
                 state.clone(),
             )
             .await;
