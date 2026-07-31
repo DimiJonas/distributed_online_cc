@@ -9,6 +9,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -143,6 +144,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                             ConstraintResultType::Violated,
                             info,
                             state.clone(),
+                            ResultTrigger::Event,
+                            message.triggering_event,
                         )
                         .await;
                         return;
@@ -162,6 +165,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                         ConstraintResultType::Violated,
                         info,
                         state.clone(),
+                        ResultTrigger::Event,
+                        message.triggering_event,
                     )
                     .await;
                     return;
@@ -193,6 +198,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                 ConstraintResultType::Violated,
                 format!("{} {} {} is false", attribute_value, self.mode, self.value),
                 state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
             )
             .await;
         };
@@ -220,6 +227,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                 ConstraintResultType::Satisfied,
                 "condition was met or sensor trigger event never happened".to_string(),
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }
@@ -272,6 +281,7 @@ impl ConstraintHandler for SensorTriggerHandler {
             event.case_id.clone(),
             self.constraint_id.clone(),
             event.timestamp,
+            event.instance_id,
         ));
         for &peer_address in self.collector_peers.iter() {
             if let Err(e) =
@@ -301,7 +311,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintResultType, ConstraintRole},
+        types::{ConstraintResultType, ConstraintRole, EventInstanceId},
         util::test_tools::{
             make_config_with_constraints_and_port, make_sensor_event, make_state_from_config,
         },
@@ -350,7 +360,12 @@ mod tests {
     fn trigger_at(case: &str, secs: i64) -> CCMessage {
         let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         let ts = base + chrono::Duration::seconds(secs);
-        CCMessage::trigger_check(case.to_string(), CID.to_string(), ts)
+        CCMessage::trigger_check(
+            case.to_string(),
+            CID.to_string(),
+            ts,
+            EventInstanceId::new_v4(),
+        )
     }
 
     fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {

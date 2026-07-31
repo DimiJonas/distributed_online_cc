@@ -3,6 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     conformance_checking::case_end_signal_handling::handle_case_end_info,
+    measurement::record::CaseEndSource,
     network::{
         message_types::{CEGossipMessage, CEGossipPayload, PeerMessage},
         tcp_router::send_to_overlay_peer,
@@ -101,14 +102,23 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
     let now = Utc::now();
     let payload_name = message.payload.name();
     match message.payload {
-        CEGossipPayload::Push(data) | CEGossipPayload::AeSet(data) => {
+        CEGossipPayload::Push(data) => {
             log::debug!(
                 "handle_inbound_message: received {} data of length {}",
                 payload_name,
                 data.len()
             );
-            log::debug!("received gossip: {:?}", data);
-            handle_case_end_info(state.clone(), data).await;
+            log::debug!("received data: {:?}", data);
+            handle_case_end_info(state.clone(), data, CaseEndSource::PushGossip).await;
+        }
+        CEGossipPayload::AeSet(data) => {
+            log::debug!(
+                "handle_inbound_message: received {} data of length {}",
+                payload_name,
+                data.len()
+            );
+            log::debug!("received data: {:?}", data);
+            handle_case_end_info(state.clone(), data, CaseEndSource::AntiEntropy).await;
         }
         CEGossipPayload::AeDigest(their_digest) => {
             log::debug!(

@@ -8,6 +8,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
         tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
@@ -145,6 +146,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 ConstraintResultType::Violated,
                 info,
                 state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
             )
             .await;
         }
@@ -353,6 +356,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             ConstraintResultType::Satisfied,
             info,
             state.clone(),
+            ResultTrigger::CaseEnd,
+            None,
         )
         .await;
     }
@@ -562,6 +567,8 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 ConstraintResultType::Violated,
                 info,
                 state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
             )
             .await;
         }
@@ -744,6 +751,8 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 ConstraintResultType::Satisfied,
                 "only the not coexistence A event happened until case end".to_string(),
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }
@@ -776,7 +785,10 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintResultType, ConstraintRole, ConstraintType, PeerAddress, Token},
+        types::{
+            ConstraintResultType, ConstraintRole, ConstraintType, EventInstanceId, PeerAddress,
+            Token,
+        },
         util::test_tools::{
             addr, answer_one_conformance_request, make_config_with_constraints_and_port,
             make_state_from_config, make_traced_event_at, register_manager,
@@ -828,7 +840,7 @@ mod tests {
             b_time.map(at),
             2,
         );
-        CCMessage::push_token(token)
+        CCMessage::push_token(token, EventInstanceId::new_v4())
     }
 
     fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {

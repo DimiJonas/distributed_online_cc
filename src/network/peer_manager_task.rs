@@ -7,7 +7,10 @@ use tokio::{
 };
 
 use crate::{
-    measurement::api::{dropped_message, peer_churn, tcp_channel_queue_depth},
+    measurement::{
+        api::{dropped_message, peer_churn, tcp_channel_queue_depth},
+        record::ChurnEvent,
+    },
     network::{
         message_types::{PeerMessage, PeerMessagePayload},
         tcp_channel::initiate_tcp_connection,
@@ -115,7 +118,7 @@ pub fn peer_manager_task(
                                 managers.remove(&peer_address.address);
                             }
                             // record churn
-                            peer_churn("removed", peer_address);
+                            peer_churn(ChurnEvent::Removed, peer_address);
                             break; // task returns
                         }
                         NetworkType::Conformance => {
@@ -136,7 +139,7 @@ pub fn peer_manager_task(
                                     managers.remove(&peer_address.address);
                                 }
                                 // record churn
-                                peer_churn("removed", peer_address);
+                                peer_churn(ChurnEvent::Removed, peer_address);
                                 break; // task returns
                             }
 

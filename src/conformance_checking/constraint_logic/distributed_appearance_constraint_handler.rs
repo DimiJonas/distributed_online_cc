@@ -9,6 +9,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
         tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
@@ -228,6 +229,8 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                 result,
                 info,
                 state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
             )
             .await;
         }
@@ -255,6 +258,8 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                 ConstraintResultType::Satisfied,
                 "counter evaluation was never triggered".to_string(),
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }

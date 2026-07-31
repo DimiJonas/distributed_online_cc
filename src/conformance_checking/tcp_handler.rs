@@ -289,7 +289,7 @@ mod tests {
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
-        types::{MessageId, RequestId},
+        types::{EventInstanceId, MessageId, RequestId},
         util::test_tools::{
             addr, make_config_with_constraints_and_port, make_state, peer_addr, register_manager,
         },
@@ -498,7 +498,12 @@ mod tests {
     #[tokio::test]
     async fn cc_message_registers_new_case() {
         let state = make_state(21060);
-        let msg = CCMessage::delete_token("new-case".to_string(), "rp".to_string(), Utc::now());
+        let msg = CCMessage::delete_token(
+            "new-case".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         handle_cc_message(
             msg,
             state.clone(),
@@ -552,7 +557,12 @@ mod tests {
                 .produce_with_overwrite(token, 0);
         }
 
-        let delete_msg = CCMessage::delete_token("c1".to_string(), "rp".to_string(), Utc::now());
+        let delete_msg = CCMessage::delete_token(
+            "c1".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         handle_cc_message(
             delete_msg,
             state.clone(),
@@ -576,7 +586,12 @@ mod tests {
     #[tokio::test]
     async fn cc_message_unknown_constraint_does_not_panic() {
         let state = make_state(21080);
-        let msg = CCMessage::delete_token("c".to_string(), "ghost".to_string(), Utc::now());
+        let msg = CCMessage::delete_token(
+            "c".to_string(),
+            "ghost".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         handle_cc_message(
             msg,
             state,

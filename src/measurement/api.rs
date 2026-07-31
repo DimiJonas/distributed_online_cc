@@ -3,7 +3,9 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::measurement::record::{Direction, QueueDepths, Record};
+use crate::measurement::record::{
+    CaseEndSource, ChurnEvent, Direction, QueueDepths, Record, ResultTrigger,
+};
 use crate::measurement::record_writer::{enabled, message_trace_enabled, record};
 use crate::network::message_types::{PeerMessage, PeerMessagePayload};
 use crate::state::result_send_buffer::ResultBufferPolicy;
@@ -123,7 +125,7 @@ pub fn result_emitted(
     result_type: ConstraintResultType,
     policy: &ResultBufferPolicy,
     instance_id: Option<EventInstanceId>,
-    // trigger: String,
+    trigger: ResultTrigger,
 ) {
     record(Record::ResultEmitted {
         case_id: case_id.clone(),
@@ -132,7 +134,7 @@ pub fn result_emitted(
         result: format!("{}", result_type),
         policy: format!("{}", policy),
         instance_id,
-        // trigger,
+        trigger,
     });
 }
 
@@ -166,18 +168,22 @@ pub fn meta(
     });
 }
 
-pub fn peer_churn(churn_event: &'static str, peer_address: PeerAddress) {
+pub fn peer_churn(churn_event: ChurnEvent, peer_address: PeerAddress) {
     record(Record::PeerChurn {
         event: churn_event,
         peer: peer_address,
     });
 }
 
+pub fn case_end_seen(case_id: CaseId, source: CaseEndSource) {
+    record(Record::CaseEndSeen { case_id, source })
+}
+
 pub fn queues(tick: u64, depths: QueueDepths) {
     record(Record::Queues { tick, depths });
 }
 
-/// helper to create a queue depth for a bounded tokio channel
+/// helper to create queue depth measure for a bounded tokio channel
 #[inline]
 pub fn depth_of<T>(sender: &mpsc::Sender<T>) -> [usize; 2] {
     [
@@ -186,11 +192,7 @@ pub fn depth_of<T>(sender: &mpsc::Sender<T>) -> [usize; 2] {
     ]
 }
 
-/// helper for timing a synchronous block
-/// e.g.
-/// ```ignore
-/// let (value, us) = metrics::timed(|| encode(&msg));
-/// ```
+/// helper for timing a synchronous block or function
 #[inline]
 pub fn timed<T, F: FnOnce() -> T>(f: F) -> (T, u64) {
     if !enabled() {

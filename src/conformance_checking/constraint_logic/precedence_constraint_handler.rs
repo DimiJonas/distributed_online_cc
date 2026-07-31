@@ -7,6 +7,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -70,7 +71,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
         };
 
         // send token
-        let message = PeerMessage::conformance(CCMessage::push_token(token));
+        let message = PeerMessage::conformance(CCMessage::push_token(token, event.instance_id));
         for peer_address in self.consumer_peers.iter() {
             if let Err(e) =
                 send_to_conformance_peer(*peer_address, message.clone(), state.clone()).await
@@ -134,6 +135,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     ConstraintResultType::Violated,
                     info,
                     state.clone(),
+                    ResultTrigger::Event,
+                    Some(event.instance_id),
                 )
                 .await;
                 return;
@@ -152,6 +155,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     event.timestamp, producer_event_time
                 ),
                 state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
             )
             .await;
         }
@@ -269,6 +274,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 ConstraintResultType::Satisfied,
                 info,
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }
@@ -301,7 +308,10 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintResultType, ConstraintRole, ConstraintType, Token, TracedEvent},
+        types::{
+            ConstraintResultType, ConstraintRole, ConstraintType, EventInstanceId, Token,
+            TracedEvent,
+        },
         util::test_tools::{make_config_with_constraints_and_port, make_state_from_config},
     };
     use chrono::DateTime;
@@ -354,7 +364,7 @@ mod tests {
             Some(at(secs)),
             1,
         );
-        CCMessage::push_token(token)
+        CCMessage::push_token(token, EventInstanceId::new_v4())
     }
 
     fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {

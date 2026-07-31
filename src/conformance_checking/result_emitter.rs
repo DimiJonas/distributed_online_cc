@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 ///     - grace period
 ///     - revocable result
 use crate::{
-    measurement::api::result_emitted,
+    measurement::{api::result_emitted, record::ResultTrigger},
     network::{
         message_types::{CCResultMessage, PeerMessage},
         tcp_router::send_to_conformance_peer,
     },
     state::{app_state::AppState, result_send_buffer::ResultBufferPolicy},
-    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType},
+    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventInstanceId},
 };
 
 /// emit a constraint result, applying the configured buffering policy for the
@@ -24,6 +24,7 @@ use crate::{
 /// - GracePeriod: writes to cc_results immediately (so the store is always up to date) AND buffers the send; the buffered send fires after the
 ///   grace window, merging any updates that arrive in the meantime
 /// - Revocable: writes to cc_results immediately and keeps the result open to overwrite for the time window, then finalizes
+#[allow(clippy::too_many_arguments)]
 pub async fn emit_result(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
@@ -31,6 +32,8 @@ pub async fn emit_result(
     result: ConstraintResultType,
     info: String,
     state: AppState,
+    result_trigger: ResultTrigger,
+    instance_id: Option<EventInstanceId>,
 ) {
     let result_receive_time = Utc::now();
 
@@ -50,7 +53,8 @@ pub async fn emit_result(
         constraint_type,
         result,
         &policy,
-        None,
+        instance_id,
+        result_trigger,
     );
 
     match policy {
@@ -272,6 +276,7 @@ async fn send_result_outbound(
 }
 
 /// convenience method for handlers that want to finalize a result immediately, skipping the whole buffer logic
+#[allow(clippy::too_many_arguments)]
 pub async fn emit_result_immediate(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
@@ -279,6 +284,8 @@ pub async fn emit_result_immediate(
     result: ConstraintResultType,
     info: String,
     state: AppState,
+    result_trigger: ResultTrigger,
+    instance_id: Option<EventInstanceId>,
 ) {
     let result_receive_time = Utc::now();
 
@@ -291,7 +298,8 @@ pub async fn emit_result_immediate(
         &ResultBufferPolicy::GracePeriod {
             duration: Duration::ZERO,
         },
-        None,
+        instance_id,
+        result_trigger,
     );
 
     {
@@ -369,6 +377,8 @@ mod tests {
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 
@@ -408,6 +418,8 @@ mod tests {
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 
@@ -458,6 +470,8 @@ mod tests {
             ConstraintResultType::Violated,
             "tentative".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 
@@ -471,6 +485,8 @@ mod tests {
             ConstraintResultType::Satisfied,
             "corrected".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 
@@ -523,6 +539,8 @@ mod tests {
             ConstraintResultType::Violated,
             "v".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 
@@ -574,6 +592,8 @@ mod tests {
             ConstraintResultType::Satisfied,
             "vacuous".to_string(),
             state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
         )
         .await;
 

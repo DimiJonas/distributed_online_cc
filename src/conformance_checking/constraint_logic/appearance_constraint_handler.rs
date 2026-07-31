@@ -8,6 +8,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -100,6 +101,8 @@ impl ConstraintHandler for AppearanceCounterHandler {
                 result,
                 info,
                 state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
             )
             .await;
         }
@@ -127,6 +130,8 @@ impl ConstraintHandler for AppearanceCounterHandler {
                 ConstraintResultType::Satisfied,
                 "counter evaluation was never triggered".to_string(),
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }
@@ -232,6 +237,7 @@ impl ConstraintHandler for AppearanceTriggerHandler {
             event.case_id.clone(),
             self.constraint_id.clone(),
             event.timestamp,
+            event.instance_id,
         ));
         for &peer_address in self.counter_peers.iter() {
             if let Err(e) =
@@ -260,7 +266,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintResultType, ConstraintRole},
+        types::{ConstraintResultType, ConstraintRole, EventInstanceId},
         util::test_tools::{
             make_config_with_constraints_and_port, make_state_from_config,
             make_traced_event_with_fixed_timestamp,
@@ -303,7 +309,12 @@ mod tests {
     }
 
     fn trigger(case: &str) -> CCMessage {
-        CCMessage::trigger_check(case.to_string(), CID.to_string(), Utc::now())
+        CCMessage::trigger_check(
+            case.to_string(),
+            CID.to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        )
     }
 
     fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {

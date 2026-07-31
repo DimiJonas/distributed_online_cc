@@ -12,6 +12,29 @@ pub enum Direction {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChurnEvent {
+    Created,
+    Removed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultTrigger {
+    Event,
+    CaseEnd,
+    Timer,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseEndSource {
+    EndEvent,
+    PushGossip,
+    AntiEntropy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct QueueDepths {
     pub event_q: [usize; 2],
     pub loopback_q: [usize; 2],
@@ -94,11 +117,10 @@ pub enum Record {
         result: String,
         /// immediate / grace period / revocable
         policy: String,
-        /// set when the emitting handler knows which event triggered the check (None if a timer timed out)
+        /// set when the emitting handler knows which event triggered the check (None if case_end or timer triggered)
         instance_id: Option<EventInstanceId>,
         // TODO: when aggregating measurements: substract timer duration from the detection delay if needed.
-        // case end / event / timer
-        // trigger: String,
+        trigger: ResultTrigger,
     },
 
     /// the result sink persisted a row
@@ -129,7 +151,7 @@ pub enum Record {
 
     /// emitted when a peer manager is created or removed
     PeerChurn {
-        event: &'static str,
+        event: ChurnEvent,
         #[serde(flatten)]
         peer: PeerAddress,
     },
@@ -139,5 +161,12 @@ pub enum Record {
         tick: u64,
         #[serde(flatten)]
         depths: QueueDepths,
+    },
+
+    /// a node learned that a case has ended
+    CaseEndSeen {
+        case_id: CaseId,
+        /// end_event | push_gossip | anti_entropy
+        source: CaseEndSource,
     },
 }

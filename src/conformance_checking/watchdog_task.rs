@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::node_config::MinMaxMode,
     conformance_checking::result_emitter::emit_result,
+    measurement::record::ResultTrigger,
     state::app_state::AppState,
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, TokenId},
 };
@@ -52,6 +53,8 @@ pub async fn watchdog_task(
                             duration, token_id
                         ),
                         state.clone(),
+                        ResultTrigger::Timer,
+                        None,
                     ).await;
 
                 }
@@ -70,6 +73,8 @@ pub async fn watchdog_task(
                             duration, token_id
                         ),
                         state.clone(),
+                        ResultTrigger::Timer,
+                        None,
                     ).await;
 
                 }

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use crate::impl_constraint_handler_fields;
+use crate::measurement::record::ResultTrigger;
 use crate::network::tcp_router::send_to_conformance_peer;
 /*
     a Response constraint defines that after Event/Activity A happened, Event/Activity B must also happen at some point after that
@@ -30,8 +31,8 @@ use crate::conformance_checking::result_emitter::emit_result;
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::state::app_state::AppState;
 use crate::types::{
-    CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId, EventTime,
-    HandlerIndex, RequestId, Token, TracedEvent,
+    CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
+    EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
 
@@ -89,6 +90,8 @@ impl ConstraintHandler for ResponseProducerHandler {
                     event.timestamp, event.case_id, self.constraint_id,
                 ),
                 state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
             )
             .await;
         }
@@ -154,6 +157,8 @@ impl ConstraintHandler for ResponseProducerHandler {
                     message.case_id, self.constraint_id,
                 ),
                 state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
             )
             .await;
         }
@@ -192,6 +197,8 @@ impl ConstraintHandler for ResponseProducerHandler {
             constraint_result,
             info,
             state.clone(),
+            ResultTrigger::CaseEnd,
+            None,
         )
         .await;
     }
@@ -245,6 +252,7 @@ impl ConstraintHandler for ResponseConsumerHandler {
                 self.constraint_id.clone(),
                 event.timestamp,
                 state.clone(),
+                event.instance_id,
             )
             .await;
         }
@@ -258,12 +266,14 @@ async fn send_delete_token(
     constraint_id: ConstraintId,
     event_timestamp: EventTime,
     state: AppState,
+    triggering_event: EventInstanceId,
 ) {
     // create message
     let message = PeerMessage::conformance(CCMessage::delete_token(
         trace_id,
         constraint_id,
         event_timestamp,
+        triggering_event,
     ));
 
     // send message
@@ -285,6 +295,7 @@ async fn send_delete_token(
 mod tests {
     use chrono::Utc;
 
+    use crate::util::test_tools::make_traced_event_at;
     use crate::{
         config::node_config::ConstraintConfig,
         conformance_checking::constraint_logic::{
@@ -296,14 +307,12 @@ mod tests {
             peer_manager_task::PeerManagerMessage,
         },
         state::app_state::AppState,
-        types::ConstraintRole,
+        types::{ConstraintRole, EventInstanceId},
         util::test_tools::{
-            addr, make_config_with_constraints_and_port, make_state_from_config, peer_addr,
-            register_manager,
+            addr, make_config_with_constraints_and_port, make_state_from_config,
+            make_traced_event_with_fixed_timestamp, peer_addr, register_manager,
         },
     };
-
-    use crate::util::test_tools::make_traced_event_with_fixed_timestamp;
 
     fn make_producer_state(port: u16) -> AppState {
         let config = make_config_with_constraints_and_port(
@@ -379,7 +388,12 @@ mod tests {
                 .contains_out_token(&"c2".to_string(), 2)
         );
 
-        let delete_msg = CCMessage::delete_token("c2".to_string(), "rp".to_string(), Utc::now());
+        let delete_msg = CCMessage::delete_token(
+            "c2".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         handler
             .handle_message(state.clone(), delete_msg, None)
             .await;
@@ -483,7 +497,12 @@ mod tests {
             )
             .await;
 
-        let trigger = CCMessage::trigger_check("c5".to_string(), "rp".to_string(), Utc::now());
+        let trigger = CCMessage::trigger_check(
+            "c5".to_string(),
+            "rp".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         handler.handle_message(state.clone(), trigger, None).await;
 
         assert!(
@@ -506,7 +525,6 @@ mod tests {
     /// produce@t10, consume(delete)@t20 removes the token, case end → Satisfied.
     #[tokio::test]
     async fn producer_followed_by_consumer_is_satisfied() {
-        use crate::util::test_tools::make_traced_event_at;
         let state = make_producer_state(20080);
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -524,7 +542,12 @@ mod tests {
             .await;
         // consumer event time is strictly after the producer token time.
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 20).unwrap();
-        let delete = CCMessage::delete_token("c8".to_string(), "rp".to_string(), consumer_ts);
+        let delete = CCMessage::delete_token(
+            "c8".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
         handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c8".to_string(), state.clone())
@@ -548,7 +571,6 @@ mod tests {
     /// case end → Violated. Encodes "a producer must be followed by a consumer".
     #[tokio::test]
     async fn consumer_before_producer_is_violated() {
-        use crate::util::test_tools::make_traced_event_at;
         let state = make_producer_state(20090);
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -566,7 +588,12 @@ mod tests {
             .handle_event(&make_traced_event_at("c9", "produce", 20), state.clone())
             .await;
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
-        let delete = CCMessage::delete_token("c9".to_string(), "rp".to_string(), consumer_ts);
+        let delete = CCMessage::delete_token(
+            "c9".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
         handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c9".to_string(), state.clone())
@@ -590,7 +617,6 @@ mod tests {
     /// the outstanding token; case end → Satisfied.
     #[tokio::test]
     async fn multiple_producers_one_consumer_is_satisfied() {
-        use crate::util::test_tools::make_traced_event_at;
         let state = make_producer_state(20100);
         {
             let mut store = state.cc_results.lock().unwrap();
@@ -610,7 +636,12 @@ mod tests {
             .handle_event(&make_traced_event_at("c10", "produce", 15), state.clone())
             .await;
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 30).unwrap();
-        let delete = CCMessage::delete_token("c10".to_string(), "rp".to_string(), consumer_ts);
+        let delete = CCMessage::delete_token(
+            "c10".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
         handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c10".to_string(), state.clone())
@@ -646,7 +677,12 @@ mod tests {
         };
 
         let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
-        let delete = CCMessage::delete_token("c11".to_string(), "rp".to_string(), consumer_ts);
+        let delete = CCMessage::delete_token(
+            "c11".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
         handler.handle_message(state.clone(), delete, None).await;
         handler
             .handle_case_end(&"c11".to_string(), state.clone())

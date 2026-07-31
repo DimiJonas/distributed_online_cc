@@ -9,7 +9,7 @@ use crate::{
     network::message_types::MessageKind::{FireAndForget, Request, Response},
     types::{
         CaseEnd, CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType,
-        EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
+        EventInstanceId, EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
     },
 };
 
@@ -259,6 +259,9 @@ pub struct CCMessage {
     // present for: PushToken for NotCoexistence constraint pushing claim tokens
     // used to differentiate if the token came from notcoexistence a or b handler which is needed when both are configured on the same node
     pub creating_handler: Option<ConstraintRole>,
+    // the event that triggered this message
+    // FOR MEASUREMENT ONLY
+    pub triggering_event: Option<EventInstanceId>,
 }
 
 impl CCMessage {
@@ -272,10 +275,11 @@ impl CCMessage {
             request_id: None,
             sender_address: None,
             creating_handler: None,
+            triggering_event: None,
         }
     }
 
-    pub fn push_token(token: Token) -> Self {
+    pub fn push_token(token: Token, triggering_event: EventInstanceId) -> Self {
         let mut msg = Self::base(
             CCMessageType::PushToken,
             token.case_id.clone(),
@@ -283,6 +287,7 @@ impl CCMessage {
         );
         msg.timestamp = token.event_time;
         msg.token = Some(token);
+        msg.triggering_event = Some(triggering_event);
         msg
     }
 
@@ -326,9 +331,11 @@ impl CCMessage {
         case_id: CaseId,
         constraint_id: ConstraintId,
         event_timestamp: EventTime,
+        triggering_event: EventInstanceId,
     ) -> Self {
         let mut msg = Self::base(CCMessageType::DeleteToken, case_id, constraint_id);
         msg.timestamp = Some(event_timestamp);
+        msg.triggering_event = Some(triggering_event);
         msg
     }
 
@@ -336,9 +343,11 @@ impl CCMessage {
         case_id: CaseId,
         constraint_id: ConstraintId,
         event_timestamp: EventTime,
+        triggering_event: EventInstanceId,
     ) -> Self {
         let mut msg = Self::base(CCMessageType::TriggerCheck, case_id, constraint_id);
         msg.timestamp = Some(event_timestamp);
+        msg.triggering_event = Some(triggering_event);
         msg
     }
 }
@@ -487,7 +496,7 @@ mod tests {
             Some(Utc::now()),
             1,
         );
-        let msg = CCMessage::push_token(token.clone());
+        let msg = CCMessage::push_token(token.clone(), EventInstanceId::new_v4());
         assert_eq!(msg.message_type, CCMessageType::PushToken);
         assert!(msg.token.is_some());
         assert_eq!(msg.case_id, "case-1");
@@ -495,14 +504,24 @@ mod tests {
 
     #[test]
     fn delete_token_has_correct_type_and_token_id() {
-        let msg = CCMessage::delete_token("case-2".to_string(), "c-2".to_string(), Utc::now());
+        let msg = CCMessage::delete_token(
+            "case-2".to_string(),
+            "c-2".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         assert_eq!(msg.message_type, CCMessageType::DeleteToken);
         assert!(msg.token.is_none());
     }
 
     #[test]
     fn trigger_check_has_no_token_or_result() {
-        let msg = CCMessage::trigger_check("case-3".to_string(), "c-3".to_string(), Utc::now());
+        let msg = CCMessage::trigger_check(
+            "case-3".to_string(),
+            "c-3".to_string(),
+            Utc::now(),
+            EventInstanceId::new_v4(),
+        );
         assert_eq!(msg.message_type, CCMessageType::TriggerCheck);
         assert!(msg.token.is_none());
     }

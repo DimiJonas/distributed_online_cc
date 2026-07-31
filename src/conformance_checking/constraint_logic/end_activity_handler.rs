@@ -1,6 +1,8 @@
 use crate::conformance_checking::case_end_signal_handling::handle_case_end;
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
 use crate::impl_constraint_handler_fields;
+use crate::measurement::api::case_end_seen;
+use crate::measurement::record::CaseEndSource;
 use crate::state::app_state::AppState;
 use crate::types::{CaseEnd, ConstraintId, ConstraintRole, EventId, HandlerIndex, TracedEvent};
 use async_trait::async_trait;
@@ -24,6 +26,9 @@ impl ConstraintHandler for EndActivityHandler {
         );
 
         let case_id = event.case_id.clone();
+
+        // record case end
+        case_end_seen(case_id.clone(), CaseEndSource::EndEvent);
 
         // signal case end
         handle_case_end(

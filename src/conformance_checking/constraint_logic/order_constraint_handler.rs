@@ -7,6 +7,7 @@ use crate::{
         constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
     },
     impl_constraint_handler_fields,
+    measurement::record::ResultTrigger,
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -14,7 +15,7 @@ use crate::{
     state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        EventTime, HandlerIndex, RequestId, Token, TracedEvent,
+        EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TracedEvent,
     },
 };
 
@@ -72,6 +73,8 @@ impl ConstraintHandler for OrderFirstHandler {
                     ConstraintResultType::Violated,
                     info,
                     state.clone(),
+                    ResultTrigger::Event,
+                    Some(event.instance_id),
                 )
                 .await;
             }
@@ -190,6 +193,8 @@ impl ConstraintHandler for OrderFirstHandler {
                             order_first_time, order_second_event_time
                         ),
                         state.clone(),
+                        ResultTrigger::Event,
+                        message.triggering_event,
                     )
                     .await;
                 }
@@ -219,6 +224,8 @@ impl ConstraintHandler for OrderFirstHandler {
                 ConstraintResultType::Satisfied,
                 "order first event never happened".to_string(),
                 state.clone(),
+                ResultTrigger::CaseEnd,
+                None,
             )
             .await;
         }
@@ -303,6 +310,7 @@ impl ConstraintHandler for OrderSecondHandler {
                     self.constraint_id.clone(),
                     event.timestamp,
                     state.clone(),
+                    event.instance_id,
                 )
                 .await;
             }
@@ -330,6 +338,7 @@ async fn send_push_token_message(
     constraint_id: ConstraintId,
     event_timestamp: EventTime,
     state: AppState,
+    triggering_event: EventInstanceId,
 ) {
     // create token
     let token = Token::new(
@@ -340,7 +349,7 @@ async fn send_push_token_message(
         state.config.node_id,
     );
     // create message
-    let message = PeerMessage::conformance(CCMessage::push_token(token));
+    let message = PeerMessage::conformance(CCMessage::push_token(token, triggering_event));
 
     // send message
     log::info!(
@@ -369,7 +378,7 @@ mod tests {
         },
         network::message_types::CCMessage,
         state::app_state::AppState,
-        types::{ConstraintResultType, ConstraintRole, ConstraintType, Token},
+        types::{ConstraintResultType, ConstraintRole, ConstraintType, EventInstanceId, Token},
         util::test_tools::{
             make_config_with_constraints_and_port, make_state_from_config, make_traced_event_at,
         },
@@ -417,7 +426,7 @@ mod tests {
             Some(at(secs)),
             1,
         );
-        CCMessage::push_token(token)
+        CCMessage::push_token(token, EventInstanceId::new_v4())
     }
 
     fn result_type(state: &AppState, case: &str) -> Option<ConstraintResultType> {

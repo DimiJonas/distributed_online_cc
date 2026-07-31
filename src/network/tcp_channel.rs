@@ -1,6 +1,6 @@
 use crate::conformance_checking::tcp_handler::*;
 use crate::measurement::api::{dropped_message, message, peer_churn, timed};
-use crate::measurement::record::Direction;
+use crate::measurement::record::{ChurnEvent, Direction};
 use crate::network::framing::*;
 use crate::network::message_types::{HelloMessage, MessageKind, PeerMessage, PeerMessagePayload};
 use crate::network::peer_manager_task::{PeerManagerMessage, peer_manager_task};
@@ -334,7 +334,7 @@ fn ensure_manager_exists(state: AppState, peer_address: PeerAddress) {
         peer_address
     );
     // record churn
-    peer_churn("created", peer_address);
+    peer_churn(ChurnEvent::Created, peer_address);
 }
 
 pub async fn dispatch_message(msg: PeerMessage, address: SocketAddr, state: AppState) {
