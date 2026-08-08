@@ -138,7 +138,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "appearance counter handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

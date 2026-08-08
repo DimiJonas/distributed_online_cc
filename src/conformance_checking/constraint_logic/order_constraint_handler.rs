@@ -232,7 +232,7 @@ impl ConstraintHandler for OrderFirstHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "order first handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
@@ -319,7 +319,7 @@ impl ConstraintHandler for OrderSecondHandler {
 
     // remove the blocking token
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "order second handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

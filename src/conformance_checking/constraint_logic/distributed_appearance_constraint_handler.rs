@@ -178,7 +178,7 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "distributed appearance counter handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

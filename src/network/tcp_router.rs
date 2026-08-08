@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 // build a tcp channel to another peer
 pub async fn connect_peer(peer_address: PeerAddress, state: AppState) {
     if state.config.is_own_address(peer_address.address) {
-        log::info!("connect_peer: skipping self-connect to {}", peer_address);
+        log::debug!("connect_peer: skipping self-connect to {}", peer_address);
         return;
     }
     get_or_create_manager(peer_address, state.clone()).await;

@@ -86,7 +86,7 @@ impl ConstraintHandler for PrecedenceProducerHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "precedence producer handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
@@ -282,7 +282,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "precedence consumer handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

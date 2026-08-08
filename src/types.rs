@@ -132,9 +132,25 @@ pub enum ConstraintType {
     DistributedAppearance,
 }
 
+impl ConstraintType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Response => "Response",
+            Self::EndActivity => "EndActvity",
+            Self::Precedence => "Precedence",
+            Self::Order => "Order",
+            Self::Sensor => "Sensor",
+            Self::Time => "Time",
+            Self::NotCoexistence => "NotCoexistence",
+            Self::Appearance => "Appearance",
+            Self::DistributedAppearance => "DistributedAppearance",
+        }
+    }
+}
+
 impl Display for ConstraintType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{}", Self::as_db_str(self))
     }
 }
 
@@ -170,6 +186,16 @@ pub enum ConstraintResultType {
     Violated,
     TemporarilyViolated,
     Satisfied,
+}
+
+impl ConstraintResultType {
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::Violated => "Violated",
+            Self::TemporarilyViolated => "TemporarilyViolated",
+            Self::Satisfied => "Satisfied",
+        }
+    }
 }
 
 impl Display for ConstraintResultType {

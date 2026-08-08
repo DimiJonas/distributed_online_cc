@@ -158,10 +158,11 @@ pub fn peer_manager_task(
                 }
 
                 PeerManagerMessage::ConnectionReady(sender) => {
+                    log::info!("connection to {} (re)established", peer_address);
                     log::debug!(
-                        "connection to {} ready, flushing {} queued messages",
-                        peer_address,
-                        queue.len()
+                        "flushing {} queued messages to {}",
+                        queue.len(),
+                        peer_address
                     );
                     // reset reconnect delay
                     reconnect_delay = state.config.tcp_channels.reconnect_start_delay;

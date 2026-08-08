@@ -218,7 +218,7 @@ impl ConstraintHandler for TimeStartHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "time start handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

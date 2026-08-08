@@ -12,6 +12,16 @@
 //!       - central: forwarders receive events and forward them to a single central node (node 0) that has all constraints
 //!         forwarder f mirrors distributed node f: it accepts exactly the event ids placed on that node
 //!
+//!   * ROLE ASSIGNMENT (how constraint roles are assigned to nodes)
+//!       - `round-robin` (default): roles are handed out one at a time, so the roles of one constraint spread out
+//!       - `by-event`: every role observing the same event id lands on the same node, so a node monitors exactly
+//!         one activity and holds all constraint roles configured for it
+//!         by default one constraint node is generated per role (round-robin) or per distinct event id (by-event), plus the result sink
+//!         `--nodes` overrides that and the roles wrap around if there are fewer nodes
+//!
+//! `--catalog` picks the constraint catalog: `default` (built-in test catalog) or `sepsis` (sepsis event log)
+//! the sepsis catalog reuses event ids across constraints, so it has to be combined with `--role-assignment by-event`
+//!
 //! A single invocation always emits both a distributed system and a central system built from the same set of constraints
 //! Each system is self contained under its own directory:
 //!
@@ -27,7 +37,7 @@
 //!
 //! The db paths written into the configs are relative to the launch cwd, so the nodes must be started from the same directory `gen-config` was run from
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use online_cc::config::config_builder::NodeConfigBuilder;
 use online_cc::config::node_config::{
     AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset, ForwarderConfig,
@@ -72,7 +82,7 @@ struct GossipParams {
 impl Default for GossipParams {
     fn default() -> Self {
         Self {
-            anti_entropy_interval: Duration::from_secs(4),
+            anti_entropy_interval: Duration::from_secs(1),
             anti_entropy_fanout: 1,
             push_fanout: 4,
         }
@@ -247,11 +257,11 @@ enum Role {
     },
     PrecedenceConsumer,
     PrecedenceProducer {
-        consumer: usize,
+        consumers: Vec<usize>,
     },
     ResponseProducer,
     ResponseConsumer {
-        producer: usize,
+        producers: Vec<usize>,
     },
     SensorCollector {
         attribute_key: SensorAttributeKey,
@@ -260,7 +270,7 @@ enum Role {
         max_value_age: Duration,
     },
     SensorTrigger {
-        collector: usize,
+        collectors: Vec<usize>,
     },
     TimeStart {
         duration: Duration,
@@ -303,31 +313,446 @@ fn suffix(stem: &str, copy: u64) -> String {
     }
 }
 
-// the built-in constraint catalog - one entry per logical constraint
-fn catalog() -> Vec<Template> {
-    // small function to create sensor templates
-    let sensor = |stem: &'static str,
-                  collector_event: &'static str,
-                  trigger_event: &'static str,
-                  attribute_key: &'static str,
-                  threshold: SensorAttributeThreshold,
-                  op: SensorConstraintMode| Template {
-        constraint_stem: stem,
-        roles: vec![
-            (
-                Role::SensorCollector {
-                    attribute_key: attribute_key.to_string(),
-                    value: threshold,
-                    mode: op,
-                    max_value_age: Duration::from_hours(96),
-                },
-                collector_event,
-                None,
-            ),
-            (Role::SensorTrigger { collector: 0 }, trigger_event, None),
-        ],
-    };
+// which built-in catalog gets instantiated
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CatalogKind {
+    /// the built-in default catalog, one constraint per constraint type and one distinct event per constraint per role
+    Default,
+    /// the catalog for the sepsis event log with one node per activity of the log
+    Sepsis,
+}
+impl CatalogKind {
+    fn templates(self) -> Vec<Template> {
+        match self {
+            Self::Default => catalog(),
+            Self::Sepsis => catalog_sepsis(),
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Sepsis => "sepsis",
+        }
+    }
+}
 
+fn catalog_sepsis() -> Vec<Template> {
+    vec![
+        Template {
+            constraint_stem: "time_triage_antibiotics_1h",
+            roles: vec![
+                (
+                    Role::TimeStart {
+                        duration: Duration::from_hours(1),
+                        mode: MinMaxMode::Max,
+                    },
+                    "ER Sepsis Triage",
+                    Some(ResultBufferConfig::Revocable {
+                        duration: Duration::from_mins(20),
+                    }),
+                ),
+                (Role::TimeStop { start: 0 }, "IV Antibiotics", None),
+            ],
+        },
+        Template {
+            constraint_stem: "time_triage_lacticacid_3h",
+            roles: vec![
+                (
+                    Role::TimeStart {
+                        duration: Duration::from_hours(3),
+                        mode: MinMaxMode::Max,
+                    },
+                    "ER Sepsis Triage",
+                    Some(ResultBufferConfig::Revocable {
+                        duration: Duration::from_mins(20),
+                    }),
+                ),
+                (Role::TimeStop { start: 0 }, "LacticAcid", None),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_registration_lab",
+            roles: vec![
+                (Role::PrecedenceConsumer, "LacticAcid", None),
+                (Role::PrecedenceConsumer, "Leucocytes", None),
+                (Role::PrecedenceConsumer, "CRP", None),
+                (
+                    Role::PrecedenceProducer {
+                        consumers: vec![0, 1, 2],
+                    },
+                    "ER Registration",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_sepsis_triage_antibiotics",
+            roles: vec![
+                (Role::PrecedenceConsumer, "IV Antibiotics", None),
+                (
+                    Role::PrecedenceProducer { consumers: vec![0] },
+                    "ER Sepsis Triage",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_sepsis_triage_ivliquid",
+            roles: vec![
+                (Role::PrecedenceConsumer, "IV Liquid", None),
+                (
+                    Role::PrecedenceProducer { consumers: vec![0] },
+                    "ER Sepsis Triage",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "any_release_before_return",
+            roles: vec![
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    "Release A",
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    "Release B",
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    "Release C",
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    "Release D",
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    "Release E",
+                    None,
+                ),
+                (
+                    Role::DistAppearanceTrigger {
+                        mode: MinMaxMode::Min,
+                        frequency: 1,
+                        counters: vec![0, 1, 2, 3, 4],
+                    },
+                    "Return ER",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "response_registration_triage",
+            roles: vec![
+                (Role::ResponseProducer, "ER Registration", None),
+                (
+                    Role::ResponseConsumer { producers: vec![0] },
+                    "ER Triage",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "order_no_triage_after_sepsis_triage",
+            roles: vec![
+                (Role::OrderFirst, "ER Triage", None),
+                (Role::OrderSecond { first: 0 }, "ER Sepsis Triage", None),
+            ],
+        },
+        Template {
+            constraint_stem: "order_no_sepsis_triage_after_admission_NC",
+            roles: vec![
+                (Role::OrderFirst, "ER Sepsis Triage", None),
+                (Role::OrderSecond { first: 0 }, "Admission NC", None),
+            ],
+        },
+        Template {
+            constraint_stem: "order_no_sepsis_triage_after_admission_IC",
+            roles: vec![
+                (Role::OrderFirst, "ER Sepsis Triage", None),
+                (Role::OrderSecond { first: 0 }, "Admission IC", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_ab",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release B", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_ac",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release C", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_ad",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_ae",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_bc",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release C", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_bd",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_be",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_cd",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release C", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_ce",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release C", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+            ],
+        },
+        Template {
+            constraint_stem: "notcoex_release_de",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, "Release D", None),
+                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+            ],
+        },
+        Template {
+            constraint_stem: "card_leucocytes_min1",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Min,
+                        frequency: 1,
+                        reset: AppearanceCounterReset::Zero,
+                    },
+                    "Leucocytes",
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    "Case End",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "card_leucocytes_max9",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Max,
+                        frequency: 9,
+                        reset: AppearanceCounterReset::Zero,
+                    },
+                    "Leucocytes",
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    "Case End",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "card_crp_min1",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Min,
+                        frequency: 1,
+                        reset: AppearanceCounterReset::Zero,
+                    },
+                    "CRP",
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    "Case End",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "card_crp_max8",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Max,
+                        frequency: 8,
+                        reset: AppearanceCounterReset::Zero,
+                    },
+                    "CRP",
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    "Case End",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "normal_lacticacid_at_release_a",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "LacticAcid".to_string(),
+                        value: 3.2,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(408),
+                    },
+                    "LacticAcid",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "Release A",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "normal_lacticacid_at_release_b",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "LacticAcid".to_string(),
+                        value: 3.2,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(408),
+                    },
+                    "LacticAcid",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "Release B",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "normal_lacticacid_at_release_c",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "LacticAcid".to_string(),
+                        value: 3.2,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(408),
+                    },
+                    "LacticAcid",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "Release C",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "normal_lacticacid_at_release_d",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "LacticAcid".to_string(),
+                        value: 3.2,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(408),
+                    },
+                    "LacticAcid",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "Release D",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "normal_lacticacid_at_release_e",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "LacticAcid".to_string(),
+                        value: 3.2,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(408),
+                    },
+                    "LacticAcid",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "Release E",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "case_end",
+            roles: vec![(Role::EndActivity, "Case End", None)],
+        },
+    ]
+}
+
+// default test catalog
+fn catalog() -> Vec<Template> {
     vec![
         Template {
             constraint_stem: "appearance_test",
@@ -403,7 +828,7 @@ fn catalog() -> Vec<Template> {
             roles: vec![
                 (Role::PrecedenceConsumer, "precedence_consumer_event", None),
                 (
-                    Role::PrecedenceProducer { consumer: 0 },
+                    Role::PrecedenceProducer { consumers: vec![0] },
                     "precedence_producer_event",
                     None,
                 ),
@@ -414,36 +839,78 @@ fn catalog() -> Vec<Template> {
             roles: vec![
                 (Role::ResponseProducer, "response_producer_event", None),
                 (
-                    Role::ResponseConsumer { producer: 0 },
+                    Role::ResponseConsumer { producers: vec![0] },
                     "response_consumer_event",
                     None,
                 ),
             ],
         },
-        sensor(
-            "sensor_gt_test",
-            "sensor_gt_collector_event",
-            "sensor_gt_trigger_event",
-            "value_gt",
-            5.0,
-            SensorConstraintMode::Gt,
-        ),
-        sensor(
-            "sensor_lt_test",
-            "sensor_lt_collector_event",
-            "sensor_lt_trigger_event",
-            "value_lt",
-            15.0,
-            SensorConstraintMode::Lt,
-        ),
-        sensor(
-            "sensor_gte_test",
-            "sensor_gte_collector_event",
-            "sensor_gte_trigger_event",
-            "value_gte",
-            8.0,
-            SensorConstraintMode::Gte,
-        ),
+        Template {
+            constraint_stem: "sensor_gt_test",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "value_gt".to_string(),
+                        value: 5.0,
+                        mode: SensorConstraintMode::Gt,
+                        max_value_age: Duration::from_hours(96),
+                    },
+                    "sensor_gt_collector_event",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "sensor_gt_trigger_event",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "sensor_lt_test",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "value_lt".to_string(),
+                        value: 15.0,
+                        mode: SensorConstraintMode::Lt,
+                        max_value_age: Duration::from_hours(96),
+                    },
+                    "sensor_lt_collector_event",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "sensor_lt_trigger_event",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "sensor_gte_test",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "value_gte".to_string(),
+                        value: 8.0,
+                        mode: SensorConstraintMode::Gte,
+                        max_value_age: Duration::from_hours(96),
+                    },
+                    "sensor_gte_collector_event",
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    "sensor_gte_trigger_event",
+                    None,
+                ),
+            ],
+        },
         Template {
             constraint_stem: "time_test",
             roles: vec![
@@ -487,8 +954,8 @@ fn instantiate_role(kind: &Role, copy: u64) -> Role {
 }
 
 // instantiate the catalog `repeat` times into concrete instances
-fn build_instances(repeat: u64) -> Vec<Instance> {
-    let templates = catalog();
+fn build_instances(repeat: u64, catalog_kind: CatalogKind) -> Vec<Instance> {
+    let templates = catalog_kind.templates();
     let mut repeated_catalog = Vec::new();
     for copy in 0..repeat {
         for template in &templates {
@@ -575,19 +1042,23 @@ fn to_constraint(
             constraint_id,
             event_id,
         },
-        Role::PrecedenceProducer { consumer } => ConstraintConfig::PrecedenceProducer {
+        Role::PrecedenceProducer {
+            consumers: consumer,
+        } => ConstraintConfig::PrecedenceProducer {
             constraint_id,
             event_id,
-            consumer_peers: vec![peer(*consumer)],
+            consumer_peers: consumer.iter().map(|&i| peer(i)).collect(),
         },
         Role::ResponseProducer => ConstraintConfig::ResponseProducer {
             constraint_id,
             event_id,
         },
-        Role::ResponseConsumer { producer } => ConstraintConfig::ResponseConsumer {
+        Role::ResponseConsumer {
+            producers: producer,
+        } => ConstraintConfig::ResponseConsumer {
             constraint_id,
             event_id,
-            producer_peers: vec![peer(*producer)],
+            producer_peers: producer.iter().map(|&i| peer(i)).collect(),
         },
         Role::SensorCollector {
             attribute_key,
@@ -602,10 +1073,12 @@ fn to_constraint(
             mode: mode.clone(),
             max_value_age: *max_value_age,
         },
-        Role::SensorTrigger { collector } => ConstraintConfig::SensorTrigger {
+        Role::SensorTrigger {
+            collectors: collector,
+        } => ConstraintConfig::SensorTrigger {
             constraint_id,
             event_id,
-            collector_peers: vec![peer(*collector)],
+            collector_peers: collector.iter().map(|&i| peer(i)).collect(),
         },
         Role::TimeStart { duration, mode } => ConstraintConfig::TimeStart {
             constraint_id,
@@ -626,13 +1099,55 @@ fn to_constraint(
 }
 
 // -------------------------------------------
-// placement of roles onto distributed nodes
+// assignment of roles onto distributed nodes
 // -------------------------------------------
 
-// for each instance, the 0-based slot that has the result sink
-// in distributed mode roles are round-robined across the non-sink nodes
+// how slots are handed out depends on `RoleAssignment`
 // slots map to node ids via `dist_node_of` so the forwarders mirror the distributed nodes in which events they accept/expect
 type Layout = Vec<Vec<u64>>;
+
+// how constraint roles are assigned to the constraint nodes
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RoleAssignment {
+    /// hand out roles one at a time, round robin over the nodes (default)
+    RoundRobin,
+    /// give every node one event: all roles observing the same event id land on the same node
+    ByEvent,
+}
+impl RoleAssignment {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::ByEvent => "by-event",
+        }
+    }
+
+    // slots needed so nothing has to share a node: one per role, or one per distinct event
+    fn units(self, instances: &[Instance]) -> u64 {
+        match self {
+            Self::RoundRobin => instances.iter().map(|inst| inst.roles.len() as u64).sum(),
+            Self::ByEvent => distinct_events(instances).len() as u64,
+        }
+    }
+
+    fn unit_name(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "roles",
+            Self::ByEvent => "distinct events",
+        }
+    }
+
+    fn layout(self, instances: &[Instance], role_node_count: u64) -> Layout {
+        assert!(
+            role_node_count > 0,
+            "need at least one node to host constraints"
+        );
+        match self {
+            Self::RoundRobin => round_robin_layout(instances, role_node_count),
+            Self::ByEvent => event_layout(instances, role_node_count),
+        }
+    }
+}
 
 // layout slot -> distributed node id (node 0 is the sink)
 fn dist_node_of(slot: u64) -> u64 {
@@ -646,11 +1161,10 @@ fn mirror_forwarder_of(slot: u64, forwarders: u64) -> u64 {
     (slot % forwarders) + 1
 }
 
-fn spread_layout(instances: &[Instance], role_node_count: u64) -> Layout {
-    assert!(
-        role_node_count > 0,
-        "need at least one node to host constraints"
-    );
+// roles are handed out round robin, so consecutive roles of one constraint land on different nodes
+// note that this requires a catalog in which every event id belongs to exactly one role, otherwise the event uniqueness check in `main` fails
+// use `--role-assignment by-event` for catalogs that reuse event ids
+fn round_robin_layout(instances: &[Instance], role_node_count: u64) -> Layout {
     let mut next = 0u64;
     instances
         .iter()
@@ -662,6 +1176,48 @@ fn spread_layout(instances: &[Instance], role_node_count: u64) -> Layout {
                     next += 1;
                     node
                 })
+                .collect()
+        })
+        .collect()
+}
+
+// the distinct event ids of the catalog in first-appearance order
+fn distinct_events(instances: &[Instance]) -> Vec<EventId> {
+    let mut seen = BTreeSet::new();
+    let mut events = Vec::new();
+    for instance in instances {
+        for role in &instance.roles {
+            if seen.insert(role.event_id.clone()) {
+                events.push(role.event_id.clone());
+            }
+        }
+    }
+    events
+}
+
+// event id -> slot, handed out round robin over the constraint nodes
+// with `role_node_count` >= number of events every node monitors exactly one activity
+// with fewer nodes the events wrap around and a node monitors several activities
+fn event_slots(instances: &[Instance], role_node_count: u64) -> Vec<(EventId, u64)> {
+    distinct_events(instances)
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| (event, index as u64 % role_node_count))
+        .collect()
+}
+
+// place the roles by event: a node receives one event and gets every constraint role configured for that event
+fn event_layout(instances: &[Instance], role_node_count: u64) -> Layout {
+    let slot_of: BTreeMap<EventId, u64> = event_slots(instances, role_node_count)
+        .into_iter()
+        .collect();
+    instances
+        .iter()
+        .map(|instance| {
+            instance
+                .roles
+                .iter()
+                .map(|role| slot_of[&role.event_id])
                 .collect()
         })
         .collect()
@@ -703,7 +1259,7 @@ fn emit_distributed(
             .overlay_listen(addressing.listen_overlay(node_id))
             .initial_peers(peers)
             .case_end_retention_period(common.case_end_retention)
-            .default_result_buffer(ResultBufferConfig::GracePeriod {
+            .default_result_buffer(ResultBufferConfig::Revocable {
                 duration: Duration::from_secs(10),
             })
             .unix_socket(format!("/tmp/event_listener_{node_id}.sock"))
@@ -777,7 +1333,7 @@ fn emit_central(
         .tcp_listen(addressing.listen_conformance(central_id))
         .unix_socket("/tmp/event_listener_central.sock")
         .log_file("central-node.log")
-        .default_result_buffer(ResultBufferConfig::GracePeriod {
+        .default_result_buffer(ResultBufferConfig::Revocable {
             duration: Duration::from_secs(10),
         })
         .result_sink(ResultSinkConfig {
@@ -788,7 +1344,7 @@ fn emit_central(
         })
         .result_sink_addresses(vec![central_address]);
 
-    // per-forwarder filter inputs, mirroring the distributed placement:
+    // per-forwarder filter inputs, mirroring the distributed role assignment:
     // forwarder f accepts the events of the roles that the `layout` puts on distributed node f
     // BTreeMap/BTreeSet keep the emitted configs deterministic
     let mut forwarder_event_ids: BTreeMap<u64, BTreeSet<EventId>> = BTreeMap::new();
@@ -865,9 +1421,25 @@ fn emit_central(
 #[command(about = "Generate comparable distributed + central conformance-checker configs")]
 struct Args {
     /// total nodes in the distributed system (constraint nodes + 1 sink)
-    /// 23 nodes because 22 constraint roles + 1 sink
-    #[arg(short, long, default_value_t = 23)]
-    nodes: u64,
+    /// default: one constraint node per role assignment unit + 1 sink
+    /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
+    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)
+    #[arg(short, long)]
+    nodes: Option<u64>,
+
+    /// how constraint roles are assigned to nodes: `round-robin` one role at a time, or
+    /// `by-event` to give each node one event with all the constraint roles configured for it
+    #[arg(long, value_enum, default_value_t = RoleAssignment::RoundRobin)]
+    role_assignment: RoleAssignment,
+
+    /// which constraint catalog to instantiate: `default` for the built-in test catalog, or
+    /// `sepsis` for the sepsis event log catalog (reuses event ids across constraints so it needs `--role-assignment by-event`)
+    #[arg(long, value_enum, default_value_t = CatalogKind::Default)]
+    catalog: CatalogKind,
+
+    /// print which events and constraint roles each node ends up with
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    show_assignment: bool,
 
     // instantiate the whole constraint catalog this many times (spreads more constraints across the system)
     #[arg(long, default_value_t = 1)]
@@ -983,28 +1555,39 @@ fn main() {
     let addressing = make_addressing(args.conformance_port);
     let central_addressing = make_addressing(args.central_port);
 
-    // node counts
+    // build the constraints first: the default node count follows from the catalog and the role assignment
+    let catalog_kind = args.catalog;
+    let role_assignment = args.role_assignment;
+    let instances = build_instances(args.repeat, catalog_kind);
+    let total_roles: usize = instances.iter().map(|instance| instance.roles.len()).sum();
+    let units = role_assignment.units(&instances); // roles, or distinct events
+
+    // node counts (default: one constraint node per role assignment unit + the result sink)
     let dist_nodes = match addressing.capacity() {
         Some(cap) => cap, // spread: derive from host count
-        None => args.nodes,
+        None => args.nodes.unwrap_or(units + 1),
     };
     assert!(
         dist_nodes >= 2,
         "need >=2 distributed nodes (>=1 constraint node + 1 sink)"
     );
-    let role_nodes = dist_nodes - 1; // last node is the sink
+    let role_nodes = dist_nodes - 1; // node 0 is the sink
     let forwarders = args.forwarders.unwrap_or(dist_nodes - 1);
     assert!(forwarders >= 1, "need at least one forwarder");
 
-    // spread constraints
-    let instances = build_instances(args.repeat);
-    let total_roles: usize = instances.iter().map(|instance| instance.roles.len()).sum();
-    let layout = spread_layout(&instances, role_nodes);
+    let layout = role_assignment.layout(&instances, role_nodes);
 
-    if (role_nodes as usize) > total_roles {
+    if role_nodes > units {
         eprintln!(
-            "note: {role_nodes} constraint nodes but only {total_roles} roles - {} nodes will have no constraints",
-            role_nodes as usize - total_roles
+            "note: {role_nodes} constraint nodes but only {units} {} - {} nodes will have no constraints",
+            role_assignment.unit_name(),
+            role_nodes - units
+        );
+    } else if role_nodes < units {
+        eprintln!(
+            "note: {units} {} but only {role_nodes} constraint nodes - they wrap around, so some nodes \
+             get more than one",
+            role_assignment.unit_name()
         );
     }
     if forwarders != role_nodes {
@@ -1022,9 +1605,13 @@ fn main() {
                 let slot = layout[instance_index][role_index];
                 if let Some(&previous) = event_slot.get(role.event_id.as_str()) {
                     assert_eq!(
-                        previous, slot,
-                        "event_id '{}' is placed on two different nodes - every event id in the catalog must belong to exactly one role (or all its roles must co-locate)",
-                        role.event_id
+                        previous,
+                        slot,
+                        "event_id '{}' is placed on two different nodes - with `--role-assignment {}` every \
+                         event id in the catalog must belong to exactly one role \
+                         use `--role-assignment by-event` for catalogs that reuse event ids across constraints",
+                        role.event_id,
+                        role_assignment.name()
                     );
                 } else {
                     event_slot.insert(role.event_id.as_str(), slot);
@@ -1090,10 +1677,44 @@ fn main() {
         args.out_dir
     );
     println!(
-        "  distributed: {dist_nodes} nodes (sink on node 0 + {role_nodes} constraint nodes), {total_roles} constraints"
+        "  catalog:     {} x{} - {total_roles} roles over {} distinct events, assigned {}",
+        catalog_kind.name(),
+        args.repeat,
+        distinct_events(&instances).len(),
+        role_assignment.name()
     );
     println!(
-        "  central:     {} nodes (central on node 0 + {forwarders} forwarders), {total_roles} constraints",
+        "  distributed: {dist_nodes} nodes (sink on node 0 + {role_nodes} constraint nodes), {total_roles} constraint roles"
+    );
+    println!(
+        "  central:     {} nodes (central on node 0 + {forwarders} forwarders), {total_roles} constraint roles",
         forwarders + 1
     );
+
+    if args.show_assignment {
+        // node -> (accepted events, hosted constraint roles)
+        let mut per_node: BTreeMap<u64, (BTreeSet<&str>, Vec<&str>)> = BTreeMap::new();
+        for slot in 0..role_nodes {
+            per_node.insert(dist_node_of(slot), (BTreeSet::new(), Vec::new()));
+        }
+        for (instance_index, instance) in instances.iter().enumerate() {
+            for (role_index, role) in instance.roles.iter().enumerate() {
+                let entry = per_node
+                    .get_mut(&dist_node_of(layout[instance_index][role_index]))
+                    .unwrap();
+                entry.0.insert(role.event_id.as_str());
+                entry.1.push(role.constraint_id.as_str());
+            }
+        }
+        println!("  role assignment ({}):", role_assignment.name());
+        for (node_id, (events, constraints)) in &per_node {
+            let forwarder = mirror_forwarder_of(node_id - 1, forwarders);
+            println!(
+                "    node {node_id:>3} / forwarder {forwarder:>3}  events [{}]  {} roles [{}]",
+                events.iter().copied().collect::<Vec<_>>().join(", "),
+                constraints.len(),
+                constraints.join(", ")
+            );
+        }
+    }
 }

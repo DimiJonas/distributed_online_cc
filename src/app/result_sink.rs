@@ -273,7 +273,7 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
         "INSERT OR IGNORE INTO constraints (constraint_id, constraint_type, first_seen_at) VALUES (?1, ?2, ?3)",
         rusqlite::params![
             result_message.constraint_id,
-            result_message.constraint_type.to_string(),
+            result_message.constraint_type.as_db_str(),
             created_at
         ],
     )?;
@@ -286,7 +286,7 @@ fn insert_result(conn: &Connection, result_message: &CCResultMessage) -> Result<
         rusqlite::params![
             result_message.case_id,
             result_message.constraint_id,
-            result_message.result.to_string(),
+            result_message.result.as_db_str(),
             result_message.info,
             created_at,
             inserted_at,

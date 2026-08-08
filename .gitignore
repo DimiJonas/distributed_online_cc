@@ -1,5 +1,7 @@
 /target
 /run
+/sepsis
+/traffic_fines
 
 .vscode
 *.zip

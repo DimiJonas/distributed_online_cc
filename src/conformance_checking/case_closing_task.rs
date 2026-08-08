@@ -10,13 +10,17 @@ use crate::{state::app_state::AppState, types::CaseId};
 /// sleeps for another period (this period resembles the time the case is still remembered for so an even later event does not open it again)
 /// then forgets about the case by removing it from case state
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
+    // TODO: set case to 'ended' in the case state map
     for handler in state.handlers.all() {
         handler.handle_case_end(&case_id, state.clone()).await;
     }
 
     sleep(state.config.case_end_grace_period).await;
 
-    log::info!("closing case {} after case end grace period", case_id);
+    log::info!(
+        "closing case {} after case end grace period and cleaning up state",
+        case_id
+    );
     {
         let mut case_state = state.case_state.lock().unwrap();
         case_state.close_case(case_id.clone());
@@ -26,14 +30,16 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
         result_store.remove_case(&case_id);
     }
 
-    // TODO: possibly lean up state here instead of calling handler methods
     for handler in state.handlers.all() {
         handler.clean_up_state(&case_id, state.clone()).await;
     }
 
     sleep(state.config.case_end_retention_period).await;
 
-    log::debug!("forgetting case {}", case_id);
+    log::debug!(
+        "forgetting case {} after case end retention period",
+        case_id
+    );
     {
         let mut case_state = state.case_state.lock().unwrap();
         case_state.remove(&case_id);

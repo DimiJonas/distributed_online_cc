@@ -363,7 +363,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "not coexistence a handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
@@ -759,7 +759,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "not coexistence b handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id

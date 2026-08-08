@@ -17,7 +17,7 @@ use crate::{
     state::app_state::AppState,
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        HandlerIndex, RequestId, SensorAttributeThreshold, TracedEvent,
+        HandlerIndex, RequestId, SensorAttributeThreshold, Token, TracedEvent,
     },
 };
 
@@ -203,6 +203,21 @@ impl ConstraintHandler for SensorCollectorHandler {
             )
             .await;
         };
+
+        // record that value was checked via creating a meta token for better result information
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.insert_meta_token(
+                Token::new(
+                    message.case_id.clone(),
+                    self.constraint_id.clone(),
+                    ConstraintType::Sensor,
+                    None,
+                    state.config.node_id,
+                ),
+                self.index,
+            );
+        }
     }
 
     async fn handle_case_end(&self, case_id: &CaseId, state: AppState) {
@@ -220,12 +235,20 @@ impl ConstraintHandler for SensorCollectorHandler {
         };
         if !result_exists {
             // produce result because none was emitted yet
+            let info_str = {
+                let meta_tokens = state.meta_token_store.lock().unwrap();
+                if meta_tokens.contains_meta_token(case_id, self.index) {
+                    "condition was met"
+                } else {
+                    "sensor trigger event never happened"
+                }
+            };
             emit_result(
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
                 ConstraintResultType::Satisfied,
-                "condition was met or sensor trigger event never happened".to_string(),
+                info_str.to_string(),
                 state.clone(),
                 ResultTrigger::CaseEnd,
                 None,
@@ -235,7 +258,7 @@ impl ConstraintHandler for SensorCollectorHandler {
     }
 
     async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
-        log::info!(
+        log::debug!(
             "sensor collector handler: clean up state for ({}/{})",
             case_id,
             self.constraint_id
@@ -245,6 +268,11 @@ impl ConstraintHandler for SensorCollectorHandler {
         {
             let mut sensor_events = state.sensor_events.lock().unwrap();
             sensor_events.remove_case(case_id);
+        }
+        // remove meta token
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }

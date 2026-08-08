@@ -110,12 +110,7 @@ impl NodeConfig {
     pub fn build_constraint_list(&self) -> Vec<(ConstraintId, ConstraintType)> {
         self.constraints
             .iter()
-            .map(|c| {
-                (
-                    c.constraint_id().to_string().to_lowercase(),
-                    c.constraint_type(),
-                )
-            })
+            .map(|c| (c.constraint_id().to_string(), c.constraint_type()))
             .collect()
     }
 
@@ -131,7 +126,7 @@ impl NodeConfig {
             HashSet::from(["concept:name".to_string(), "time:timestamp".to_string()]);
         attributes.extend(self.constraints.iter().filter_map(|c| {
             if let ConstraintConfig::SensorCollector { attribute_key, .. } = c {
-                Some(attribute_key.clone().to_lowercase())
+                Some(attribute_key.clone())
             } else {
                 None
             }
@@ -148,12 +143,12 @@ impl NodeConfig {
         let mut events: HashSet<EventId> = self
             .constraints
             .iter()
-            .map(|c| c.event_id().to_string().to_lowercase())
+            .map(|c| c.event_id().to_string())
             .collect();
         if let Some(forwarder_config) = &self.forwarder
             && let Some(event_list) = &forwarder_config.include_event_ids
         {
-            events.extend(event_list.iter().map(|id| id.to_lowercase()));
+            events.extend(event_list.iter().cloned());
         }
         events
     }
