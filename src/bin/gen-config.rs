@@ -1258,7 +1258,7 @@ fn emit_distributed(
             .tcp_listen(addressing.listen_conformance(node_id))
             .overlay_listen(addressing.listen_overlay(node_id))
             .initial_peers(peers)
-            .case_end_retention_period(common.case_end_retention)
+            .case_end_gossip_ttl(common.case_end_retention)
             .default_result_buffer(ResultBufferConfig::Revocable {
                 duration: Duration::from_secs(10),
             })

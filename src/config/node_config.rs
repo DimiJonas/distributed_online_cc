@@ -24,11 +24,10 @@ pub struct NodeConfig {
     pub loopback_queue_size: usize,
     #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
     pub case_end_grace_period: Duration,
-    #[serde(
-        with = "humantime_serde",
-        default = "default_case_end_retention_period"
-    )]
-    pub case_end_retention_period: Duration,
+    /// how long a case end keeps being gossiped (also used to derive how long a closed case is kept in memory)
+    /// should be sized against gossip convergence
+    #[serde(with = "humantime_serde", default = "default_case_end_gossip_ttl")]
+    pub case_end_gossip_ttl: Duration,
     pub result_sink_addresses: Option<Vec<SocketAddr>>,
     #[serde(default)]
     pub result_sink: Option<ResultSinkConfig>,
@@ -151,6 +150,11 @@ impl NodeConfig {
             events.extend(event_list.iter().cloned());
         }
         events
+    }
+
+    /// how long this node remembers having closed a case
+    pub fn case_end_tombstone_ttl(&self) -> Duration {
+        self.case_end_grace_period + 2 * self.case_end_gossip_ttl
     }
 }
 
@@ -615,7 +619,7 @@ fn default_case_end_grace_period() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_case_end_retention_period() -> Duration {
+fn default_case_end_gossip_ttl() -> Duration {
     Duration::from_secs(30)
 }
 

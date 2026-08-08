@@ -99,7 +99,6 @@ pub async fn initiate_push_gossip(data: Vec<CaseEnd>, state: AppState) {
 }
 
 async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
-    let now = Utc::now();
     let payload_name = message.payload.name();
     match message.payload {
         CEGossipPayload::Push(data) => {
@@ -125,6 +124,7 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
                 "handle_inbound_message: received anti entropy digest: {}",
                 their_digest
             );
+            let now = Utc::now();
             let (my_digest, live) = {
                 let ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
                 (ce_cache.digest(now), ce_cache.live_entries(now))

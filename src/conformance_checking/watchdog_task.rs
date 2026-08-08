@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -8,21 +7,24 @@ use crate::{
     conformance_checking::result_emitter::emit_result,
     measurement::record::ResultTrigger,
     state::app_state::AppState,
-    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, TokenId},
+    types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, TokenId},
 };
 
+/// waits for a time constraints deadline to pass in event time (based on stream clock)
+#[allow(clippy::too_many_arguments)]
 pub async fn watchdog_task(
     cancel_token: CancellationToken,
     token_id: TokenId,
     case_id: CaseId,
     constraint_id: ConstraintId,
+    deadline: EventTime,
     duration: Duration,
     mode: MinMaxMode,
     state: AppState,
 ) {
     tokio::select! {
-        _ = sleep(duration) => {
-            // timeout - stop event never arrived
+        _ = state.stream_clock.wait_for(deadline) => {
+            // the stream time moved past the deadline - stop event never arrived in time
 
             // remove cancel token (leave parent cancel token unaffected)
             {
@@ -40,8 +42,8 @@ pub async fn watchdog_task(
             match mode {
                 MinMaxMode::Max => {
                     log::warn!(
-                        "time watchdog: MAX constraint {}/case {} VIOLATED because token {} timed out after {:?}",
-                        constraint_id, case_id, token_id, duration
+                        "time watchdog: MAX constraint {}/case {} VIOLATED because token {} passed its deadline {} (limit {:?})",
+                        constraint_id, case_id, token_id, deadline, duration
                     );
                     emit_result(
                         &case_id,
@@ -49,8 +51,8 @@ pub async fn watchdog_task(
                         ConstraintType::Time,
                         ConstraintResultType::Violated,
                         format!(
-                            "TimerMax: timer ran out after {:?} before stop event arrived (token {})",
-                            duration, token_id
+                            "TimerMax: stream passed the deadline {} ({:?} after the start event) before the stop event arrived (token {})",
+                            deadline, duration, token_id
                         ),
                         state.clone(),
                         ResultTrigger::Timer,
@@ -60,8 +62,8 @@ pub async fn watchdog_task(
                 }
                 MinMaxMode::Min => {
                     log::info!(
-                        "time watchdog: MIN constraint {}/case {}: token {} timed out",
-                        constraint_id, case_id, token_id
+                        "time watchdog: MIN constraint {}/case {}: token {} passed its deadline {}",
+                        constraint_id, case_id, token_id, deadline
                     );
                     emit_result(
                         &case_id,
@@ -69,8 +71,8 @@ pub async fn watchdog_task(
                         ConstraintType::Time,
                         ConstraintResultType::Satisfied,
                         format!(
-                            "TimerMin: timer ran out after {:?}; stop event never arrived (token {})",
-                            duration, token_id
+                            "TimerMin: stream passed {} ({:?} after the start event); stop event never arrived (token {})",
+                            deadline, duration, token_id
                         ),
                         state.clone(),
                         ResultTrigger::Timer,
@@ -82,7 +84,7 @@ pub async fn watchdog_task(
         }
 
         _ = cancel_token.cancelled() => {
-            // handle_message cancelled watchdog because timer stop event arrived
+            // handle_message cancelled the watchdog because the timer stop event or case end event arrived
             log::info!(
                 "time watchdog: cancelled for token {} ({}/{})",
                 token_id, constraint_id, case_id

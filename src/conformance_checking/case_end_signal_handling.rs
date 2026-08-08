@@ -5,7 +5,7 @@ use crate::{
     conformance_checking::case_closing_task::case_closing_task,
     measurement::{api::case_end_seen, record::CaseEndSource},
     state::{app_state::AppState, case_end_gossip_cache::MergeResult},
-    types::{CaseEnd, CaseId},
+    types::CaseEnd,
 };
 
 pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
@@ -19,8 +19,8 @@ pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
             handle_case_end_info(state.clone(), vec![case_end], CaseEndSource::EndEvent).await;
         }
         ConfigMode::Central => {
-            // spawn case closing task directly
-            spawn_case_closing_task(state.clone(), case_end.case_id.clone());
+            // no gossip - spawn case closing task directly
+            spawn_case_closing_task(state.clone(), &case_end);
         }
     }
 }
@@ -30,22 +30,37 @@ pub async fn handle_case_end_info(
     case_end_info: Vec<CaseEnd>,
     source: CaseEndSource,
 ) {
-    let now = Utc::now();
+    // update stream clock because new event time was observed
+    state
+        .stream_clock
+        .advance_to_max(case_end_info.iter().map(|ce| ce.timestamp));
+
     let merge_result = {
-        // update cache if needed
+        // the ended case record is the deduplication rule that needs to be considered at the merge
+        let case_state = state.case_state.lock().unwrap();
         let mut ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
-        ce_cache.merge(case_end_info, now)
+        ce_cache.merge(case_end_info, Utc::now(), |case_id| {
+            case_state.has_ended_record(case_id)
+        })
     };
     log::debug!("merge result: {:?}", merge_result);
     apply_merge(merge_result, state.clone(), source).await;
 }
 
 async fn apply_merge(res: MergeResult, state: AppState, source: CaseEndSource) {
+    if res.straggler_count > 0 {
+        log::debug!(
+            "case end signal handling: ignored {} straggler case end(s) for already closed cases",
+            res.straggler_count
+        );
+    }
+
     // spawn a case closing task for newly observed case ends
     for case_end in &res.new {
         // record case end
         match source {
             CaseEndSource::PushGossip | CaseEndSource::AntiEntropy => {
+                // record case end for measurements
                 case_end_seen(case_end.case_id.clone(), source);
             }
             CaseEndSource::EndEvent => {
@@ -53,8 +68,9 @@ async fn apply_merge(res: MergeResult, state: AppState, source: CaseEndSource) {
             }
         }
 
-        spawn_case_closing_task(state.clone(), case_end.case_id.clone());
+        spawn_case_closing_task(state.clone(), case_end);
     }
+
     // spread gossip of new and updated case ends
     let mut to_push = res.new;
     to_push.extend(res.updated);
@@ -63,18 +79,21 @@ async fn apply_merge(res: MergeResult, state: AppState, source: CaseEndSource) {
     }
 }
 
-fn spawn_case_closing_task(state: AppState, case_id: CaseId) {
-    // dont spawn a case closing task if the case is already closed (a case closing task already ran)
+fn spawn_case_closing_task(state: AppState, case_end: &CaseEnd) {
+    let case_id = case_end.case_id.clone();
+
+    // check if case end already known in which case a case closing task was already spawned previously
     {
-        let case_state = state.case_state.lock().unwrap();
-        if case_state.is_closed(&case_id) {
+        let mut case_state = state.case_state.lock().unwrap();
+        if !case_state.mark_ended(&case_id, case_end.timestamp, Utc::now()) {
             log::debug!(
-                "case end signal handling: case {} is already closed; not spawning another closing task",
+                "case end signal handling: case {} has already ended; not spawning another closing task",
                 case_id
             );
             return;
         }
     }
+
     // spawn case closing task
     let handle = tokio::spawn(case_closing_task(state.clone(), case_id.clone()));
     // spawn a task that logs the error if the case closing task panics

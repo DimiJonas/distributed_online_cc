@@ -158,8 +158,8 @@ impl NodeConfigBuilder {
         self.config.case_end_grace_period = p;
         self
     }
-    pub fn case_end_retention_period(mut self, p: Duration) -> Self {
-        self.config.case_end_retention_period = p;
+    pub fn case_end_gossip_ttl(mut self, p: Duration) -> Self {
+        self.config.case_end_gossip_ttl = p;
         self
     }
     pub fn default_result_buffer(mut self, b: ResultBufferConfig) -> Self {
@@ -231,7 +231,7 @@ pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
         result_sink_addresses: None,
         result_sink: None,
         case_end_grace_period: Duration::from_secs(10),
-        case_end_retention_period: Duration::from_secs(15),
+        case_end_gossip_ttl: Duration::from_secs(15),
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_mpsc_channel_size: 256,

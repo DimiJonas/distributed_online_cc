@@ -5,12 +5,9 @@ use crate::{state::app_state::AppState, types::CaseId};
 /// this task handles case end
 ///
 /// calls case end on constraint handlers which makes sure each constraint emitted at least 1 result
-/// then sleeps for a configured amount of time if case late events still come in
+/// then sleeps for the grace period in case late events still come in
 /// then closes the case (which blocks further result emitting) and calls clean up state methods on constraint handlers
-/// sleeps for another period (this period resembles the time the case is still remembered for so an even later event does not open it again)
-/// then forgets about the case by removing it from case state
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
-    // TODO: set case to 'ended' in the case state map
     for handler in state.handlers.all() {
         handler.handle_case_end(&case_id, state.clone()).await;
     }
@@ -32,17 +29,6 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
 
     for handler in state.handlers.all() {
         handler.clean_up_state(&case_id, state.clone()).await;
-    }
-
-    sleep(state.config.case_end_retention_period).await;
-
-    log::debug!(
-        "forgetting case {} after case end retention period",
-        case_id
-    );
-    {
-        let mut case_state = state.case_state.lock().unwrap();
-        case_state.remove(&case_id);
     }
 }
 
@@ -114,7 +100,7 @@ mod tests {
     ) -> AppState {
         let mut config = make_config_with_port(0);
         config.case_end_grace_period = grace_period;
-        config.case_end_retention_period = propagation_ttl;
+        config.case_end_gossip_ttl = propagation_ttl;
         // No ConstraintConfig variant maps to a test mock, so build the
         // base state from config (empty handler registry)...
         let mut state = make_state_from_config(config);
@@ -181,7 +167,6 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["h1:handle_case_end"]);
 
         advance_and_settle(Duration::from_secs(10)).await; // grace period
-        advance_and_settle(Duration::from_secs(15)).await; // retention period
         handle.await.unwrap();
     }
 
@@ -208,12 +193,11 @@ mod tests {
         assert!(state.case_state.lock().unwrap().is_closed(&case_id));
 
         // Drive to completion so the spawned task doesn't outlive the test.
-        advance_and_settle(Duration::from_secs(15)).await;
         handle.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn clean_up_state_runs_after_close_and_before_retention_sleep() {
+    async fn clean_up_state_runs_after_close() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let state = make_state_with_recording_handler(
             Duration::from_secs(10),
@@ -233,15 +217,19 @@ mod tests {
             ["h1:handle_case_end", "h1:clean_up_state"]
         );
         assert!(state.case_state.lock().unwrap().is_closed(&case_id));
-        // Not removed yet — retention period hasn't elapsed.
+        // Still remembered — only the case janitor forgets, on the stream clock.
         assert!(state.case_state.lock().unwrap().has_case(&case_id));
 
-        advance_and_settle(Duration::from_secs(15)).await;
         handle.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
-    async fn removes_case_only_after_retention_period() {
+    async fn does_not_forget_the_case_itself() {
+        // forgetting moved out of this task and into the case janitor, which
+        // decides on the stream clock rather than a per-case wall-clock timer.
+        // that is the whole point of the change: a local timer expired the "this
+        // case ended" record at a moment unrelated to what peers were doing, so a
+        // re-gossiped case end could start this task all over again.
         let calls = Arc::new(Mutex::new(Vec::new()));
         let state = make_state_with_recording_handler(
             Duration::from_secs(10),
@@ -250,25 +238,33 @@ mod tests {
         );
         let case_id: CaseId = "case-1".to_string();
         state.case_state.lock().unwrap().open_case(case_id.clone());
+        state.case_state.lock().unwrap().mark_ended(
+            &case_id,
+            chrono::Utc::now(),
+            chrono::Utc::now(),
+        );
 
         let handle = tokio::spawn(case_closing_task(state.clone(), case_id.clone()));
 
         advance_and_settle(Duration::from_secs(10)).await; // grace period
-        assert!(state.case_state.lock().unwrap().has_case(&case_id));
+        handle.await.unwrap();
 
-        advance_and_settle(Duration::from_secs(14)).await; // not quite retention
+        assert!(
+            state.case_state.lock().unwrap().is_closed(&case_id),
+            "the case is closed"
+        );
         assert!(
             state.case_state.lock().unwrap().has_case(&case_id),
-            "case should still be remembered just before retention period elapses"
+            "but not forgotten - only the janitor forgets"
         );
-
-        advance_and_settle(Duration::from_secs(2)).await; // crosses retention boundary
         assert!(
-            !state.case_state.lock().unwrap().has_case(&case_id),
-            "case should be forgotten once retention period elapses"
+            state.case_state.lock().unwrap().has_ended_record(&case_id),
+            "and the ended record survives, so a re-gossiped case end is not news"
         );
 
-        handle.await.unwrap();
+        // long after any old retention period would have elapsed
+        advance_and_settle(Duration::from_secs(600)).await;
+        assert!(state.case_state.lock().unwrap().has_ended_record(&case_id));
     }
 
     #[tokio::test(start_paused = true)]
@@ -307,7 +303,6 @@ mod tests {
             "result store should already be cleared for this case after the grace period"
         );
 
-        advance_and_settle(Duration::from_secs(15)).await;
         handle.await.unwrap();
     }
 }

@@ -70,12 +70,26 @@ impl ConstraintHandler for TimeStartHandler {
             cancel_tokens.get_or_create_cancel_token(&event.case_id, &self.constraint_id, token_id)
         };
 
+        // deadline in event stream time (based on stream clock)
+        let deadline = match chrono::Duration::from_std(self.duration) {
+            Ok(limit) => event.timestamp + limit,
+            Err(e) => {
+                log::error!(
+                    "time start handler: duration {:?} for constraint {} is out of range ({e}). not arming a watchdog",
+                    self.duration,
+                    self.constraint_id
+                );
+                return;
+            }
+        };
+
         // spawn watchdog task
         tokio::spawn(watchdog_task(
             cancel_token,
             token_id,
             event.case_id.clone(),
             self.constraint_id.clone(),
+            deadline,
             self.duration,
             self.mode.clone(),
             state.clone(),
@@ -185,19 +199,72 @@ impl ConstraintHandler for TimeStartHandler {
                 .is_some()
         };
 
-        // if a timer is still running its watchdog task will emit the result
-        // once it fires (or a late stop event cancels it and evaluates)
+        // a timer still running at case end means the stop event never arrived
+        let case_end_time = {
+            let case_state = state.case_state.lock().unwrap();
+            case_state.case_end_time(case_id)
+        };
+
         let live_timers = {
             let timer_store = state.timer_token_store.lock().unwrap();
             timer_store.timer_token_count(case_id, &self.constraint_id)
         };
+
         if live_timers > 0 {
+            // cancel the watchdogs first so they cannot emit a second result later
+            {
+                let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
+                cancel_tokens.cancel_constraint(case_id, &self.constraint_id);
+                cancel_tokens.remove_constraint(case_id, &self.constraint_id);
+            }
+
+            let timer_data = {
+                let mut timer_store = state.timer_token_store.lock().unwrap();
+                timer_store.take_timer_tokens_for_evaluation(case_id, &self.constraint_id)
+            };
+
             log::info!(
-                "time start handler: case end for ({}/{}) with {} live timer(s) - watchdog will emit the result",
+                "time start handler: case end for ({}/{}) with {} live timer(s) - settling now",
                 case_id,
                 self.constraint_id,
                 live_timers
             );
+
+            for token in timer_data.live_tokens.iter() {
+                let (result, verdict) = match self.mode {
+                    MinMaxMode::Max => (ConstraintResultType::Violated, "TimerMax"),
+                    MinMaxMode::Min => (ConstraintResultType::Satisfied, "TimerMin"),
+                };
+                let start_time = token.event_time.unwrap_or(token.created_at);
+                let elapsed = match case_end_time {
+                    Some(end) => {
+                        humantime::format_duration((end - start_time).to_std().unwrap_or_default())
+                            .to_string()
+                    }
+                    None => "unknown time".to_string(),
+                };
+                let info = format!(
+                    "{}: stop event never arrived; case ended {} after the start event, limit {:?} (token {})",
+                    verdict, elapsed, self.duration, token.id
+                );
+                log::info!(
+                    "time start handler: token {} (case end) -> {:?}: {}",
+                    token.id,
+                    result,
+                    info
+                );
+                emit_result(
+                    case_id,
+                    &self.constraint_id,
+                    ConstraintType::Time,
+                    result,
+                    info,
+                    state.clone(),
+                    ResultTrigger::CaseEnd,
+                    None,
+                )
+                .await;
+            }
             return;
         }
 

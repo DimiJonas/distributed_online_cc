@@ -9,6 +9,7 @@ use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
 use crate::state::result_send_buffer::ConstraintResultSendBuffer;
 use crate::state::sensor_event_store::SensorEventStore;
+use crate::state::stream_clock::StreamClock;
 use crate::state::timer_token_store::TimerTokenStore;
 use crate::state::token_in_store::TokenInStore;
 use crate::state::token_out_store::TokenOutStore;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub sensor_events: Arc<Mutex<SensorEventStore>>,
     pub result_sink_channel: mpsc::Sender<CCResultMessage>,
     pub case_state: Arc<Mutex<CaseStateMap>>,
+    pub stream_clock: Arc<StreamClock>,
     pub dist: Option<Arc<DistributedState>>,
 }
 
@@ -71,6 +73,7 @@ impl AppState {
             sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
             result_sink_channel,
             case_state: Arc::new(Mutex::new(CaseStateMap::new())),
+            stream_clock: Arc::new(StreamClock::new()),
             dist,
         }
     }
@@ -87,7 +90,7 @@ impl AppState {
             config.is_distributed(),
             "new_distributed with a central config"
         );
-        let case_end_ttl = config.case_end_retention_period;
+        let case_end_ttl = config.case_end_gossip_ttl;
         let dist = Arc::new(DistributedState {
             peer_cache: Arc::new(Mutex::new(PeerCache::new())),
             ce_gossip_cache: Arc::new(Mutex::new(CEGossipCache::new(case_end_ttl))),

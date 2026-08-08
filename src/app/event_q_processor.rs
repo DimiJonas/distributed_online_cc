@@ -75,6 +75,11 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                         started.elapsed().as_micros() as u64,
                     );
                 }
+
+                // advance stream clock
+                // note: this must be after this event has been handled beause a time stop event must get the chance to cancel its watchdog before
+                // the clock moves past the deadline
+                state.stream_clock.advance(event.timestamp);
             }
         }
     });

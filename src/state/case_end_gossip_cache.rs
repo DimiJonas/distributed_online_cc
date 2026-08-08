@@ -1,7 +1,9 @@
-use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use std::collections::hash_map::{DefaultHasher, Entry};
 use std::hash::{Hash, Hasher};
+use std::time::Duration as StdDuration;
+
+use chrono::Duration;
 
 use crate::types::{CaseEnd, CaseId, EventTime};
 
@@ -10,6 +12,8 @@ pub enum CaseEndOutcome {
     New,
     Updated,
     Unchanged,
+    // arrived for a case this node has already closed
+    Straggler,
 }
 
 // it is important to differentiate new entries from updated entries
@@ -18,18 +22,17 @@ pub enum CaseEndOutcome {
 pub struct MergeResult {
     pub new: Vec<CaseEnd>,
     pub updated: Vec<CaseEnd>,
+    pub straggler_count: usize,
 }
 
 // one cached case end
-//
-// its important to differentiate between the time propagated in the timestamp
-// and the time when the event was first received when a 'not online' event stream is replayed for simulations
 #[derive(Debug, Clone)]
 struct CacheEntry {
     event_time: EventTime,
-    observed_at: DateTime<Utc>,
+    observed_at: EventTime,
 }
 
+/// keeps track of case end gossip information
 pub struct CEGossipCache {
     // case id -> entry
     cache: HashMap<CaseId, CacheEntry>,
@@ -37,30 +40,42 @@ pub struct CEGossipCache {
 }
 
 impl CEGossipCache {
-    pub fn new(ttl: std::time::Duration) -> Self {
-        let ttl = Duration::from_std(ttl).expect("case_end_propagation_ttl out of range");
+    pub fn new(ttl: StdDuration) -> Self {
+        let ttl = Duration::from_std(ttl).expect("case_end_retention_period out of range");
         Self {
             cache: HashMap::new(),
             ttl,
         }
     }
 
-    // check if a received case end is new or already known
-    // if the timestamps differ (possibly because another end activity was configured?) then lower timestamp wins
-    pub fn observe(&mut self, case_end: &CaseEnd, now: DateTime<Utc>) -> CaseEndOutcome {
+    pub fn contains(&self, case_id: &CaseId) -> bool {
+        self.cache.contains_key(case_id)
+    }
+
+    /// record a case end
+    /// 'already_ended' should be read from CaseStateMap
+    pub fn observe(
+        &mut self,
+        case_end: &CaseEnd,
+        observed_at: EventTime,
+        already_ended: bool,
+    ) -> CaseEndOutcome {
         match self.cache.entry(case_end.case_id.clone()) {
             Entry::Vacant(vacant) => {
+                if already_ended {
+                    // dont reinsert
+                    return CaseEndOutcome::Straggler;
+                }
                 vacant.insert(CacheEntry {
                     event_time: case_end.timestamp,
-                    observed_at: now,
+                    observed_at,
                 });
                 CaseEndOutcome::New
             }
             Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 if case_end.timestamp < entry.event_time {
-                    // update business timestamp to earliest, keep original observed_at
-                    // (the observation time of the case end itself did not change)
+                    // update event timestamp to earliest, but keep original observed_at
                     entry.event_time = case_end.timestamp;
                     CaseEndOutcome::Updated
                 } else {
@@ -70,33 +85,44 @@ impl CEGossipCache {
         }
     }
 
-    fn is_live(&self, observed_at: EventTime, now: DateTime<Utc>) -> bool {
+    fn is_live(&self, observed_at: EventTime, now: EventTime) -> bool {
         observed_at + self.ttl > now
     }
 
-    // merge a batch from a peer
-    // returns the entries that were new
+    /// merge a batch from a peer
+    ///
+    /// 'is_ended' is looked up per case against the ended case record
     pub fn merge(
         &mut self,
         incoming: impl IntoIterator<Item = CaseEnd>,
-        now: DateTime<Utc>,
+        now: EventTime,
+        is_ended: impl Fn(&CaseId) -> bool,
     ) -> MergeResult {
-        let mut result: MergeResult = MergeResult {
+        let mut result = MergeResult {
             new: Vec::new(),
             updated: Vec::new(),
+            straggler_count: 0,
         };
         for case_end in incoming {
-            match self.observe(&case_end, now) {
+            let already_ended = is_ended(&case_end.case_id);
+            match self.observe(&case_end, now, already_ended) {
                 CaseEndOutcome::New => result.new.push(case_end),
                 CaseEndOutcome::Updated => result.updated.push(case_end),
                 CaseEndOutcome::Unchanged => {}
+                CaseEndOutcome::Straggler => {
+                    log::trace!(
+                        "ce gossip cache: ignoring straggler case end {} (already closed on this node)",
+                        case_end
+                    );
+                    result.straggler_count += 1;
+                }
             }
         }
         result
     }
 
     // pushable state: live entries only
-    pub fn live_entries(&self, now: DateTime<Utc>) -> Vec<CaseEnd> {
+    pub fn live_entries(&self, now: EventTime) -> Vec<CaseEnd> {
         self.cache
             .iter()
             .filter(|(_, e)| self.is_live(e.observed_at, now))
@@ -110,7 +136,7 @@ impl CEGossipCache {
     // order independent hash digest over the live set
     // DefaultHasher::new has fixed keys, so equal sets => equal digest across nodes
     // note: the digest hashes case ids and event timestamps only, never observed_at (differs per node)
-    pub fn digest(&self, now: DateTime<Utc>) -> u64 {
+    pub fn digest(&self, now: EventTime) -> u64 {
         let mut entries = self.live_entries(now);
         entries.sort_by(|a, b| a.case_id.cmp(&b.case_id)); // canonical order
         let mut h = DefaultHasher::new();
@@ -122,87 +148,161 @@ impl CEGossipCache {
     }
 
     // prune expired records
-    pub fn prune(&mut self, now: DateTime<Utc>) {
+    pub fn prune(&mut self, now: EventTime) {
         let ttl = self.ttl;
         self.cache.retain(|_, e| e.observed_at + ttl > now);
+    }
+
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Utc};
+
+    const TTL_SECS: i64 = 60;
+
+    fn cache() -> CEGossipCache {
+        CEGossipCache::new(StdDuration::from_secs(TTL_SECS as u64))
+    }
 
     fn ce(case: &str, secs: i64) -> CaseEnd {
         CaseEnd {
             case_id: case.to_string(),
-            timestamp: Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap() + Duration::seconds(secs),
+            timestamp: Utc.with_ymd_and_hms(2014, 1, 1, 0, 0, 0).unwrap() + Duration::seconds(secs),
         }
     }
 
-    // regression test: a case end whose event timestamp is far in the past (e.g. replayed event log) must still be accepted, gossiped and digested
-    // TTL is relative to when the node observed the case end, not the events own timestamp
-    #[test]
-    fn old_business_timestamp_is_still_live() {
-        let mut cache = CEGossipCache::new(std::time::Duration::from_secs(180));
-        let now = Utc::now(); // years after 2020
-
-        let outcome = cache.observe(&ce("case-0", 0), now);
-        assert!(matches!(outcome, CaseEndOutcome::New));
-
-        // entry is live and gossipable right after observation
-        assert_eq!(cache.live_entries(now).len(), 1);
-        let empty_digest = CEGossipCache::new(std::time::Duration::from_secs(180)).digest(now);
-        assert_ne!(cache.digest(now), empty_digest);
-
-        // ...and expires relative to observation time
-        let later = now + Duration::seconds(181);
-        assert!(cache.live_entries(later).is_empty());
-        cache.prune(later);
-        assert!(cache.live_entries(later).is_empty());
+    fn never_ended(_: &CaseId) -> bool {
+        false
     }
 
-    // merging the same case end twice yields New then Unchanged, so only one  case closing task is spawned per case
+    /// a replayed case end carries a 2014 timestamp; that must not affect liveness,
+    /// which is about how long *this node* keeps advertising it
     #[test]
-    fn duplicate_merge_is_unchanged() {
-        let mut cache = CEGossipCache::new(std::time::Duration::from_secs(180));
+    fn historical_timestamps_do_not_affect_liveness() {
+        let mut c = cache();
         let now = Utc::now();
 
-        let first = cache.merge(vec![ce("case-0", 0)], now);
+        assert!(matches!(
+            c.observe(&ce("case-0", 0), now, false),
+            CaseEndOutcome::New
+        ));
+        assert_eq!(c.live_entries(now).len(), 1);
+        assert_ne!(c.digest(now), cache().digest(now));
+    }
+
+    #[test]
+    fn expires_relative_to_observation() {
+        let mut c = cache();
+        let now = Utc::now();
+        c.observe(&ce("case-0", 0), now, false);
+
+        assert_eq!(
+            c.live_entries(now + Duration::seconds(TTL_SECS - 1)).len(),
+            1
+        );
+
+        let after = now + Duration::seconds(TTL_SECS + 1);
+        assert!(c.live_entries(after).is_empty());
+        c.prune(after);
+        assert!(c.is_empty());
+    }
+
+    /// regression test (tombstone resurrection): an already-closed case must not come back as news
+    #[test]
+    fn already_closed_case_is_not_resurrected() {
+        let mut c = cache();
+        let now = Utc::now();
+        c.observe(&ce("case-0", 0), now, false);
+
+        let after = now + Duration::seconds(TTL_SECS + 1);
+        c.prune(after);
+        assert!(c.is_empty(), "precondition: local copy dropped");
+
+        let outcome = c.observe(&ce("case-0", 0), after, true);
+        assert!(
+            matches!(outcome, CaseEndOutcome::Straggler),
+            "a case this node already closed must never come back as New"
+        );
+        assert!(
+            c.is_empty(),
+            "and must not be reinserted, or it gets re-advertised"
+        );
+
+        let merged = c.merge(vec![ce("case-0", 0)], after, |_| true);
+        assert!(merged.new.is_empty());
+        assert_eq!(merged.straggler_count, 1);
+    }
+
+    /// the counterpart: a case this node never closed is news, however late
+    ///
+    /// this is what makes a short suppression window safe. a node that missed the
+    /// original round still closes the case when it finally hears about it.
+    #[test]
+    fn unknown_case_is_news_however_late() {
+        let mut c = cache();
+        let much_later = Utc::now() + Duration::hours(6);
+
+        let merged = c.merge(vec![ce("case-0", 0)], much_later, never_ended);
+        assert_eq!(
+            merged.new.len(),
+            1,
+            "never closed here, so it is still news"
+        );
+    }
+
+    // merging the same case end twice yields New then Unchanged, so only one case closing task is spawned per case
+    #[test]
+    fn duplicate_merge_is_unchanged() {
+        let mut c = cache();
+        let now = Utc::now();
+
+        let first = c.merge(vec![ce("case-0", 0)], now, never_ended);
         assert_eq!(first.new.len(), 1);
         assert!(first.updated.is_empty());
 
-        let second = cache.merge(vec![ce("case-0", 0)], now + Duration::seconds(1));
+        // second time the case is in the cache, so it is Unchanged regardless of
+        // what the ended-case record says
+        let second = c.merge(vec![ce("case-0", 0)], now + Duration::seconds(1), |_| true);
         assert!(second.new.is_empty());
         assert!(second.updated.is_empty());
+        assert_eq!(second.straggler_count, 0);
     }
 
     // an earlier event timestamp for a known case updates the payload but keeps the original observation time
     #[test]
     fn earlier_timestamp_updates() {
-        let mut cache = CEGossipCache::new(std::time::Duration::from_secs(180));
+        let mut c = cache();
         let now = Utc::now();
 
-        cache.observe(&ce("case-0", 10), now);
-        let outcome = cache.observe(&ce("case-0", 5), now + Duration::seconds(1));
+        c.observe(&ce("case-0", 10), now, false);
+        let outcome = c.observe(&ce("case-0", 5), now + Duration::seconds(1), true);
         assert!(matches!(outcome, CaseEndOutcome::Updated));
 
-        let live = cache.live_entries(now + Duration::seconds(2));
+        let live = c.live_entries(now + Duration::seconds(2));
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].timestamp, ce("case-0", 5).timestamp);
     }
 
-    // digests of two nodes that observed the same case end at different wall clock times must be equal (observed_at must not leak into the digest)
+    // digests of two nodes that observed the same case end at different wall clock times must be equal
     #[test]
     fn digest_ignores_observation_time() {
-        let mut a = CEGossipCache::new(std::time::Duration::from_secs(180));
-        let mut b = CEGossipCache::new(std::time::Duration::from_secs(180));
+        let mut a = cache();
+        let mut b = cache();
         let now = Utc::now();
 
-        a.observe(&ce("case-0", 0), now);
-        b.observe(&ce("case-0", 0), now + Duration::seconds(30));
+        a.observe(&ce("case-0", 0), now, false);
+        b.observe(&ce("case-0", 0), now + Duration::seconds(30), false);
 
-        let check_time = now + Duration::seconds(60);
-        assert_eq!(a.digest(check_time), b.digest(check_time));
+        let check = now + Duration::seconds(45);
+        assert_eq!(a.digest(check), b.digest(check));
     }
 }

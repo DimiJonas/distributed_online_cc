@@ -97,6 +97,8 @@ pub async fn run(config: NodeConfig) {
         );
     }
 
+    crate::app::case_janitor::spawn_case_janitor(state.clone(), Duration::from_secs(1));
+
     // periodically record queue depth (if enabled)
     crate::measurement::queue_depth_sampler::spawn_queue_depth_sampler(
         state.clone(),
