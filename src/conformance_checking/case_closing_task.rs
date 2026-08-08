@@ -8,11 +8,11 @@ use crate::{state::app_state::AppState, types::CaseId};
 /// then sleeps for the grace period in case late events still come in
 /// then closes the case (which blocks further result emitting) and calls clean up state methods on constraint handlers
 pub async fn case_closing_task(state: AppState, case_id: CaseId) {
+    sleep(state.config.case_end_grace_period).await;
+
     for handler in state.handlers.all() {
         handler.handle_case_end(&case_id, state.clone()).await;
     }
-
-    sleep(state.config.case_end_grace_period).await;
 
     log::info!(
         "closing case {} after case end grace period and cleaning up state",

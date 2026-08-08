@@ -127,6 +127,28 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             Some(token) => token.event_time.unwrap(),
             None => {
                 // producer event has not happened yet
+                // save consumer event time for a possible late arrival of the producer event
+                {
+                    let mut token_out = state.token_out.lock().unwrap();
+                    let keep = match token_out
+                        .get_out_cloned(&event.case_id, self.index)
+                        .and_then(|t| t.event_time)
+                    {
+                        Some(existing) => event.timestamp < existing,
+                        None => true,
+                    };
+                    if keep {
+                        let consumer_token = Token::new(
+                            event.case_id.clone(),
+                            self.constraint_id.clone(),
+                            ConstraintType::Precedence,
+                            Some(event.timestamp),
+                            state.config.node_id,
+                        );
+                        token_out.produce_with_overwrite(consumer_token, self.index);
+                    }
+                }
+                // emit violated result (for now)
                 let info = "producer event has not happened (yet)".to_string();
                 emit_result(
                     &event.case_id,
@@ -209,7 +231,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         };
 
         // save token if none exists yet or event time is earlier than the current one
-        {
+        let producer_event_time = {
             let mut token_in = state.token_in.lock().unwrap();
             match token_in.get_in_mut(&message.case_id, self.index) {
                 Some(existing_producer_token) => match existing_producer_token.event_time {
@@ -219,10 +241,12 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                             log::info!(
                                 "precedence consumer handler: received precedence producer token (update)"
                             );
+                            new_event_time
                         } else {
                             log::info!(
                                 "precedence consumer handler: received precedence producer token (no update)"
                             );
+                            existing_event_time
                         }
                     }
                     None => {
@@ -230,6 +254,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                         log::info!(
                             "precedence consumer handler: received precedence producer token (insert timestamp)"
                         );
+                        new_event_time
                     }
                 },
                 None => {
@@ -237,8 +262,47 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     log::info!(
                         "precedence consumer handler: received precedence producer token (insert)"
                     );
+                    new_event_time
                 }
             }
+        };
+
+        // emit new result if a consumer event already happened, but the producer time is valid but the message was delayed
+        if let Some(consumer_event_time) = {
+            let token_out = state.token_out.lock().unwrap();
+            token_out
+                .get_out_cloned(&message.case_id, self.index)
+                .and_then(|t| t.event_time)
+        } {
+            // evaluate timestamps
+            let (result, info) = if consumer_event_time <= producer_event_time {
+                (
+                    ConstraintResultType::Violated,
+                    format!(
+                        "consumer event happened before producer event: {} <= {} (late correction)",
+                        consumer_event_time, producer_event_time
+                    ),
+                )
+            } else {
+                (
+                    ConstraintResultType::Satisfied,
+                    format!(
+                        "consumer event happened after producer event: {} <= {} (late correction)",
+                        consumer_event_time, producer_event_time
+                    ),
+                )
+            };
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::Precedence,
+                result,
+                info,
+                state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
+            )
+            .await;
         }
     }
 
@@ -292,6 +356,11 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
         {
             let mut token_in = state.token_in.lock().unwrap();
             token_in.remove_in(case_id, self.index);
+        }
+        // remove consumer token
+        {
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(case_id, self.index);
         }
     }
 }
