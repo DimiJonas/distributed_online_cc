@@ -15,7 +15,7 @@ pub async fn run(config: NodeConfig) {
         "starting node {} (mode: {})",
         config.node_id,
         match config.mode {
-            ConfigMode::Distributed => "distributed",
+            ConfigMode::Decentralized => "distributed",
             ConfigMode::Central => "central",
         }
     );
@@ -35,7 +35,7 @@ pub async fn run(config: NodeConfig) {
     let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
 
     let (state, outbound_gossip_rx, inbound_gossip_rx) = match config.mode {
-        ConfigMode::Distributed => {
+        ConfigMode::Decentralized => {
             // gossip channels (only exist for distributed mode)
             let (outbound_gossip_tx, outbound_gossip_rx) =
                 mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
@@ -64,11 +64,11 @@ pub async fn run(config: NodeConfig) {
     meta(
         match state.config.mode {
             ConfigMode::Central => "central",
-            ConfigMode::Distributed => "distributed",
+            ConfigMode::Decentralized => "distributed",
         },
         state.config.constraints.len(),
         state.config.tcp_listen_address,
-        if state.config.is_distributed() {
+        if state.config.is_decentralized() {
             Some(state.config.overlay().listen_address)
         } else {
             None
@@ -87,7 +87,7 @@ pub async fn run(config: NodeConfig) {
     }
 
     // mode specific tasks
-    if state.config.mode == ConfigMode::Distributed {
+    if state.config.mode == ConfigMode::Decentralized {
         crate::app::tcp_listener::spawn_overlay_network_listener(state.clone());
         crate::app::overlay_manager::spawn_cyclon_overlay_task(state.clone());
         crate::app::gossip_manager::spawn_case_end_gossip_manager(
@@ -97,7 +97,10 @@ pub async fn run(config: NodeConfig) {
         );
     }
 
-    crate::app::case_janitor::spawn_case_janitor(state.clone(), Duration::from_secs(1));
+    crate::app::case_janitor::spawn_case_janitor(
+        state.clone(),
+        state.config.case_janitor_cleanup_interval,
+    );
 
     // periodically record queue depth (if enabled)
     crate::measurement::queue_depth_sampler::spawn_queue_depth_sampler(

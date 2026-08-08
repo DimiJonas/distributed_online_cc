@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # stops the conformance-checker networks (kills the tmux sessions) and cleans up
-# by default tears down both the distributed and central sessions
+# by default tears down both the decentralized and central sessions
 #
 # expected layout:
 #
@@ -11,8 +11,8 @@ set -euo pipefail
 #   <run-dir>/<mode>/results.db  sqlite result db (+ -wal / -shm)
 
 # ---- defaults ----
-SESSION_PREFIX="cc"                          # kills ${PREFIX}-distributed and ${PREFIX}-central
-SYSTEM="both"                                # distributed | central | both
+SESSION_PREFIX="cc"                          # kills ${PREFIX}-decentralized and ${PREFIX}-central
+SYSTEM="both"                                # decentralized | central | both
 SESSIONS=()                                  # explicit sessions (override prefix/system)
 RUN_DIR="run"
 LOG_DIR=""                                   # empty => $RUN_DIR/<mode>/logs
@@ -28,7 +28,7 @@ sage() {
   cat <<USAGE
 Usage: $0 [options]
  
-  -s, --system WHICH     which to stop: distributed|central|both (default: $SYSTEM)
+  -s, --system WHICH     which to stop: decentralized|central|both (default: $SYSTEM)
       --session-prefix P tmux session prefix           (default: $SESSION_PREFIX)
       --session NAME     kill this exact session (repeatable; overrides --system)
   -o, --run-dir DIR      base run dir                  (default: $RUN_DIR)
@@ -66,10 +66,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SYSTEM" in
-  distributed) MODES=(distributed) ;;
+  decentralized) MODES=(decentralized) ;;
   central)     MODES=(central) ;;
-  both)        MODES=(distributed central) ;;
-  *) echo "--system must be distributed|central|both (got '$SYSTEM')" >&2; exit 1 ;;
+  both)        MODES=(decentralized central) ;;
+  *) echo "--system must be decentralized|central|both (got '$SYSTEM')" >&2; exit 1 ;;
 esac
 
 # build session list from --system if none given explicitly
@@ -87,7 +87,7 @@ db_dir_for() {
 socket_globs_for() {
   if [[ -n "$SOCKET_GLOB" ]]; then echo "$SOCKET_GLOB"; return; fi
   case "$1" in
-    distributed) echo "/tmp/event_listener_[0-9]*.sock" ;;
+    decentralized) echo "/tmp/event_listener_[0-9]*.sock" ;;
     central)     echo "/tmp/event_listener_central.sock /tmp/event_listener_forwarder*.sock" ;;
   esac
 }

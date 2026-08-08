@@ -30,13 +30,13 @@ pub fn peer_addr(port: u16) -> PeerAddress {
 }
 
 pub fn make_config_with_port(listen_port: u16) -> NodeConfig {
-    let mut config = make_base_config(ConfigMode::Distributed);
+    let mut config = make_base_config(ConfigMode::Decentralized);
     config.tcp_listen_address = addr(listen_port);
     config
 }
 
 pub fn make_config_with_constraints(constraints: Vec<ConstraintConfig>) -> NodeConfig {
-    let mut config = make_base_config(ConfigMode::Distributed);
+    let mut config = make_base_config(ConfigMode::Decentralized);
     config.constraints = constraints;
     config
 }
@@ -45,7 +45,7 @@ pub fn make_config_with_constraints_and_port(
     constraints: Vec<ConstraintConfig>,
     listen_port: u16,
 ) -> NodeConfig {
-    let mut config = make_base_config(ConfigMode::Distributed);
+    let mut config = make_base_config(ConfigMode::Decentralized);
     config.constraints = constraints;
     config.tcp_listen_address = addr(listen_port);
     config
@@ -74,7 +74,7 @@ pub fn make_state_with_event_q(event_tx: mpsc::Sender<TracedEvent>) -> AppState 
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
     AppState::new_distributed(
-        make_base_config(ConfigMode::Distributed),
+        make_base_config(ConfigMode::Decentralized),
         event_tx,
         loopback_tx,
         sink_tx,
@@ -306,7 +306,7 @@ pub fn make_config_with_buffers(
     buffers: HashMap<String, ResultBufferConfig>,
     default_buffer: ResultBufferConfig,
 ) -> NodeConfig {
-    let mut config = make_base_config(ConfigMode::Distributed);
+    let mut config = make_base_config(ConfigMode::Decentralized);
     config.constraints = constraints;
     config.result_buffers = buffers;
     config.default_result_buffer = default_buffer;

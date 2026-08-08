@@ -100,7 +100,7 @@ mod tests {
     ) -> AppState {
         let mut config = make_config_with_port(0);
         config.case_end_grace_period = grace_period;
-        config.case_end_gossip_ttl = propagation_ttl;
+        config.case_end_ttl = propagation_ttl;
         // No ConstraintConfig variant maps to a test mock, so build the
         // base state from config (empty handler registry)...
         let mut state = make_state_from_config(config);

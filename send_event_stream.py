@@ -10,14 +10,14 @@ reads the manifest from gen-events.rs
 delivers to each nodes unix socket
 
 routing is by event_id in both systems:
-    distributed : an event goes to the node whose constraints watch its event_id
+    decentralized : an event goes to the node whose constraints watch its event_id
     central     : an event goes to the forwarder whose include_event_ids lists it
 
 usage:
-  send_stream.py --config-dir run/distributed --stream events_gen/manifest.jsonl
-  send_stream.py --config-dir run/distributed --print-routes
-  send_stream.py --config-dir run/distributed --stream events_gen/manifest.jsonl --rate 50
-  send_stream.py --config-dir run/distributed --stream events_gen/manifest.jsonl --rate 200 --burst 10 --jitter 0.1
+  send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl
+  send_stream.py --config-dir run/decentralized --print-routes
+  send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl --rate 50
+  send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl --rate 200 --burst 10 --jitter 0.1
 
 """
 import argparse
@@ -38,7 +38,7 @@ def load_nodes(config_dir):
     for path in sorted(glob(os.path.join(config_dir, "*-config.toml"))):
         with open(path, "rb") as fh:
             cfg = tomllib.load(fh)
-        mode = cfg.get("mode", "distributed")
+        mode = cfg.get("mode", "decentralized")
         cons = [
             {
                 "role": c["constraint_role"],
@@ -78,7 +78,7 @@ def load_nodes(config_dir):
 
 def system_kind(nodes):
     modes = {n["mode"] for n in nodes}
-    return "central" if "central" in modes else "distributed"
+    return "central" if "central" in modes else "decentralized"
 
 
 def build_routing(nodes):

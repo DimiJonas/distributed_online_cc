@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compare the result databases of the distributed and the central system (and optionally the generators 'ground truth').
+compare the result databases of the decentralized and the central system (and optionally the generators 'ground truth').
 
 for every (case_id, constraint_id) pair the final result is compared (the last row written for that pair)
 
@@ -11,7 +11,7 @@ Reported per pair:
   WRONG      - (only with --expected) the systems agree with each other but not with the ground truth
 
 Usage:
-  compare_results.py --distributed run/distributed/cc-results.db \
+  compare_results.py --decentralized run/decentralized/cc-results.db \
                      --central run/central/cc-results.db \
                      [--expected run/events/expected_results.jsonl] \
                      [--show-info] [--show-matches]
@@ -60,14 +60,14 @@ def load_expected(path: str):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--distributed", default="run/distributed/cc-results.db", help="path to the distributed system's sqlite db")
+    ap.add_argument("--decentralized", default="run/decentralized/cc-results.db", help="path to the decentralized system's sqlite db")
     ap.add_argument("--central", default="run/central/cc-results.db", help="path to the central system's sqlite db")
     ap.add_argument("--expected", default=None, help="optional expected_results.jsonl from gen-events")
     ap.add_argument("--show-info", action="store_true", help="print the info text of differing results")
     ap.add_argument("--show-matches", action="store_true", help="also list all matching pairs")
     args = ap.parse_args()
 
-    dist = load_final_results(args.distributed)
+    dist = load_final_results(args.decentralized)
     cent = load_final_results(args.central)
     expected = load_expected(args.expected) if args.expected else None
 
@@ -90,27 +90,27 @@ def main():
         if d_res != c_res:
             different.append((k, d, c, e))
             continue
-        # central and distributed are equal - check against the ground truth if provided
+        # central and decentralized are equal - check against the ground truth if provided
         if e is not None and e != d_res:
             wrong.append((k, e, d_res))
             continue
         matches.append((k, d_res))
 
     for (case, cid), d, c, e in different:
-        line = f"DIFFERENT {case}/{cid}: distributed={d[0]} central={c[0]}"
+        line = f"DIFFERENT {case}/{cid}: decentralized={d[0]} central={c[0]}"
         if e is not None:
             if e == d[0]:
-                line += f"  -> ground truth {e}: distributed is right, central is wrong"
+                line += f"  -> ground truth {e}: decentralized is right, central is wrong"
             elif e == c[0]:
-                line += f"  -> ground truth {e}: central is right, distributed is wrong"
+                line += f"  -> ground truth {e}: central is right, decentralized is wrong"
             else:
                 line += f"  -> ground truth {e}: both are wrong"
         print(line)
         if args.show_info:
-            print(f"    distributed: {d[1]}  ({d[2]}, {d[3]} row(s))")
+            print(f"    decentralized: {d[1]}  ({d[2]}, {d[3]} row(s))")
             print(f"    central:     {c[1]}  ({c[2]}, {c[3]} row(s))")
     for (case, cid), d_res, c_res, e in missing:
-        side = "central" if d_res else "distributed"
+        side = "central" if d_res else "decentralized"
         have = d_res or c_res
         line = (f"MISSING   {case}/{cid}: no result in the {side} db "
                 f"(other side says {have})")
@@ -138,7 +138,7 @@ def main():
         both_wrong = len(different) - d_right - c_right
         if different:
             summary += (f"\nof the {len(different)} disagreements: "
-                        f"distributed correct {d_right}x, central correct {c_right}x, "
+                        f"decentralized correct {d_right}x, central correct {c_right}x, "
                         f"both wrong {both_wrong}x")
     print(summary)
     sys.exit(1 if n_bad else 0)

@@ -27,14 +27,14 @@ pub struct NodeConfigBuilder {
 }
 
 impl NodeConfigBuilder {
-    pub fn distributed_base() -> Self {
-        Self::from_base(make_base_config(ConfigMode::Distributed))
+    pub fn decentralized_base() -> Self {
+        Self::from_base(make_base_config(ConfigMode::Decentralized))
     }
     pub fn central_base() -> Self {
         Self::from_base(make_base_config(ConfigMode::Central))
     }
     pub fn new_base_config() -> Self {
-        Self::distributed_base()
+        Self::decentralized_base()
     }
     pub fn from_base(config: NodeConfig) -> Self {
         Self { config }
@@ -48,7 +48,7 @@ impl NodeConfigBuilder {
         self
     }
     pub fn as_distributed(mut self) -> Self {
-        self.config.mode = ConfigMode::Distributed;
+        self.config.mode = ConfigMode::Decentralized;
         self.config.overlay.get_or_insert_with(default_overlay);
         self.config.gossip.get_or_insert_with(default_gossip);
         self
@@ -86,6 +86,10 @@ impl NodeConfigBuilder {
     }
     pub fn port(mut self, port: u16) -> Self {
         self.config.tcp_listen_address = format!("127.0.0.1:{port}").parse().unwrap();
+        self
+    }
+    pub fn case_janitor_cleanup_interval(mut self, d: Duration) -> Self {
+        self.config.case_janitor_cleanup_interval = d;
         self
     }
 
@@ -158,8 +162,8 @@ impl NodeConfigBuilder {
         self.config.case_end_grace_period = p;
         self
     }
-    pub fn case_end_gossip_ttl(mut self, p: Duration) -> Self {
-        self.config.case_end_gossip_ttl = p;
+    pub fn case_end_ttl(mut self, p: Duration) -> Self {
+        self.config.case_end_ttl = p;
         self
     }
     pub fn default_result_buffer(mut self, b: ResultBufferConfig) -> Self {
@@ -217,7 +221,7 @@ fn default_gossip() -> GossipConfig {
 
 pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
     let (overlay, gossip) = match mode {
-        ConfigMode::Distributed => (Some(default_overlay()), Some(default_gossip())),
+        ConfigMode::Decentralized => (Some(default_overlay()), Some(default_gossip())),
         ConfigMode::Central => (None, None),
     };
     let config = NodeConfig {
@@ -231,7 +235,8 @@ pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
         result_sink_addresses: None,
         result_sink: None,
         case_end_grace_period: Duration::from_secs(10),
-        case_end_gossip_ttl: Duration::from_secs(15),
+        case_end_ttl: Duration::from_secs(15),
+        case_janitor_cleanup_interval: Duration::from_secs(1),
         tcp_channels: TcpChannelConfig {
             tcp_channel_mpsc_channel_size: 100,
             peer_manager_mpsc_channel_size: 256,

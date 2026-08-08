@@ -37,7 +37,7 @@ pub fn spawn_queue_depth_sampler(state: AppState, interval: Duration) {
 
 // samples every bounded channel
 pub fn do_sample(state: &AppState, tick: u64) {
-    let (gossip_out_depth, gossip_in_depth) = if state.config.is_distributed() {
+    let (gossip_out_depth, gossip_in_depth) = if state.config.is_decentralized() {
         (
             Some(depth_of(&state.dist().outbound_gossip_q)),
             Some(depth_of(&state.dist().inbound_gossip_q)),

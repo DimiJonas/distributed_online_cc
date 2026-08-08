@@ -87,10 +87,10 @@ impl AppState {
         inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
     ) -> Self {
         assert!(
-            config.is_distributed(),
+            config.is_decentralized(),
             "new_distributed with a central config"
         );
-        let case_end_ttl = config.case_end_gossip_ttl;
+        let case_end_ttl = config.case_end_ttl;
         let dist = Arc::new(DistributedState {
             peer_cache: Arc::new(Mutex::new(PeerCache::new())),
             ce_gossip_cache: Arc::new(Mutex::new(CEGossipCache::new(case_end_ttl))),
@@ -107,7 +107,7 @@ impl AppState {
         result_sink_channel: mpsc::Sender<CCResultMessage>,
     ) -> Self {
         assert!(
-            !config.is_distributed(),
+            !config.is_decentralized(),
             "new_central with a distributed config"
         );
         Self::new_base(config, event_q, loopback_q, result_sink_channel, None)

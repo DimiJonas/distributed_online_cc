@@ -3,22 +3,22 @@ set -euo pipefail
 
 # launch the conformance checking test networks in tmux
 #
-# a single --generate produces both systems (distributed + central) from the
-# same constraint catalog, into <out-dir>/distributed and <out-dir>/central
+# a single --generate produces both systems (decentralized + central) from the
+# same constraint catalog, into <out-dir>/decentralized and <out-dir>/central
 #
 # each system runs in its own tmux session, uses their own ports (if local addressing is used) 
 # and writes to its own SQLite DB, so they can run side by side
 
 # ---- defaults ----
 BIN="./target/debug/node"                    # node binary (override with -b)
-RUN_DIR="run"                                # base dir; systems are in $OUT_DIR/{distributed,central}
+RUN_DIR="run"                                # base dir; systems are in $OUT_DIR/{decentralized,central}
 LOG_DIR=""                                   # empty => $RUN_DIR/<mode>/logs
 GENERATE=false
 NODES=20                                    # total nodes per system when generating
 REPEAT=1                                     # copies of the constraint catalog to spread
 ADDRESSING="local"                           # local | remote
-SYSTEM="both"                                # distributed | central | both
-SESSION_PREFIX="cc"                          # sessions: ${PREFIX}-distributed / ${PREFIX}-central
+SYSTEM="both"                                # decentralized | central | both
+SESSION_PREFIX="cc"                          # sessions: ${PREFIX}-decentralized / ${PREFIX}-central
 GEN_CMD=(cargo run --quiet --bin gen-config --)
 
 usage() {
@@ -32,13 +32,13 @@ Usage: $0 [options]
   -n, --nodes N          nodes per system when generating (default: $NODES)
   -r, --repeat K         catalog copies to spread      (default: $REPEAT)
   -a, --addressing WHICH local|remote when generating  (default: $ADDRESSING)
-  -s, --system WHICH     which to launch: distributed|central|both (default: $SYSTEM)
+  -s, --system WHICH     which to launch: decentralized|central|both (default: $SYSTEM)
       --session-prefix P tmux session prefix           (default: $SESSION_PREFIX)
   -h, --help             show this help
  
 Layout produced/expected:
  
-  $RUN_DIR/distributed/{configs,logs} + results.db
+  $RUN_DIR/decentralized/{configs,logs} + results.db
   $RUN_DIR/central/{configs,logs}     + results.db
 USAGE
 }
@@ -61,8 +61,8 @@ while [[ $# -gt 0 ]]; do
 done
 
  
-case "$SYSTEM" in distributed|central|both) ;; *)
-  echo "--system must be distributed|central|both (got '$SYSTEM')" >&2; exit 1 ;;
+case "$SYSTEM" in decentralized|central|both) ;; *)
+  echo "--system must be decentralized|central|both (got '$SYSTEM')" >&2; exit 1 ;;
 esac
 
 # config dir for a system
@@ -75,8 +75,8 @@ log_dir() {
 
 # ---- generate (clearing old configs) ----
 if $GENERATE; then
-  echo "regenerating configs into $RUN_DIR/{distributed,central}/configs (nodes=$NODES, repeat=$REPEAT)"
-  for sub in distributed central; do
+  echo "regenerating configs into $RUN_DIR/{decentralized,central}/configs (nodes=$NODES, repeat=$REPEAT)"
+  for sub in decentralized central; do
     mkdir -p "$RUN_DIR/$sub/configs" "$RUN_DIR/$sub/logs"
     find "$RUN_DIR/$sub/configs" -maxdepth 1 -name '*-config.toml' -delete
   done
@@ -128,10 +128,10 @@ launch_system() {
   echo "  db:      $RUN_DIR/$mode/results.db"
 }
  
-[[ "$SYSTEM" == "distributed" || "$SYSTEM" == "both" ]] && \
-  launch_system distributed "${SESSION_PREFIX}-distributed"
+[[ "$SYSTEM" == "decentralized" || "$SYSTEM" == "both" ]] && \
+  launch_system decentralized "${SESSION_PREFIX}-decentralized"
 [[ "$SYSTEM" == "central" || "$SYSTEM" == "both" ]] && \
   launch_system central "${SESSION_PREFIX}-central"
  
-echo "attach with: tmux attach -t ${SESSION_PREFIX}-distributed   (or -central)"
+echo "attach with: tmux attach -t ${SESSION_PREFIX}-decentralized   (or -central)"
 

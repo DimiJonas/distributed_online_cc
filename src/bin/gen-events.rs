@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(about = "Generate a realistic XES event stream from a systems node configs")]
 struct Args {
-    /// directory of *-config.toml files (distributed or central - only the constraint definitions are read)
+    /// directory of *-config.toml files (decentralized or central - only the constraint definitions are read)
     #[arg(long)]
     config_dir: PathBuf,
 

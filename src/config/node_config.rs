@@ -24,10 +24,11 @@ pub struct NodeConfig {
     pub loopback_queue_size: usize,
     #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
     pub case_end_grace_period: Duration,
-    /// how long a case end keeps being gossiped (also used to derive how long a closed case is kept in memory)
-    /// should be sized against gossip convergence
-    #[serde(with = "humantime_serde", default = "default_case_end_gossip_ttl")]
-    pub case_end_gossip_ttl: Duration,
+    /// how long a case end keeps being gossiped
+    /// also used to derive how long a closed case is kept in memory
+    /// (should be sized against gossip convergence in decentralized system)
+    #[serde(with = "humantime_serde", default = "default_case_end_ttl")]
+    pub case_end_ttl: Duration,
     pub result_sink_addresses: Option<Vec<SocketAddr>>,
     #[serde(default)]
     pub result_sink: Option<ResultSinkConfig>,
@@ -45,13 +46,18 @@ pub struct NodeConfig {
     pub default_result_buffer: ResultBufferConfig,
     #[serde(default)]
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
+    #[serde(
+        with = "humantime_serde",
+        default = "default_case_janitor_cleanup_interval"
+    )]
+    pub case_janitor_cleanup_interval: Duration,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigMode {
     #[default]
-    Distributed,
+    Decentralized,
     Central,
 }
 
@@ -66,12 +72,15 @@ impl NodeConfig {
 
     pub fn validate(&self) {
         match self.mode {
-            ConfigMode::Distributed => {
+            ConfigMode::Decentralized => {
                 assert!(
                     self.overlay.is_some(),
-                    "distributed mode requires [overlay]"
+                    "decentralized mode requires [overlay]"
                 );
-                assert!(self.gossip.is_some(), "distributed mode requires [gossip]");
+                assert!(
+                    self.gossip.is_some(),
+                    "decentralized mode requires [gossip]"
+                );
             }
             ConfigMode::Central => {
                 assert!(
@@ -94,8 +103,8 @@ impl NodeConfig {
         self.gossip.as_ref().expect("validated at load")
     }
 
-    pub fn is_distributed(&self) -> bool {
-        self.mode == ConfigMode::Distributed
+    pub fn is_decentralized(&self) -> bool {
+        self.mode == ConfigMode::Decentralized
     }
 
     pub fn is_own_address(&self, addr: SocketAddr) -> bool {
@@ -154,7 +163,7 @@ impl NodeConfig {
 
     /// how long this node remembers having closed a case
     pub fn case_end_tombstone_ttl(&self) -> Duration {
-        self.case_end_grace_period + 2 * self.case_end_gossip_ttl
+        self.case_end_grace_period + 2 * self.case_end_ttl
     }
 }
 
@@ -619,7 +628,7 @@ fn default_case_end_grace_period() -> Duration {
     Duration::from_secs(10)
 }
 
-fn default_case_end_gossip_ttl() -> Duration {
+fn default_case_end_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
@@ -657,6 +666,10 @@ fn default_gossip_inbound_mpsc_channel_size() -> usize {
 
 fn default_anti_entropy_fanout() -> usize {
     1
+}
+
+fn default_case_janitor_cleanup_interval() -> Duration {
+    Duration::from_secs(1)
 }
 
 // deserialize a value that can be int or float

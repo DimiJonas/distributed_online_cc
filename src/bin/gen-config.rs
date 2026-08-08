@@ -1,4 +1,4 @@
-//! gen-config — generate node configuration files for both distributed and central system
+//! gen-config — generate node configuration files for both decentralized and central system
 //!
 //! Two orthogonal axes:
 //!
@@ -7,10 +7,10 @@
 //!       - `remote`: one host per node, fixed ports (one IP per node)
 //!
 //!   * MODE (how conformance is checked)
-//!       - distributed: constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
+//!       - decentralized: constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
 //!         node 0 is the dedicated result sink, nodes 1..N have the constraints
 //!       - central: forwarders receive events and forward them to a single central node (node 0) that has all constraints
-//!         forwarder f mirrors distributed node f: it accepts exactly the event ids placed on that node
+//!         forwarder f mirrors decentralized node f: it accepts exactly the event ids placed on that node
 //!
 //!   * ROLE ASSIGNMENT (how constraint roles are assigned to nodes)
 //!       - `round-robin` (default): roles are handed out one at a time, so the roles of one constraint spread out
@@ -22,11 +22,11 @@
 //! `--catalog` picks the constraint catalog: `default` (built-in test catalog) or `sepsis` (sepsis event log)
 //! the sepsis catalog reuses event ids across constraints, so it has to be combined with `--role-assignment by-event`
 //!
-//! A single invocation always emits both a distributed system and a central system built from the same set of constraints
+//! A single invocation always emits both a decentralized system and a central system built from the same set of constraints
 //! Each system is self contained under its own directory:
 //!
 //! <out-dir>/
-//!   distributed/
+//!   decentralized/
 //!     configs/   node-<id>-config.toml
 //!     logs/      node-<id>.log
 //!     cc-results.db
@@ -371,15 +371,33 @@ fn catalog_sepsis() -> Vec<Template> {
             ],
         },
         Template {
-            constraint_stem: "prec_registration_lab",
+            constraint_stem: "prec_registration_lab_leucocytes",
+            roles: vec![
+                (Role::PrecedenceConsumer, "Leucocytes", None),
+                (
+                    Role::PrecedenceProducer { consumers: vec![0] },
+                    "ER Registration",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_registration_lab_lacticacid",
             roles: vec![
                 (Role::PrecedenceConsumer, "LacticAcid", None),
-                (Role::PrecedenceConsumer, "Leucocytes", None),
+                (
+                    Role::PrecedenceProducer { consumers: vec![0] },
+                    "ER Registration",
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_registration_lab_crp",
+            roles: vec![
                 (Role::PrecedenceConsumer, "CRP", None),
                 (
-                    Role::PrecedenceProducer {
-                        consumers: vec![0, 1, 2],
-                    },
+                    Role::PrecedenceProducer { consumers: vec![0] },
                     "ER Registration",
                     None,
                 ),
@@ -1099,11 +1117,11 @@ fn to_constraint(
 }
 
 // -------------------------------------------
-// assignment of roles onto distributed nodes
+// assignment of roles onto decentralized nodes
 // -------------------------------------------
 
 // how slots are handed out depends on `RoleAssignment`
-// slots map to node ids via `dist_node_of` so the forwarders mirror the distributed nodes in which events they accept/expect
+// slots map to node ids via `dist_node_of` so the forwarders mirror the decentralized nodes in which events they accept/expect
 type Layout = Vec<Vec<u64>>;
 
 // how constraint roles are assigned to the constraint nodes
@@ -1149,13 +1167,13 @@ impl RoleAssignment {
     }
 }
 
-// layout slot -> distributed node id (node 0 is the sink)
+// layout slot -> decentralized node id (node 0 is the sink)
 fn dist_node_of(slot: u64) -> u64 {
     slot + 1
 }
 
 // layout slot -> forwarder id in the central system
-// id mapping onto the distributed node ids when forwarders == role_nodes
+// id mapping onto the decentralized node ids when forwarders == role_nodes
 // wraps around when there are fewer forwarders than constraint nodes
 fn mirror_forwarder_of(slot: u64, forwarders: u64) -> u64 {
     (slot % forwarders) + 1
@@ -1234,7 +1252,7 @@ struct CommonParams {
 }
 
 // constraints are placed per `layout`and peers resolve to the conformance address of the hosting node
-fn emit_distributed(
+fn emit_decentralized(
     instances: &[Instance],
     layout: &Layout,
     role_nodes: u64,
@@ -1253,12 +1271,12 @@ fn emit_distributed(
             .map(|peer| addressing.reachable_overlay(peer))
             .collect();
 
-        let mut builder = NodeConfigBuilder::distributed_base()
+        let mut builder = NodeConfigBuilder::decentralized_base()
             .node_id(node_id)
             .tcp_listen(addressing.listen_conformance(node_id))
             .overlay_listen(addressing.listen_overlay(node_id))
             .initial_peers(peers)
-            .case_end_gossip_ttl(common.case_end_retention)
+            .case_end_ttl(common.case_end_retention)
             .default_result_buffer(ResultBufferConfig::Revocable {
                 duration: Duration::from_secs(10),
             })
@@ -1344,8 +1362,8 @@ fn emit_central(
         })
         .result_sink_addresses(vec![central_address]);
 
-    // per-forwarder filter inputs, mirroring the distributed role assignment:
-    // forwarder f accepts the events of the roles that the `layout` puts on distributed node f
+    // per-forwarder filter inputs, mirroring the decentralized role assignment:
+    // forwarder f accepts the events of the roles that the `layout` puts on decentralized node f
     // BTreeMap/BTreeSet keep the emitted configs deterministic
     let mut forwarder_event_ids: BTreeMap<u64, BTreeSet<EventId>> = BTreeMap::new();
     let mut forwarder_attributes: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
@@ -1383,7 +1401,7 @@ fn emit_central(
     .unwrap();
 
     // ---- forwarders ----
-    // a forwarder that mirrors a constraint-free distributed node gets an empty include list
+    // a forwarder that mirrors a constraint-free decentralized node gets an empty include list
     for forwarder_id in 1..=forwarders {
         let attributes = &forwarder_attributes[&forwarder_id];
         let include_event_attributes = if attributes.is_empty() {
@@ -1418,9 +1436,9 @@ fn emit_central(
 // -----
 
 #[derive(Parser)]
-#[command(about = "Generate comparable distributed + central conformance-checker configs")]
+#[command(about = "Generate comparable decentralized + central conformance-checker configs")]
 struct Args {
-    /// total nodes in the distributed system (constraint nodes + 1 sink)
+    /// total nodes in the decentralized system (constraint nodes + 1 sink)
     /// default: one constraint node per role assignment unit + 1 sink
     /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
     /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)
@@ -1446,7 +1464,7 @@ struct Args {
     repeat: u64,
 
     // forwarders in the central system
-    // default: match the distributed constraint node count so both systems have the same node count and forwarder f mirrors distributed node f
+    // default: match the decentralized constraint node count so both systems have the same node count and forwarder f mirrors decentralized node f
     #[arg(long)]
     forwarders: Option<u64>,
 
@@ -1454,13 +1472,13 @@ struct Args {
     #[arg(long, default_value = "local")]
     addressing: String,
 
-    // remote: one ip per node (max(distributed_nodes, central_nodes) entries).
+    // remote: one ip per node (max(decentralized_nodes, central_nodes) entries).
     #[arg(long, value_delimiter = ',')]
     hosts: Vec<IpAddr>,
 
     #[arg(long, default_value_t = 9000)]
     overlay_port: u16,
-    // conformance tcp port base for the distributed system
+    // conformance tcp port base for the decentralized system
     #[arg(long, default_value_t = 19000)]
     conformance_port: u16,
     // conformance tcp port base for the central system
@@ -1476,7 +1494,7 @@ struct Args {
 
     // override for the result sqlite dbs (relative to the launch cwd)
     // default: <out-dir>/<mode>/results.db, with the override they become
-    // <db-dir>/{distributed,central}-results.db
+    // <db-dir>/{decentralized,central}-results.db
     #[arg(long)]
     db_dir: Option<PathBuf>,
 
@@ -1569,7 +1587,7 @@ fn main() {
     };
     assert!(
         dist_nodes >= 2,
-        "need >=2 distributed nodes (>=1 constraint node + 1 sink)"
+        "need >=2 decentralized nodes (>=1 constraint node + 1 sink)"
     );
     let role_nodes = dist_nodes - 1; // node 0 is the sink
     let forwarders = args.forwarders.unwrap_or(dist_nodes - 1);
@@ -1593,11 +1611,11 @@ fn main() {
     if forwarders != role_nodes {
         eprintln!(
             "note: {forwarders} forwarders != {role_nodes} constraint nodes - forwarders cannot mirror \
-             the distributed nodes 1:1 (distributed node s+1 maps to forwarder (s % {forwarders}) + 1)"
+             the decentralized nodes 1:1 (decentralized node s+1 maps to forwarder (s % {forwarders}) + 1)"
         );
     }
 
-    // check that every event_id is received by exactly one distributed node, so events can be routed by event_id alone and the central mirror is exact
+    // check that every event_id is received by exactly one decentralized node, so events can be routed by event_id alone and the central mirror is exact
     {
         let mut event_slot: BTreeMap<&str, u64> = BTreeMap::new();
         for (instance_index, instance) in instances.iter().enumerate() {
@@ -1630,7 +1648,7 @@ fn main() {
         );
     }
 
-    let dist_root = args.out_dir.join("distributed");
+    let dist_root = args.out_dir.join("decentralized");
     let central_root = args.out_dir.join("central");
     let dist_config_dir = dist_root.join("configs");
     let central_config_dir = central_root.join("configs");
@@ -1644,7 +1662,7 @@ fn main() {
         Some(dir) => {
             std::fs::create_dir_all(dir).unwrap();
             (
-                dir.join("distributed-cc-results.db"),
+                dir.join("decentralized-cc-results.db"),
                 dir.join("central-cc-results.db"),
             )
         }
@@ -1654,7 +1672,7 @@ fn main() {
         ),
     };
 
-    emit_distributed(
+    emit_decentralized(
         &instances,
         &layout,
         role_nodes,
@@ -1684,7 +1702,7 @@ fn main() {
         role_assignment.name()
     );
     println!(
-        "  distributed: {dist_nodes} nodes (sink on node 0 + {role_nodes} constraint nodes), {total_roles} constraint roles"
+        "  decentralized: {dist_nodes} nodes (sink on node 0 + {role_nodes} constraint nodes), {total_roles} constraint roles"
     );
     println!(
         "  central:     {} nodes (central on node 0 + {forwarders} forwarders), {total_roles} constraint roles",

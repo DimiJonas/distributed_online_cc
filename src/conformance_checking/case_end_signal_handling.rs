@@ -14,7 +14,7 @@ pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
         case_end
     );
     match state.config.mode {
-        ConfigMode::Distributed => {
+        ConfigMode::Decentralized => {
             // case end might already be known - handle new and known information correctly
             handle_case_end_info(state.clone(), vec![case_end], CaseEndSource::EndEvent).await;
         }
@@ -92,6 +92,7 @@ fn spawn_case_closing_task(state: AppState, case_end: &CaseEnd) {
             );
             return;
         }
+        case_state.end_case(case_id.clone());
     }
 
     // spawn case closing task

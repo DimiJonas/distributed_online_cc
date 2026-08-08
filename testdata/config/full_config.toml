@@ -1,4 +1,4 @@
-mode = "distributed"
+mode = "decentralized"
 node_id = 1
 tcp_listen_address = "127.0.0.1:8000"
 unix_socket = "/tmp/event_listener.sock"
@@ -7,7 +7,8 @@ loopback_queue_size = 100
 log_file = "app.log"
 result_sink_addresses = ["127.0.0.1:8000"]
 case_end_grace_period = "15s"
-case_retention_period = "30s"
+case_end_ttl = "30s"
+case_janitor_cleanup_interval = "1s"
 
 [tcp_channels]
 tcp_channel_mpsc_channel_size = 100
