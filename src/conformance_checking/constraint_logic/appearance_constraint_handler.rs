@@ -13,7 +13,10 @@ use crate::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
     },
-    state::app_state::AppState,
+    state::{
+        app_state::AppState,
+        evaluation_store::{EvaluationDetail, LastEvaluation},
+    },
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
         HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
@@ -40,6 +43,23 @@ impl ConstraintHandler for AppearanceCounterHandler {
             self.constraint_id,
             event
         );
+
+        // check if a trigger event already evaluated the counter
+        let late_evaluation = {
+            let evaluations = state.evaluations.lock().unwrap();
+            match evaluations.get_cloned(&event.case_id, self.index) {
+                Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
+                _ => None,
+            }
+        };
+        if let Some(evaluation) = late_evaluation {
+            self.correct_with_late_event(event, evaluation, state.clone())
+                .await;
+            // for Zero/Subtract the event should not be counted because it still belongs to the last trigger window
+            if self.reset == AppearanceCounterReset::Keep {
+                return;
+            }
+        }
 
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
         let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
@@ -93,6 +113,32 @@ impl ConstraintHandler for AppearanceCounterHandler {
         }
 
         let count: u64 = self.get_and_reset_counter(&message.case_id, state.clone());
+
+        // remember the evaluation for late corrections
+        match message.timestamp {
+            Some(trigger_time) => {
+                let mut evaluations = state.evaluations.lock().unwrap();
+                evaluations.insert(
+                    &message.case_id,
+                    self.index,
+                    LastEvaluation {
+                        trigger_time,
+                        triggering_event: message.triggering_event,
+                        detail: EvaluationDetail::Counter {
+                            evaluated_count: count,
+                        },
+                    },
+                );
+            }
+            None => {
+                log::warn!(
+                    "appearance counter handler: TriggerCheck for ({}/{}) has no timestamp. late events will not be able to correct this result",
+                    message.case_id,
+                    self.constraint_id
+                );
+            }
+        }
+
         if let Some((info, result)) = self.evaluate_counter(count) {
             emit_result(
                 &message.case_id,
@@ -149,10 +195,70 @@ impl ConstraintHandler for AppearanceCounterHandler {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.remove_meta_token(case_id, self.index);
         }
+        // remove evaluations
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.remove(case_id, self.index);
+        }
     }
 }
 
 impl AppearanceCounterHandler {
+    async fn correct_with_late_event(
+        &self,
+        event: &TracedEvent,
+        evaluation: LastEvaluation,
+        state: AppState,
+    ) {
+        let corrected = {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.increment_evaluated_count(&event.case_id, self.index)
+        };
+        let corrected = match corrected {
+            Some(count) => count,
+            None => {
+                log::error!(
+                    "appearance counter handler: no counter evaluation recorded for ({}/{}). cannot correct with late event",
+                    event.case_id,
+                    self.constraint_id
+                );
+                return;
+            }
+        };
+
+        log::info!(
+            "appearance counter handler: late event for ({}/{}) (event time {} <= trigger time {}). corrected counter is now {}",
+            event.case_id,
+            self.constraint_id,
+            event.timestamp,
+            evaluation.trigger_time,
+            corrected
+        );
+
+        let (info, result) = match self.evaluate_counter(corrected) {
+            Some((info, result)) => (format!("{info} (late correction)"), result),
+            None => (
+                format!(
+                    "CounterOk: counter {:?} within limit {:?} (late correction)",
+                    corrected, self.frequency
+                ),
+                ConstraintResultType::Satisfied,
+            ),
+        };
+
+        emit_result(
+            &event.case_id,
+            &self.constraint_id,
+            ConstraintType::Appearance,
+            result,
+            info,
+            state.clone(),
+            ResultTrigger::Event,
+            Some(event.instance_id),
+        )
+        .await;
+    }
+
     fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> u64 {
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
         match meta_tokens.get_token_mut(case_id, self.index) {

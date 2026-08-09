@@ -14,7 +14,11 @@ use crate::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
     },
-    state::app_state::AppState,
+    state::{
+        app_state::AppState,
+        evaluation_store::{EvaluationDetail, LastEvaluation},
+        sensor_event_store::SensorValueRecorded,
+    },
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
         HandlerIndex, RequestId, SensorAttributeThreshold, Token, TracedEvent,
@@ -66,22 +70,38 @@ impl ConstraintHandler for SensorCollectorHandler {
             }
         };
 
-        // collect
+        // collect into the value history for this (case, attribute key)
         {
             let mut sensor_events = state.sensor_events.lock().unwrap();
-            match sensor_events.insert_or_update(
+            let record_outcome = sensor_events.record(
                 event.case_id.clone(),
                 self.attribute_key.clone(),
                 *attribute_value,
                 event.timestamp,
-            ) {
-                Some(_) => {
-                    log::info!("sensor collector handler: sensor event collected (update)");
+            );
+            match record_outcome {
+                SensorValueRecorded::Duplicate => {
+                    log::info!("sensor collector handler: sensor value NOT collected (duplicate)",);
                 }
-                None => {
-                    log::info!("sensor collector handler: sensor event collected (insert)");
+                _ => {
+                    log::info!(
+                        "sensor collector handler: sensor value collected ({:?})",
+                        record_outcome
+                    );
                 }
             }
+        }
+
+        // check if late correction
+        let late_evaluation = {
+            let evaluations = state.evaluations.lock().unwrap();
+            match evaluations.get_cloned(&event.case_id, self.index) {
+                Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
+                _ => None,
+            }
+        };
+        if let Some(evaluation) = late_evaluation {
+            self.correct_with_late_value(event, evaluation, state).await;
         }
     }
 
@@ -120,8 +140,24 @@ impl ConstraintHandler for SensorCollectorHandler {
 
         let sensor_event_map_entry = {
             let sensor_events = state.sensor_events.lock().unwrap();
-            sensor_events.get_cloned(&message.case_id, &self.attribute_key)
+            sensor_events.value_at_cloned(&message.case_id, &self.attribute_key, trigger_event_time)
         };
+
+        // remember the evaluation for late corrections
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.insert(
+                &message.case_id,
+                self.index,
+                LastEvaluation {
+                    trigger_time: trigger_event_time,
+                    triggering_event: message.triggering_event,
+                    detail: EvaluationDetail::SensorValue {
+                        value_time: sensor_event_map_entry.as_ref().map(|entry| entry.timestamp),
+                    },
+                },
+            );
+        }
 
         // get value, emit violated result if none exists or its outdated
         let attribute_value: f64 = {
@@ -269,10 +305,130 @@ impl ConstraintHandler for SensorCollectorHandler {
             let mut sensor_events = state.sensor_events.lock().unwrap();
             sensor_events.remove_case(case_id);
         }
+        // remove evaluations
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.remove(case_id, self.index);
+        }
+
         // remove meta token
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.remove_meta_token(case_id, self.index);
+        }
+    }
+}
+
+impl SensorCollectorHandler {
+    /// re-evaluate after a value arrived that the trigger should have seen (based on its timestamp) and emit
+    /// the corrected verdict
+    async fn correct_with_late_value(
+        &self,
+        event: &TracedEvent,
+        evaluation: LastEvaluation,
+        state: AppState,
+    ) {
+        let evaluated_value_time = match evaluation.detail {
+            EvaluationDetail::SensorValue { value_time } => value_time,
+            _ => {
+                log::error!(
+                    "sensor collector handler: recorded evaluation for ({}/{}) is not a sensor evaluation",
+                    event.case_id,
+                    self.constraint_id
+                );
+                return;
+            }
+        };
+
+        let sensor_value = {
+            let sensor_events = state.sensor_events.lock().unwrap();
+            sensor_events.value_at_cloned(
+                &event.case_id,
+                &self.attribute_key,
+                evaluation.trigger_time,
+            )
+        };
+        let sensor_value = match sensor_value {
+            Some(entry) => entry,
+            None => {
+                // nothing known at or before the trigger
+                return;
+            }
+        };
+
+        // check if the trigger already evaluated exactly this value
+        if evaluated_value_time == Some(sensor_value.timestamp) {
+            log::debug!(
+                "sensor collector handler: late value for ({}/{}) at {} does not change the value as of trigger time {}. no correction needed",
+                event.case_id,
+                self.constraint_id,
+                event.timestamp,
+                evaluation.trigger_time
+            );
+            return;
+        }
+
+        let value_age = evaluation.trigger_time - sensor_value.timestamp;
+        let (result, info) = if value_age.to_std().unwrap_or(Duration::MAX) > self.max_value_age {
+            (
+                ConstraintResultType::Violated,
+                format!(
+                    "sensor value for case={} key={} is outdated. value age relative to trigger event: {} > {} (max allowed age) (late correction)",
+                    event.case_id,
+                    self.attribute_key,
+                    humantime::format_duration(value_age.to_std().unwrap_or_default()),
+                    humantime::format_duration(self.max_value_age),
+                ),
+            )
+        } else if self.mode.evaluate_condition(sensor_value.value, self.value) {
+            (
+                ConstraintResultType::Satisfied,
+                format!(
+                    "{} {} {} is true (late correction)",
+                    sensor_value.value, self.mode, self.value
+                ),
+            )
+        } else {
+            (
+                ConstraintResultType::Violated,
+                format!(
+                    "{} {} {} is false (late correction)",
+                    sensor_value.value, self.mode, self.value
+                ),
+            )
+        };
+
+        log::debug!(
+            "sensor collector handler: late value for ({}/{}) at {} changed the value as of trigger time {} from {:?} to {}; correcting to {:?}",
+            event.case_id,
+            self.constraint_id,
+            event.timestamp,
+            evaluation.trigger_time,
+            evaluated_value_time,
+            sensor_value.timestamp,
+            result
+        );
+
+        emit_result(
+            &event.case_id,
+            &self.constraint_id,
+            ConstraintType::Sensor,
+            result,
+            info,
+            state.clone(),
+            ResultTrigger::Event,
+            Some(event.instance_id),
+        )
+        .await;
+
+        // record new evaluation
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.set_evaluated_value_time(
+                &event.case_id,
+                self.index,
+                sensor_value.timestamp,
+            );
         }
     }
 }

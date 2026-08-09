@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::HashMap;
 
 use crate::types::{CaseId, EventTime, SensorAttributeKey, SensorAttributeThreshold};
 
@@ -8,10 +8,23 @@ pub struct SensorEventMapEntry {
     pub timestamp: EventTime,
 }
 
+/// what happened when a sensor value was recorded
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SensorValueRecorded {
+    /// first value for this (case, key)
+    Inserted,
+    /// appended behind the previously newest value
+    Appended,
+    /// inserted before an already known newer value (arrived out of order)
+    Backfilled,
+    /// a value with this exact event time was already known so the original was kept
+    Duplicate,
+}
+
 #[derive(Debug, Default)]
 pub struct SensorEventStore {
-    // tokens for remembering some meta information for constraints
-    sensor_events: HashMap<CaseId, HashMap<SensorAttributeKey, SensorEventMapEntry>>,
+    /// the history of values per case and per attribute key
+    sensor_events: HashMap<CaseId, HashMap<SensorAttributeKey, Vec<SensorEventMapEntry>>>,
 }
 
 impl SensorEventStore {
@@ -19,46 +32,68 @@ impl SensorEventStore {
         Self::default()
     }
 
-    pub fn insert_or_update(
+    /// record a sensor value into the history for (case, key)
+    pub fn record(
         &mut self,
         case_id: CaseId,
         key: SensorAttributeKey,
         value: SensorAttributeThreshold,
         timestamp: EventTime,
-    ) -> Option<SensorEventMapEntry> {
-        let inner = self.sensor_events.entry(case_id).or_default();
+    ) -> SensorValueRecorded {
+        let history = self
+            .sensor_events
+            .entry(case_id)
+            .or_default()
+            .entry(key)
+            .or_default();
 
-        match inner.entry(key) {
-            Entry::Occupied(mut occupied) => {
-                if timestamp > occupied.get().timestamp {
-                    Some(occupied.insert(SensorEventMapEntry { value, timestamp }))
+        match history.binary_search_by(|entry| entry.timestamp.cmp(&timestamp)) {
+            // keep the first value seen for an event time
+            Ok(_) => SensorValueRecorded::Duplicate,
+            Err(position) => {
+                let outcome = if history.is_empty() {
+                    SensorValueRecorded::Inserted
+                } else if position == history.len() {
+                    SensorValueRecorded::Appended
                 } else {
-                    None
-                }
-            }
-            Entry::Vacant(vacant) => {
-                vacant.insert(SensorEventMapEntry { value, timestamp });
-                None
+                    SensorValueRecorded::Backfilled
+                };
+                history.insert(position, SensorEventMapEntry { value, timestamp });
+                outcome
             }
         }
     }
 
-    pub fn get(&self, case_id: &CaseId, key: &SensorAttributeKey) -> Option<&SensorEventMapEntry> {
-        self.sensor_events.get(case_id)?.get(key)
-    }
-
-    pub fn get_cloned(
+    /// the newest value whose event time is still before 'at'
+    pub fn value_at(
         &self,
         case_id: &CaseId,
         key: &SensorAttributeKey,
+        at: EventTime,
+    ) -> Option<&SensorEventMapEntry> {
+        let history = self.sensor_events.get(case_id)?.get(key)?;
+        match history.binary_search_by(|entry| entry.timestamp.cmp(&at)) {
+            // exact hit on the event time
+            Ok(position) => history.get(position),
+            // every known value is newer than 'at'
+            Err(0) => None,
+            Err(position) => history.get(position - 1),
+        }
+    }
+
+    pub fn value_at_cloned(
+        &self,
+        case_id: &CaseId,
+        key: &SensorAttributeKey,
+        at: EventTime,
     ) -> Option<SensorEventMapEntry> {
-        self.sensor_events.get(case_id)?.get(key).cloned()
+        self.value_at(case_id, key, at).cloned()
     }
 
     pub fn remove_case(
         &mut self,
         case_id: &CaseId,
-    ) -> Option<HashMap<SensorAttributeKey, SensorEventMapEntry>> {
+    ) -> Option<HashMap<SensorAttributeKey, Vec<SensorEventMapEntry>>> {
         self.sensor_events.remove(case_id)
     }
 }

@@ -346,14 +346,14 @@ pub enum MinMaxMode {
     Max,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum AppearanceCounterReset {
     Zero,
     Subtract,
     Keep,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
 pub enum DistributedAppearanceCounterReset {
     Zero,
     Keep,

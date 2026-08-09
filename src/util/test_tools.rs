@@ -57,7 +57,7 @@ pub fn make_state_and_event_q(listen_port: u16) -> (AppState, mpsc::Receiver<Tra
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    let state = AppState::new_distributed(
+    let state = AppState::new_decentralized(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,
@@ -73,7 +73,7 @@ pub fn make_state_with_event_q(event_tx: mpsc::Sender<TracedEvent>) -> AppState 
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new_distributed(
+    AppState::new_decentralized(
         make_base_config(ConfigMode::Decentralized),
         event_tx,
         loopback_tx,
@@ -91,7 +91,7 @@ pub fn make_state_with_config_and_event_q(
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new_distributed(
+    AppState::new_decentralized(
         config,
         event_tx,
         loopback_tx,
@@ -109,7 +109,7 @@ pub fn make_state_with_config_and_event_q_and_local_end_q(
     let (loopback_tx, _loopback_rx) = mpsc::channel(16);
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (inbound_gossip_tx, _inbound_gossip_rx) = mpsc::channel(16);
-    AppState::new_distributed(
+    AppState::new_decentralized(
         config,
         event_tx,
         loopback_tx,
@@ -125,7 +125,7 @@ pub fn make_state_from_config(config: NodeConfig) -> AppState {
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new_distributed(
+    AppState::new_decentralized(
         config,
         event_tx,
         loopback_tx,
@@ -141,7 +141,7 @@ pub fn make_state(listen_port: u16) -> AppState {
     let (sink_tx, _sink_rx) = mpsc::channel(16);
     let (local_end_signal_tx, _local_end_signal_rx) = mpsc::channel(16);
     let (gossip_msg_q_tx, _gossip_msg_q_rx) = mpsc::channel(16);
-    AppState::new_distributed(
+    AppState::new_decentralized(
         make_config_with_port(listen_port),
         event_tx,
         loopback_tx,

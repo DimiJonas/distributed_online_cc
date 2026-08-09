@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{collections::HashMap, net::SocketAddr};
 
 use async_trait::async_trait;
 use uuid::Uuid;
@@ -14,10 +14,13 @@ use crate::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
         tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
     },
-    state::app_state::AppState,
+    state::{
+        app_state::AppState,
+        evaluation_store::{EvaluationDetail, LastEvaluation},
+    },
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
+        EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
@@ -44,6 +47,24 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             self.constraint_id,
             event
         );
+
+        // check if a trigger event already evaluated the counter
+        let late_evaluation = {
+            let evaluations = state.evaluations.lock().unwrap();
+            match evaluations.get_cloned(&event.case_id, self.index) {
+                Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
+                _ => None,
+            }
+        };
+        // only report a delta (notify trigger to correct the result)
+        if let Some(evaluation) = late_evaluation {
+            self.report_late_event(event, evaluation, state.clone())
+                .await;
+            // for Zero the event should not be counted because it still belongs to the last trigger window
+            if self.reset == DistributedAppearanceCounterReset::Zero {
+                return;
+            }
+        }
 
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
         let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
@@ -91,6 +112,11 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             message
         );
         log::debug!("message={:?}", message);
+
+        // drop message if it was destined for a trigger handler on the same node
+        if message.creating_handler == Some(ConstraintRole::DistributedAppearanceCounter) {
+            return;
+        }
 
         if message.message_type != CCMessageType::PullTokenRequest {
             log::warn!(
@@ -148,6 +174,40 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             }
         }
 
+        // remember trigger node for late counter event corrections
+        match message.timestamp {
+            Some(trigger_time) => {
+                let local_counter_indices: Vec<HandlerIndex> = state
+                    .handlers
+                    .get_by_constraint_id(&self.constraint_id)
+                    .into_iter()
+                    .filter(|h| h.role() == ConstraintRole::DistributedAppearanceCounter)
+                    .map(|h| h.index())
+                    .collect();
+                let mut evaluations = state.evaluations.lock().unwrap();
+                for index in local_counter_indices {
+                    evaluations.insert(
+                        &message.case_id,
+                        index,
+                        LastEvaluation {
+                            trigger_time,
+                            triggering_event: message.triggering_event,
+                            detail: EvaluationDetail::DistributedCounterReport {
+                                trigger_address: sender_address,
+                            },
+                        },
+                    );
+                }
+            }
+            None => {
+                log::warn!(
+                    "distributed appearance counter handler: PullTokenRequest for ({}/{}) has no timestamp. late events will not be able to correct this result",
+                    message.case_id,
+                    self.constraint_id
+                );
+            }
+        }
+
         let token_with_total = Token::new_with_payload(
             message.case_id.clone(),
             self.constraint_id.clone(),
@@ -189,6 +249,72 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.remove_meta_token(case_id, self.index);
         }
+        // remove evaluations
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.remove(case_id, self.index);
+        }
+    }
+}
+
+impl DistributedAppearanceCounterHandler {
+    /// report an event that was delayed past the trigger pull request as a +1 delta
+    async fn report_late_event(
+        &self,
+        event: &TracedEvent,
+        evaluation: LastEvaluation,
+        state: AppState,
+    ) {
+        let trigger_address = match evaluation.detail {
+            EvaluationDetail::DistributedCounterReport { trigger_address } => trigger_address,
+            _ => {
+                log::error!(
+                    "distributed appearance counter handler: recorded evaluation for ({}/{}) is not a distributed counter report",
+                    event.case_id,
+                    self.constraint_id
+                );
+                return;
+            }
+        };
+
+        let mut delta_token = Token::new_with_payload(
+            event.case_id.clone(),
+            self.constraint_id.clone(),
+            ConstraintType::DistributedAppearance,
+            Some(event.timestamp),
+            state.config.node_id,
+            TokenPayload::Counter(1),
+        );
+        delta_token.event_time = Some(event.timestamp);
+
+        let mut cc_message = CCMessage::push_token(delta_token, event.instance_id);
+        // needed so counter handlers on the same node as the trigger handler can ignore it
+        cc_message.creating_handler = Some(ConstraintRole::DistributedAppearanceCounter);
+
+        log::debug!(
+            "distributed appearance counter handler: late event for ({}/{}) (event time {} <= trigger time {}); reporting +1 to trigger at {}",
+            event.case_id,
+            self.constraint_id,
+            event.timestamp,
+            evaluation.trigger_time,
+            trigger_address
+        );
+
+        if let Err(e) = send_to_conformance_peer(
+            trigger_address,
+            PeerMessage::conformance(cc_message),
+            state.clone(),
+        )
+        .await
+        {
+            log::error!(
+                "distributed appearance counter handler: error sending late delta for ({}/{}) to {}: {}. the emitted result stays uncorrected",
+                event.case_id,
+                self.constraint_id,
+                trigger_address,
+                e
+            );
+        }
     }
 }
 
@@ -218,9 +344,30 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             event
         );
 
-        let distributed_count: u64 = self
-            .get_distributed_count(state.clone(), &event.case_id)
+        let per_peer = self
+            .get_distributed_count(
+                state.clone(),
+                &event.case_id,
+                event.timestamp,
+                event.instance_id,
+            )
             .await;
+        let distributed_count: u64 = per_peer.values().sum();
+
+        // remember the evaluation for late corrections
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.insert(
+                &event.case_id,
+                self.index,
+                LastEvaluation {
+                    trigger_time: event.timestamp,
+                    triggering_event: Some(event.instance_id),
+                    detail: EvaluationDetail::DistributedCounterTotals { per_peer },
+                },
+            );
+        }
+
         if let Some((info, result)) = self.evaluate_count(distributed_count) {
             emit_result(
                 &event.case_id,
@@ -233,6 +380,118 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                 Some(event.instance_id),
             )
             .await;
+        }
+    }
+
+    // a counter peer reports an event that was delayed past the triggers pulltokenrequest
+    async fn handle_message(
+        &self,
+        state: AppState,
+        message: CCMessage,
+        _request_id: Option<RequestId>,
+    ) {
+        if message.message_type != CCMessageType::PushToken
+            || message.creating_handler != Some(ConstraintRole::DistributedAppearanceCounter)
+        {
+            return;
+        }
+
+        log::info!(
+            "distributed appearance trigger handler: received message for constraint {}; message={}",
+            self.constraint_id,
+            message
+        );
+        log::debug!("message={:?}", message);
+
+        let peer = match message.sender_address {
+            Some(addr) => addr,
+            None => {
+                log::error!(
+                    "distributed appearance trigger handler: late delta for ({}/{}) has no sender address, cannot attribute it to a counter peer",
+                    message.case_id,
+                    self.constraint_id
+                );
+                return;
+            }
+        };
+
+        let delta = message
+            .token
+            .as_ref()
+            .map(|token| token.payload.get_count())
+            .unwrap_or(0);
+        if delta == 0 {
+            log::warn!(
+                "distributed appearance trigger handler: late delta for ({}/{}) from {} carries no count. ignoring",
+                message.case_id,
+                self.constraint_id,
+                peer
+            );
+            return;
+        }
+
+        let corrected = {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta)
+        };
+        let corrected = match corrected {
+            Some(total) => total,
+            None => {
+                // either the trigger event never fired here or the case was already cleaned up
+                log::warn!(
+                    "distributed appearance trigger handler: no recorded evaluation for ({}/{}). dropping late delta from {}",
+                    message.case_id,
+                    self.constraint_id,
+                    peer
+                );
+                return;
+            }
+        };
+
+        log::info!(
+            "distributed appearance trigger handler: late delta of {} from {} for ({}/{}). corrected distributed counter is now {}",
+            delta,
+            peer,
+            message.case_id,
+            self.constraint_id,
+            corrected
+        );
+
+        let (info, result) = match self.evaluate_count(corrected) {
+            Some((info, result)) => (format!("{info} (late correction)"), result),
+            None => (
+                format!(
+                    "counter {:?} within limit {:?} (late correction)",
+                    corrected, self.frequency
+                ),
+                ConstraintResultType::Satisfied,
+            ),
+        };
+
+        emit_result(
+            &message.case_id,
+            &self.constraint_id,
+            ConstraintType::DistributedAppearance,
+            result,
+            info,
+            state.clone(),
+            ResultTrigger::Event,
+            message.triggering_event,
+        )
+        .await;
+    }
+
+    async fn clean_up_state(&self, case_id: &CaseId, state: AppState) {
+        log::debug!(
+            "distributed appearance trigger handler: clean up state for ({}/{})",
+            case_id,
+            self.constraint_id
+        );
+
+        // remove evaluations
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.remove(case_id, self.index);
         }
     }
 
@@ -267,25 +526,33 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
 }
 
 impl DistributedAppearanceTriggerHandler {
-    // accumulate count
-    async fn get_distributed_count(&self, state: AppState, case_id: &CaseId) -> u64 {
-        let mut distributed_count: u64 = 0;
+    /// pull every counter peer
+    async fn get_distributed_count(
+        &self,
+        state: AppState,
+        case_id: &CaseId,
+        trigger_time: EventTime,
+        triggering_event: EventInstanceId,
+    ) -> HashMap<SocketAddr, u64> {
+        let mut per_peer: HashMap<SocketAddr, u64> = HashMap::new();
         for counter_peer in &self.counter_peers {
-            let pull_token_request = PeerMessage::conformance_req(
-                Uuid::new_v4(),
-                CCMessage::pull_token_request_with_creator(
-                    case_id.clone(),
-                    self.constraint_id.clone(),
-                    self.role,
-                ),
+            let mut cc_message = CCMessage::pull_token_request_with_creator(
+                case_id.clone(),
+                self.constraint_id.clone(),
+                self.role,
             );
+            // the counter needs the triggers event time to tell a delayed event from one that genuinely belongs to the next window
+            cc_message.timestamp = Some(trigger_time);
+            cc_message.triggering_event = Some(triggering_event);
+            let pull_token_request = PeerMessage::conformance_req(Uuid::new_v4(), cc_message);
             match send_and_receive_conformance(*counter_peer, pull_token_request, state.clone())
                 .await
             {
                 Ok(response) => match response.payload {
                     PeerMessagePayload::Conformance(cc_msg) => {
                         if let Some(token) = cc_msg.token {
-                            distributed_count += token.payload.get_count();
+                            *per_peer.entry(*counter_peer).or_insert(0) +=
+                                token.payload.get_count();
                         }
                     }
                     _ => {
@@ -306,7 +573,7 @@ impl DistributedAppearanceTriggerHandler {
                 }
             }
         }
-        distributed_count
+        per_peer
     }
 
     fn evaluate_count(&self, distributed_count: u64) -> Option<(String, ConstraintResultType)> {

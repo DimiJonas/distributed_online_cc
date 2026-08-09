@@ -41,7 +41,7 @@ pub async fn run(config: NodeConfig) {
                 mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
             let (inbound_gossip_tx, inbound_gossip_rx) =
                 mpsc::channel(config.gossip().gossip_inbound_mpsc_channel_size);
-            let state = AppState::new_distributed(
+            let state = AppState::new_decentralized(
                 config,
                 event_q_tx,
                 loopback_q_tx,

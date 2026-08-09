@@ -95,12 +95,12 @@ mod tests {
     /// inspect call order after running the task.
     fn make_state_with_recording_handler(
         grace_period: Duration,
-        propagation_ttl: Duration,
+        case_end_ttl: Duration,
         calls: Arc<Mutex<Vec<String>>>,
     ) -> AppState {
         let mut config = make_config_with_port(0);
         config.case_end_grace_period = grace_period;
-        config.case_end_ttl = propagation_ttl;
+        config.case_end_ttl = case_end_ttl;
         // No ConstraintConfig variant maps to a test mock, so build the
         // base state from config (empty handler registry)...
         let mut state = make_state_from_config(config);
@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn calls_handle_case_end_before_sleeping() {
+    async fn calls_handle_case_end_after_sleeping() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let state = make_state_with_recording_handler(
             Duration::from_secs(10),
@@ -164,10 +164,15 @@ mod tests {
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(calls.lock().unwrap().as_slice(), ["h1:handle_case_end"]);
+        assert_ne!(calls.lock().unwrap().as_slice(), ["h1:handle_case_end"]);
 
         advance_and_settle(Duration::from_secs(10)).await; // grace period
         handle.await.unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            ["h1:handle_case_end", "h1:clean_up_state"]
+        );
     }
 
     #[tokio::test(start_paused = true)]

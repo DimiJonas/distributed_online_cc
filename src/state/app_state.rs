@@ -3,6 +3,7 @@ use crate::network::message_types::{CCResultMessage, CEGossipMessage, PeerMessag
 use crate::state::case_end_gossip_cache::CEGossipCache;
 use crate::state::case_state_map::CaseStateMap;
 use crate::state::cc_result_store::CCResultStore;
+use crate::state::evaluation_store::EvaluationStore;
 use crate::state::meta_token_store::MetaTokenStore;
 use crate::state::peer_cache::PeerCache;
 use crate::state::peer_manager_map::PeerManagerMap;
@@ -32,6 +33,7 @@ pub struct AppState {
     pub result_send_buffer: Arc<Mutex<ConstraintResultSendBuffer>>,
     pub timer_token_store: Arc<Mutex<TimerTokenStore>>,
     pub meta_token_store: Arc<Mutex<MetaTokenStore>>,
+    pub evaluations: Arc<Mutex<EvaluationStore>>,
     pub loopback_q: mpsc::Sender<PeerMessage>,
     pub sensor_events: Arc<Mutex<SensorEventStore>>,
     pub result_sink_channel: mpsc::Sender<CCResultMessage>,
@@ -69,6 +71,7 @@ impl AppState {
             result_send_buffer: Arc::new(Mutex::new(ConstraintResultSendBuffer::new())),
             timer_token_store: Arc::new(Mutex::new(TimerTokenStore::new())),
             meta_token_store: Arc::new(Mutex::new(MetaTokenStore::new())),
+            evaluations: Arc::new(Mutex::new(EvaluationStore::new())),
             loopback_q,
             sensor_events: Arc::new(Mutex::new(SensorEventStore::new())),
             result_sink_channel,
@@ -78,7 +81,7 @@ impl AppState {
         }
     }
 
-    pub fn new_distributed(
+    pub fn new_decentralized(
         config: NodeConfig,
         event_q: mpsc::Sender<TracedEvent>,
         loopback_q: mpsc::Sender<PeerMessage>,

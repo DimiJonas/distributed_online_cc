@@ -535,7 +535,7 @@ mod tests {
         let (tx3, _rx3) = tokio::sync::mpsc::channel(16);
         let (tx4, _rx4) = tokio::sync::mpsc::channel(16);
         let (tx5, _rx5) = tokio::sync::mpsc::channel(16);
-        let state = AppState::new_distributed(config, tx, tx2, tx3, tx4, tx5);
+        let state = AppState::new_decentralized(config, tx, tx2, tx3, tx4, tx5);
 
         {
             let mut store = state.cc_results.lock().unwrap();
