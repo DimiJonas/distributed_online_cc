@@ -55,23 +55,43 @@ impl ConstraintHandler for ResponseProducerHandler {
             event
         );
 
-        let producer_token = Token::new(
-            event.case_id.clone(),
-            self.constraint_id.clone(),
-            ConstraintType::Response,
-            Some(event.timestamp),
-            state.config.node_id,
-        );
-        {
-            let mut token_out = state.token_out.lock().unwrap();
-            token_out.produce_with_overwrite(producer_token.clone(), self.index);
-        }
+        // check if consumer event already happened. create late correction if so
+        let consumer_event_time = {
+            let token_in = state.token_in.lock().unwrap();
+            token_in
+                .get_in_cloned(&event.case_id, self.index)
+                .and_then(|t| t.event_time)
+        };
+        let already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
 
-        log::info!(
-            "response producer handler: produced token: {}",
-            producer_token
-        );
-        log::debug!("token={:?}", producer_token);
+        if already_consumed {
+            // the consumer event follows this producer event in event time
+            let mut token_out = state.token_out.lock().unwrap();
+            token_out.remove_out(&event.case_id, self.index);
+            log::debug!(
+                "response producer handler: consumer event at {} was already observed for {}/{}, no token produced",
+                consumer_event_time.unwrap(),
+                event.case_id,
+                self.constraint_id
+            );
+        } else {
+            let producer_token = Token::new(
+                event.case_id.clone(),
+                self.constraint_id.clone(),
+                ConstraintType::Response,
+                Some(event.timestamp),
+                state.config.node_id,
+            );
+            {
+                let mut token_out = state.token_out.lock().unwrap();
+                token_out.produce_with_overwrite(producer_token.clone(), self.index);
+            }
+            log::info!(
+                "response producer handler: produced token: {}",
+                producer_token
+            );
+            log::debug!("token={:?}", producer_token);
+        }
 
         // produce result if case already ended
         let case_ended = {
@@ -79,16 +99,30 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_state.is_ended(&event.case_id)
         };
         if case_ended {
-            // produce negative result because token was produced after case end
+            let (constraint_result, info) = if already_consumed {
+                (
+                    ConstraintResultType::Satisfied,
+                    format!(
+                        "producer token from {} was consumed by a consumer event at {} (late correction)",
+                        event.timestamp,
+                        consumer_event_time.unwrap(),
+                    ),
+                )
+            } else {
+                (
+                    ConstraintResultType::Violated,
+                    format!(
+                        "producer token from {} for {}/{} was not consumed",
+                        event.timestamp, event.case_id, self.constraint_id,
+                    ),
+                )
+            };
             emit_result(
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
-                ConstraintResultType::Violated,
-                format!(
-                    "producer token from {} for {}/{} was not consumed",
-                    event.timestamp, event.case_id, self.constraint_id,
-                ),
+                constraint_result,
+                info,
                 state.clone(),
                 ResultTrigger::Event,
                 Some(event.instance_id),
@@ -132,10 +166,33 @@ impl ConstraintHandler for ResponseProducerHandler {
             }
         };
 
-        if let Some(token) = {
+        // remember the consumer event time even when there is no token (yet) for possible late corrections
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            let keep = match token_in
+                .get_in_cloned(&message.case_id, self.index)
+                .and_then(|t| t.event_time)
+            {
+                Some(existing) => consumer_event_time > existing,
+                None => true,
+            };
+            if keep {
+                let consumer_token = Token::new(
+                    message.case_id.clone(),
+                    self.constraint_id.clone(),
+                    ConstraintType::Response,
+                    Some(consumer_event_time),
+                    state.config.node_id,
+                );
+                token_in.receive_with_overwrite(consumer_token, self.index);
+            }
+        }
+
+        let removed_producer_token = {
             let mut token_out = state.token_out.lock().unwrap();
             token_out.remove_out_before(&message.case_id, self.index, consumer_event_time)
-        } {
+        };
+        if let Some(token) = &removed_producer_token {
             log::info!("response producer handler: removed token {}", token);
             log::debug!("token={:?}", token);
         }
@@ -145,15 +202,15 @@ impl ConstraintHandler for ResponseProducerHandler {
             let case_state = state.case_state.lock().unwrap();
             case_state.is_ended(&message.case_id)
         };
-        if case_ended {
-            // produce positive result because token was consumed after case end
+        // only correct to Satisfied when this delete actually found a matching producer token
+        if case_ended && removed_producer_token.is_some() {
             emit_result(
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
                 ConstraintResultType::Satisfied,
                 format!(
-                    "all producer tokens for {}/{} were consumed",
+                    "all producer tokens for {}/{} were consumed (late correction)",
                     message.case_id, self.constraint_id,
                 ),
                 state.clone(),
@@ -172,7 +229,6 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        // create constraint result
         let (constraint_result, info) = {
             let mut token_out = state.token_out.lock().unwrap();
             match token_out.remove_out(case_id, self.index) {
@@ -210,10 +266,15 @@ impl ConstraintHandler for ResponseProducerHandler {
             self.constraint_id
         );
 
-        // remove producer token
+        // remove producer tokens
         {
             let mut token_out = state.token_out.lock().unwrap();
             token_out.remove_out(case_id, self.index);
+        }
+        // remove consumer event tokens
+        {
+            let mut token_in = state.token_in.lock().unwrap();
+            token_in.remove_in(case_id, self.index);
         }
     }
 }
@@ -816,5 +877,91 @@ mod tests {
             producer_peers: peers.clone(),
         };
         assert_eq!(handler.configured_peers(), peers);
+    }
+
+    /// the DeleteToken overtakes the producer event (the UIA case): consumer event time
+    /// is later, so the verdict must be Satisfied regardless of arrival order.
+    #[tokio::test]
+    async fn delete_arriving_before_producer_event_is_satisfied() {
+        let state = make_producer_state(20120);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c12".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            index: 13,
+            role: ConstraintRole::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        // consumer at t20 arrives first, producer event at t10 second
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 20).unwrap();
+        let delete = CCMessage::delete_token(
+            "c12".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), delete, None).await;
+        handler
+            .handle_event(&make_traced_event_at("c12", "produce", 10), state.clone())
+            .await;
+        handler
+            .handle_case_end(&"c12".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c12".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(
+            matches!(
+                result.constraint_result,
+                crate::types::ConstraintResultType::Satisfied
+            ),
+            "an out of order delete must not change the verdict"
+        );
+    }
+
+    /// an early consumer that arrives before the producer event must still yield Violated:
+    /// the watermark is older than the producer event time.
+    #[tokio::test]
+    async fn early_consumer_arriving_first_is_still_violated() {
+        let state = make_producer_state(20130);
+        {
+            let mut store = state.cc_results.lock().unwrap();
+            store.register_case("c13".to_string());
+        }
+        let handler = ResponseProducerHandler {
+            index: 14,
+            role: ConstraintRole::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        };
+
+        let consumer_ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 10).unwrap();
+        let delete = CCMessage::delete_token(
+            "c13".to_string(),
+            "rp".to_string(),
+            consumer_ts,
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), delete, None).await;
+        handler
+            .handle_event(&make_traced_event_at("c13", "produce", 20), state.clone())
+            .await;
+        handler
+            .handle_case_end(&"c13".to_string(), state.clone())
+            .await;
+
+        let store = state.cc_results.lock().unwrap();
+        let result = store
+            .get_constraint(&"c13".to_string(), &"rp".to_string())
+            .unwrap();
+        assert!(matches!(
+            result.constraint_result,
+            crate::types::ConstraintResultType::Violated
+        ));
     }
 }

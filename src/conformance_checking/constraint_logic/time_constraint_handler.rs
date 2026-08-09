@@ -52,6 +52,45 @@ impl ConstraintHandler for TimeStartHandler {
         );
         let token_id = token.id;
 
+        // a matching time stop event can already have been observed. if so evaluate it right away
+        let pending_stop = {
+            let timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.earliest_pending_stop_after(
+                &event.case_id,
+                &self.constraint_id,
+                event.timestamp,
+            )
+        };
+
+        if let Some(stop_time) = pending_stop {
+            {
+                let mut timer_store = state.timer_token_store.lock().unwrap();
+                timer_store.mark_start_seen(&event.case_id, &self.constraint_id);
+            }
+
+            let (result, info) = self.evaluate_token(&token, stop_time);
+            let info = format!("{info} (late correction: stop event observed before start event)");
+            log::info!(
+                "time start handler: token {} (stop event already observed at {}) -> {:?}: {}",
+                token_id,
+                stop_time,
+                result,
+                info
+            );
+            emit_result(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::Time,
+                result,
+                info,
+                state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
+            )
+            .await;
+            return;
+        }
+
         {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             timer_store.insert_timer_token(token);
@@ -141,9 +180,10 @@ impl ConstraintHandler for TimeStartHandler {
             cancel_tokens.remove_constraint(&message.case_id, &self.constraint_id);
         }
 
-        // evaluate timer data
+        // evaluate timer data and record stop time
         let timer_data = {
             let mut timer_store = state.timer_token_store.lock().unwrap();
+            timer_store.record_pending_stop(&message.case_id, &self.constraint_id, stop_time);
             timer_store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
         };
 
