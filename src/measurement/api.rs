@@ -175,8 +175,12 @@ pub fn peer_churn(churn_event: ChurnEvent, peer_address: PeerAddress) {
     });
 }
 
-pub fn case_end_seen(case_id: CaseId, source: CaseEndSource) {
-    record(Record::CaseEndSeen { case_id, source })
+pub fn case_end_seen(case_id: CaseId, source: CaseEndSource, source_peer: Option<SocketAddr>) {
+    record(Record::CaseEndSeen {
+        case_id,
+        source,
+        source_peer,
+    })
 }
 
 pub fn queues(tick: u64, depths: QueueDepths) {

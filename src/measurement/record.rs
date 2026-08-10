@@ -146,7 +146,6 @@ pub enum Record {
         listen: SocketAddr,
         #[serde(skip_serializing_if = "Option::is_none")]
         overlay_listen: Option<SocketAddr>,
-        // TODO: maybe record core count? but thats probably done in the simulations script
     },
 
     /// emitted when a peer manager is created or removed
@@ -168,5 +167,6 @@ pub enum Record {
         case_id: CaseId,
         /// end_event | push_gossip | anti_entropy
         source: CaseEndSource,
+        source_peer: Option<SocketAddr>,
     },
 }

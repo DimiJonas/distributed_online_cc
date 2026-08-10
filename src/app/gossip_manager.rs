@@ -108,7 +108,13 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
                 data.len()
             );
             log::debug!("received data: {:?}", data);
-            handle_case_end_info(state.clone(), data, CaseEndSource::PushGossip).await;
+            handle_case_end_info(
+                state.clone(),
+                data,
+                CaseEndSource::PushGossip,
+                Some(message.sender_address),
+            )
+            .await;
         }
         CEGossipPayload::AeSet(data) => {
             log::debug!(
@@ -117,7 +123,13 @@ async fn handle_inbound_message(message: CEGossipMessage, state: AppState) {
                 data.len()
             );
             log::debug!("received data: {:?}", data);
-            handle_case_end_info(state.clone(), data, CaseEndSource::AntiEntropy).await;
+            handle_case_end_info(
+                state.clone(),
+                data,
+                CaseEndSource::AntiEntropy,
+                Some(message.sender_address),
+            )
+            .await;
         }
         CEGossipPayload::AeDigest(their_digest) => {
             log::debug!(

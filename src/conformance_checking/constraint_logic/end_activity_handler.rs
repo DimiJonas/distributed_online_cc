@@ -28,7 +28,7 @@ impl ConstraintHandler for EndActivityHandler {
         let case_id = event.case_id.clone();
 
         // record case end
-        case_end_seen(case_id.clone(), CaseEndSource::EndEvent);
+        case_end_seen(case_id.clone(), CaseEndSource::EndEvent, None);
 
         // signal case end
         handle_case_end(
@@ -37,6 +37,7 @@ impl ConstraintHandler for EndActivityHandler {
                 case_id,
                 timestamp: event.timestamp,
             },
+            None,
         )
         .await;
     }

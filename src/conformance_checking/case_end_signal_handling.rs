@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use chrono::Utc;
 
 use crate::{
@@ -8,7 +10,7 @@ use crate::{
     types::CaseEnd,
 };
 
-pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
+pub async fn handle_case_end(state: AppState, case_end: CaseEnd, source_peer: Option<SocketAddr>) {
     log::debug!(
         "case end signal handling: received case end info: {}",
         case_end
@@ -16,7 +18,13 @@ pub async fn handle_case_end(state: AppState, case_end: CaseEnd) {
     match state.config.mode {
         ConfigMode::Decentralized => {
             // case end might already be known - handle new and known information correctly
-            handle_case_end_info(state.clone(), vec![case_end], CaseEndSource::EndEvent).await;
+            handle_case_end_info(
+                state.clone(),
+                vec![case_end],
+                CaseEndSource::EndEvent,
+                source_peer,
+            )
+            .await;
         }
         ConfigMode::Central => {
             // no gossip - spawn case closing task directly
@@ -29,11 +37,12 @@ pub async fn handle_case_end_info(
     state: AppState,
     case_end_info: Vec<CaseEnd>,
     source: CaseEndSource,
+    source_peer: Option<SocketAddr>,
 ) {
     // update stream clock because new event time was observed
     state
         .stream_clock
-        .advance_to_max(case_end_info.iter().map(|ce| ce.timestamp));
+        .advance_to_max(case_end_info.iter().map(|case_end| case_end.timestamp));
 
     let merge_result = {
         // the ended case record is the deduplication rule that needs to be considered at the merge
@@ -44,24 +53,29 @@ pub async fn handle_case_end_info(
         })
     };
     log::debug!("merge result: {:?}", merge_result);
-    apply_merge(merge_result, state.clone(), source).await;
+    apply_merge(merge_result, state.clone(), source, source_peer).await;
 }
 
-async fn apply_merge(res: MergeResult, state: AppState, source: CaseEndSource) {
-    if res.straggler_count > 0 {
+async fn apply_merge(
+    merge_result: MergeResult,
+    state: AppState,
+    source: CaseEndSource,
+    source_peer: Option<SocketAddr>,
+) {
+    if merge_result.straggler_count > 0 {
         log::debug!(
             "case end signal handling: ignored {} straggler case end(s) for already closed cases",
-            res.straggler_count
+            merge_result.straggler_count
         );
     }
 
     // spawn a case closing task for newly observed case ends
-    for case_end in &res.new {
+    for case_end in &merge_result.new {
         // record case end
         match source {
             CaseEndSource::PushGossip | CaseEndSource::AntiEntropy => {
                 // record case end for measurements
-                case_end_seen(case_end.case_id.clone(), source);
+                case_end_seen(case_end.case_id.clone(), source, source_peer);
             }
             CaseEndSource::EndEvent => {
                 // end acivity handler already recorded case end
@@ -72,8 +86,8 @@ async fn apply_merge(res: MergeResult, state: AppState, source: CaseEndSource) {
     }
 
     // spread gossip of new and updated case ends
-    let mut to_push = res.new;
-    to_push.extend(res.updated);
+    let mut to_push = merge_result.new;
+    to_push.extend(merge_result.updated);
     if let Err(e) = state.dist().outbound_gossip_q.send(to_push).await {
         log::error!("error passing push gossip to gossip manager: {}", e);
     }
