@@ -70,8 +70,8 @@ impl ConstraintHandler for SensorCollectorHandler {
             }
         };
 
-        // collect into the value history for this (case, attribute key)
-        {
+        // collecting the value and checking whether a trigger already evaluated atomically
+        let late_evaluation = {
             let mut sensor_events = state.sensor_events.lock().unwrap();
             let record_outcome = sensor_events.record(
                 event.case_id.clone(),
@@ -90,10 +90,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                     );
                 }
             }
-        }
 
-        // check if late correction
-        let late_evaluation = {
+            // check if late correction
             let evaluations = state.evaluations.lock().unwrap();
             match evaluations.get_cloned(&event.case_id, self.index) {
                 Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
@@ -140,24 +138,30 @@ impl ConstraintHandler for SensorCollectorHandler {
 
         let sensor_event_map_entry = {
             let sensor_events = state.sensor_events.lock().unwrap();
-            sensor_events.value_at_cloned(&message.case_id, &self.attribute_key, trigger_event_time)
-        };
-
-        // remember the evaluation for late corrections
-        {
-            let mut evaluations = state.evaluations.lock().unwrap();
-            evaluations.insert(
+            let entry = sensor_events.value_at_cloned(
                 &message.case_id,
-                self.index,
-                LastEvaluation {
-                    trigger_time: trigger_event_time,
-                    triggering_event: message.triggering_event,
-                    detail: EvaluationDetail::SensorValue {
-                        value_time: sensor_event_map_entry.as_ref().map(|entry| entry.timestamp),
-                    },
-                },
+                &self.attribute_key,
+                trigger_event_time,
             );
-        }
+
+            // remember the evaluation for late corrections
+            {
+                let mut evaluations = state.evaluations.lock().unwrap();
+                evaluations.insert(
+                    &message.case_id,
+                    self.index,
+                    LastEvaluation {
+                        trigger_time: trigger_event_time,
+                        triggering_event: message.triggering_event,
+                        detail: EvaluationDetail::SensorValue {
+                            value_time: entry.as_ref().map(|e| e.timestamp),
+                        },
+                    },
+                );
+            }
+
+            entry
+        };
 
         // get value, emit violated result if none exists or its outdated
         let attribute_value: f64 = {

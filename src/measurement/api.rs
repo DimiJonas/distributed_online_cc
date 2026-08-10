@@ -119,6 +119,7 @@ pub fn event_handled(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn result_emitted(
     case_id: &CaseId,
     constraint_id: &ConstraintId,

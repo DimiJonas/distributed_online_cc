@@ -8,7 +8,7 @@ use crate::{
     config::node_config::{DistributedAppearanceCounterReset, MinMaxMode},
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::{emit_result, emit_result_at},
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -50,54 +50,70 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             event
         );
 
-        // check if a trigger event already evaluated the counter
-        let late_evaluation = {
+        // check if a trigger event already evaluated the counter (and update the counter atomically)
+        let (late_evaluation, count) = {
             let evaluations = state.evaluations.lock().unwrap();
-            match evaluations.get_cloned(&event.case_id, self.index) {
+            let late_evaluation = match evaluations.get_cloned(&event.case_id, self.index) {
                 Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
                 _ => None,
-            }
+            };
+
+            // for Zero the event should not be counted because it still belongs to the last trigger window
+            let skip_count =
+                late_evaluation.is_some() && self.reset == DistributedAppearanceCounterReset::Zero;
+
+            let count = if skip_count {
+                None
+            } else {
+                let mut meta_tokens = state.meta_token_store.lock().unwrap();
+                Some(
+                    match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                        Some(counter_token) => {
+                            counter_token.payload.increment_counter();
+                            counter_token.payload.get_count()
+                        }
+                        None => {
+                            log::info!(
+                                "distributed appearance counter handler: starting counter for event_id={} constraint_id={} case_id={}",
+                                self.event_id,
+                                self.constraint_id,
+                                event.case_id
+                            );
+
+                            let counter_token = Token::new_with_payload(
+                                event.case_id.clone(),
+                                self.constraint_id.clone(),
+                                ConstraintType::DistributedAppearance,
+                                None,
+                                state.config.node_id,
+                                TokenPayload::Counter(1),
+                            );
+                            meta_tokens.insert_meta_token(counter_token.clone(), self.index);
+                            counter_token.payload.get_count()
+                        }
+                    },
+                )
+            };
+
+            (late_evaluation, count)
         };
+
         // only report a delta (notify trigger to correct the result)
+        // emitted after the guards are dropped, an await may not hold a lock
         if let Some(evaluation) = late_evaluation {
             self.report_late_event(event, evaluation, state.clone())
                 .await;
-            // for Zero the event should not be counted because it still belongs to the last trigger window
-            if self.reset == DistributedAppearanceCounterReset::Zero {
-                return;
-            }
         }
 
-        let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
-            Some(counter_token) => {
-                counter_token.payload.increment_counter();
-                counter_token.payload.get_count()
-            }
-            None => {
-                log::info!(
-                    "distributed appearance counter handler: starting counter for event_id={} constraint_id={} case_id={}",
-                    self.event_id,
-                    self.constraint_id,
-                    event.case_id
-                );
-
-                let counter_token = Token::new_with_payload(
-                    event.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::DistributedAppearance,
-                    None,
-                    state.config.node_id,
-                    TokenPayload::Counter(1),
-                );
-                meta_tokens.insert_meta_token(counter_token.clone(), self.index);
-                counter_token.payload.get_count()
-            }
-        };
-        log::info!(
-            "distributed appearance counter handler: counter is now at {}",
-            count
-        );
+        match count {
+            Some(count) => log::info!(
+                "distributed appearance counter handler: counter is now at {}",
+                count
+            ),
+            None => log::info!(
+                "distributed appearance counter handler: event was reported as a late delta, counter left unchanged"
+            ),
+        }
     }
 
     // send counter value to requestor
@@ -157,56 +173,64 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             .into_iter()
             .filter(|h| h.role() == ConstraintRole::DistributedAppearanceCounter)
             .collect();
+        // reading + resetting the counters and recording the evaluation are ONE atomic step, under
+        // the same evaluations -> meta_token_store order used in handle_event(). otherwise a
+        // configured event can be counted in between: it is not seen as late (the evaluation is not
+        // recorded yet) and its increment lands after the reset, so it is reported to nobody
         let mut total = 0u64;
         {
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            for handler in dist_appear_counter_handlers {
-                if let Some(token) = meta_tokens.get_token_mut(&message.case_id, handler.index()) {
-                    total += token.payload.get_count();
-                    // reset counter
-                    if let Some(reset) = handler.counter_reset() {
-                        match reset {
-                            DistributedAppearanceCounterReset::Keep => {}
-                            DistributedAppearanceCounterReset::Zero => {
-                                token.payload.reset_counter()
+            let mut evaluations = state.evaluations.lock().unwrap();
+            {
+                let mut meta_tokens = state.meta_token_store.lock().unwrap();
+                for handler in dist_appear_counter_handlers {
+                    if let Some(token) =
+                        meta_tokens.get_token_mut(&message.case_id, handler.index())
+                    {
+                        total += token.payload.get_count();
+                        // reset counter
+                        if let Some(reset) = handler.counter_reset() {
+                            match reset {
+                                DistributedAppearanceCounterReset::Keep => {}
+                                DistributedAppearanceCounterReset::Zero => {
+                                    token.payload.reset_counter()
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // remember trigger node for late counter event corrections
-        match message.timestamp {
-            Some(trigger_time) => {
-                let local_counter_indices: Vec<HandlerIndex> = state
-                    .handlers
-                    .get_by_constraint_id(&self.constraint_id)
-                    .into_iter()
-                    .filter(|h| h.role() == ConstraintRole::DistributedAppearanceCounter)
-                    .map(|h| h.index())
-                    .collect();
-                let mut evaluations = state.evaluations.lock().unwrap();
-                for index in local_counter_indices {
-                    evaluations.insert(
-                        &message.case_id,
-                        index,
-                        LastEvaluation {
-                            trigger_time,
-                            triggering_event: message.triggering_event,
-                            detail: EvaluationDetail::DistributedCounterReport {
-                                trigger_address: sender_address,
+            // remember trigger node for late counter event corrections
+            match message.timestamp {
+                Some(trigger_time) => {
+                    let local_counter_indices: Vec<HandlerIndex> = state
+                        .handlers
+                        .get_by_constraint_id(&self.constraint_id)
+                        .into_iter()
+                        .filter(|h| h.role() == ConstraintRole::DistributedAppearanceCounter)
+                        .map(|h| h.index())
+                        .collect();
+                    for index in local_counter_indices {
+                        evaluations.insert(
+                            &message.case_id,
+                            index,
+                            LastEvaluation {
+                                trigger_time,
+                                triggering_event: message.triggering_event,
+                                detail: EvaluationDetail::DistributedCounterReport {
+                                    trigger_address: sender_address,
+                                },
                             },
-                        },
+                        );
+                    }
+                }
+                None => {
+                    log::warn!(
+                        "distributed appearance counter handler: PullTokenRequest for ({}/{}) has no timestamp. late events will not be able to correct this result",
+                        message.case_id,
+                        self.constraint_id
                     );
                 }
-            }
-            None => {
-                log::warn!(
-                    "distributed appearance counter handler: PullTokenRequest for ({}/{}) has no timestamp. late events will not be able to correct this result",
-                    message.case_id,
-                    self.constraint_id
-                );
             }
         }
 
@@ -246,15 +270,16 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             self.constraint_id
         );
 
-        // delete counter token
-        {
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.remove_meta_token(case_id, self.index);
-        }
+        // same order as everywhere else in this handler: evaluations -> meta_token_store
         // remove evaluations
         {
             let mut evaluations = state.evaluations.lock().unwrap();
             evaluations.remove(case_id, self.index);
+        }
+        // delete counter token
+        {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            meta_tokens.remove_meta_token(case_id, self.index);
         }
     }
 }

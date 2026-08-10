@@ -7,7 +7,7 @@ use crate::{
     config::node_config::{AppearanceCounterReset, MinMaxMode},
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::{emit_result, emit_result_at},
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -46,50 +46,77 @@ impl ConstraintHandler for AppearanceCounterHandler {
             event
         );
 
-        // check if a trigger event already evaluated the counter
-        let late_evaluation = {
+        // check if a trigger event already evaluated the counter (and update the counter atomically)
+        let (late_evaluation, count) = {
             let evaluations = state.evaluations.lock().unwrap();
-            match evaluations.get_cloned(&event.case_id, self.index) {
+            let late_evaluation = match evaluations.get_cloned(&event.case_id, self.index) {
                 Some(evaluation) if event.timestamp <= evaluation.trigger_time => Some(evaluation),
                 _ => None,
-            }
+            };
+
+            // a late event belongs to the window that was already evaluated and should be counted there (depending on the reset policy)
+            let skip_count = match &late_evaluation {
+                None => false,
+                Some(evaluation) => match self.reset {
+                    AppearanceCounterReset::Keep => false,
+                    AppearanceCounterReset::Zero => true,
+                    AppearanceCounterReset::Subtract => match &evaluation.detail {
+                        EvaluationDetail::Counter { evaluated_count } => {
+                            *evaluated_count < self.frequency
+                        }
+                        // not a counter evaluation - fall back to counting it
+                        _ => false,
+                    },
+                },
+            };
+
+            let count = if skip_count {
+                None
+            } else {
+                let mut meta_tokens = state.meta_token_store.lock().unwrap();
+                Some(
+                    match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                        Some(counter_token) => {
+                            counter_token.payload.increment_counter();
+                            counter_token.payload.get_count()
+                        }
+                        None => {
+                            log::info!(
+                                "appearance counter handler: starting counter for event_id={} constraint_id={} case_id={}",
+                                self.event_id,
+                                self.constraint_id,
+                                event.case_id
+                            );
+
+                            let counter_token = Token::new_with_payload(
+                                event.case_id.clone(),
+                                self.constraint_id.clone(),
+                                ConstraintType::Appearance,
+                                None,
+                                state.config.node_id,
+                                TokenPayload::Counter(1),
+                            );
+                            meta_tokens.insert_meta_token(counter_token.clone(), self.index);
+                            counter_token.payload.get_count()
+                        }
+                    },
+                )
+            };
+
+            (late_evaluation, count)
         };
+
         if let Some(evaluation) = late_evaluation {
             self.correct_with_late_event(event, evaluation, state.clone())
                 .await;
-            // for Zero/Subtract the event should not be counted because it still belongs to the last trigger window
-            if self.reset == AppearanceCounterReset::Keep {
-                return;
-            }
         }
 
-        let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        let count = match meta_tokens.get_token_mut(&event.case_id, self.index) {
-            Some(counter_token) => {
-                counter_token.payload.increment_counter();
-                counter_token.payload.get_count()
-            }
-            None => {
-                log::info!(
-                    "appearance counter handler: starting counter for event_id={} constraint_id={} case_id={}",
-                    self.event_id,
-                    self.constraint_id,
-                    event.case_id
-                );
-
-                let counter_token = Token::new_with_payload(
-                    event.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::Appearance,
-                    None,
-                    state.config.node_id,
-                    TokenPayload::Counter(1),
-                );
-                meta_tokens.insert_meta_token(counter_token.clone(), self.index);
-                counter_token.payload.get_count()
-            }
-        };
-        log::info!("appearance counter handler: counter is now at {}", count);
+        match count {
+            Some(count) => log::info!("appearance counter handler: counter is now at {}", count),
+            None => log::info!(
+                "appearance counter handler: event was folded into the recorded evaluation, counter left unchanged"
+            ),
+        }
     }
 
     async fn handle_message(
@@ -114,32 +141,36 @@ impl ConstraintHandler for AppearanceCounterHandler {
             return;
         }
 
-        let (count, decided_at) = self.get_and_reset_counter(&message.case_id, state.clone());
+        let (count, decided_at) = {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            let (count, decided_at) = self.get_and_reset_counter(&message.case_id, state.clone());
 
-        // remember the evaluation for late corrections
-        match message.timestamp {
-            Some(trigger_time) => {
-                let mut evaluations = state.evaluations.lock().unwrap();
-                evaluations.insert(
-                    &message.case_id,
-                    self.index,
-                    LastEvaluation {
-                        trigger_time,
-                        triggering_event: message.triggering_event,
-                        detail: EvaluationDetail::Counter {
-                            evaluated_count: count,
+            // remember the evaluation for late corrections
+            match message.timestamp {
+                Some(trigger_time) => {
+                    evaluations.insert(
+                        &message.case_id,
+                        self.index,
+                        LastEvaluation {
+                            trigger_time,
+                            triggering_event: message.triggering_event,
+                            detail: EvaluationDetail::Counter {
+                                evaluated_count: count,
+                            },
                         },
-                    },
-                );
+                    );
+                }
+                None => {
+                    log::warn!(
+                        "appearance counter handler: TriggerCheck for ({}/{}) has no timestamp. late events will not be able to correct this result",
+                        message.case_id,
+                        self.constraint_id
+                    );
+                }
             }
-            None => {
-                log::warn!(
-                    "appearance counter handler: TriggerCheck for ({}/{}) has no timestamp. late events will not be able to correct this result",
-                    message.case_id,
-                    self.constraint_id
-                );
-            }
-        }
+
+            (count, decided_at)
+        };
 
         if let Some((info, result)) = self.evaluate_counter(count) {
             emit_result_at(
@@ -197,15 +228,14 @@ impl ConstraintHandler for AppearanceCounterHandler {
             self.constraint_id
         );
 
+        {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            evaluations.remove(case_id, self.index);
+        }
         // remove counter token (meta)
         {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             meta_tokens.remove_meta_token(case_id, self.index);
-        }
-        // remove evaluations
-        {
-            let mut evaluations = state.evaluations.lock().unwrap();
-            evaluations.remove(case_id, self.index);
         }
     }
 }

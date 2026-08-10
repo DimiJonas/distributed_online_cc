@@ -84,24 +84,65 @@ impl ConstraintHandler for OrderFirstHandler {
                 "order first handler: no blocking token exists - order second event has not happened yet"
             );
 
-            let mut token_out = state.token_out.lock().unwrap();
+            {
+                let mut token_out = state.token_out.lock().unwrap();
 
-            match token_out.get_out_mut(&event.case_id, self.index) {
-                // a token for recording the order first executions already exists
-                Some(recording_token) => recording_token.payload.push_timestamp(event.timestamp),
+                match token_out.get_out_mut(&event.case_id, self.index) {
+                    // a token for recording the order first executions already exists
+                    Some(recording_token) => {
+                        recording_token.payload.push_timestamp(event.timestamp)
+                    }
 
-                None => {
-                    let mut recording_token = Token::new(
-                        event.case_id.clone(),
-                        self.constraint_id.clone(),
-                        ConstraintType::Order,
-                        Some(event.timestamp),
-                        state.config.node_id,
-                    );
-                    recording_token.payload.push_timestamp(event.timestamp);
-                    token_out.produce_without_overwrite(recording_token, self.index);
-                }
+                    None => {
+                        let mut recording_token = Token::new(
+                            event.case_id.clone(),
+                            self.constraint_id.clone(),
+                            ConstraintType::Order,
+                            Some(event.timestamp),
+                            state.config.node_id,
+                        );
+                        recording_token.payload.push_timestamp(event.timestamp);
+                        token_out.produce_without_overwrite(recording_token, self.index);
+                    }
+                };
+            }
+
+            // re-read because token_in and token_out have different locks
+            let late_blocking_token = {
+                let token_in = state.token_in.lock().unwrap();
+                token_in.get_in_cloned(&event.case_id, self.index)
             };
+            if let Some(blocking_token) = late_blocking_token
+                && let Some(order_second_event_time) = blocking_token.event_time
+            {
+                let recording_token = {
+                    let mut token_out = state.token_out.lock().unwrap();
+                    token_out.remove_out(&event.case_id, self.index)
+                };
+                if let Some(token) = recording_token {
+                    log::info!(
+                        "order first handler: blocking token appeared while recording - evaluating the recorded executions here"
+                    );
+                    for order_first_time in token.payload.timestamps().to_vec() {
+                        if order_first_time >= order_second_event_time {
+                            emit_result(
+                                &event.case_id,
+                                &self.constraint_id,
+                                ConstraintType::Order,
+                                ConstraintResultType::Violated,
+                                format!(
+                                    "order first event happened at {} after order second event at {}",
+                                    order_first_time, order_second_event_time
+                                ),
+                                state.clone(),
+                                ResultTrigger::Event,
+                                Some(event.instance_id),
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
         };
     }
 

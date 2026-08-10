@@ -54,24 +54,21 @@ impl ConstraintHandler for TimeStartHandler {
         let token_id = token.id;
 
         let (pending_stop, timer_store_read_at) = {
-            let timer_store = state.timer_token_store.lock().unwrap();
-            (
-                timer_store.earliest_pending_stop_after(
-                    &event.case_id,
-                    &self.constraint_id,
-                    event.timestamp,
-                ),
-                Utc::now(),
-            )
+            let mut timer_store = state.timer_token_store.lock().unwrap();
+            let pending_stop = timer_store.earliest_pending_stop_after(
+                &event.case_id,
+                &self.constraint_id,
+                event.timestamp,
+            );
+            match pending_stop {
+                // settled right away, so no watchdog is armed - keep it for late corrections
+                Some(_) => timer_store.insert_settled_token(token.clone()),
+                None => timer_store.insert_timer_token(token.clone()),
+            }
+            (pending_stop, Utc::now())
         };
 
         if let Some(stop_time) = pending_stop {
-            // remember the token as settled for late corrections
-            {
-                let mut timer_store = state.timer_token_store.lock().unwrap();
-                timer_store.insert_settled_token(token.clone());
-            }
-
             let (result, info) = self.evaluate_token(&token, stop_time);
             let info = format!("{info} (late correction: stop event observed before start event)");
             log::info!(
@@ -94,11 +91,6 @@ impl ConstraintHandler for TimeStartHandler {
             )
             .await;
             return;
-        }
-
-        {
-            let mut timer_store = state.timer_token_store.lock().unwrap();
-            timer_store.insert_timer_token(token);
         }
 
         log::info!(

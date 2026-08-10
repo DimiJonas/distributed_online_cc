@@ -46,47 +46,53 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             event
         );
 
-        // get claim token or create one
-        let meta_token = {
-            let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(&event.case_id, self.index)
-        };
-
-        let mut claim_token = match meta_token {
-            Some(token) => token,
-            None => {
-                log::info!(
-                    "not coexistence a handler: no meta execution token exists yet. producing claim token and starting negotiation"
-                );
-
-                let claim_token = Token::new(
-                    event.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::NotCoexistence,
-                    Some(event.timestamp),
-                    state.config.node_id,
-                );
-
-                {
-                    let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+        // record the earliest local occurrence and decide whether a negotiation is needed
+        let (mut claim_token, negotiate) = {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                Some(stored) => {
+                    let negotiate = match stored.event_time {
+                        // token was created while answering the other sides negotiation before this handler saw its own event
+                        None => {
+                            stored.event_time = Some(event.timestamp);
+                            true
+                        }
+                        Some(recorded) if event.timestamp < recorded => {
+                            log::info!(
+                                "not coexistence a handler: event at {} is earlier than the recorded occurrence at {} - renegotiating",
+                                event.timestamp,
+                                recorded
+                            );
+                            stored.event_time = Some(event.timestamp);
+                            // the recorded permission was decided with the later time
+                            stored.payload = TokenPayload::None;
+                            true
+                        }
+                        // a later occurrence does not change the earliest one
+                        Some(_) => stored.payload == TokenPayload::None,
+                    };
+                    (stored.clone(), negotiate)
                 }
+                None => {
+                    log::info!(
+                        "not coexistence a handler: no meta execution token exists yet. producing claim token and starting negotiation"
+                    );
 
-                claim_token
+                    let claim_token = Token::new(
+                        event.case_id.clone(),
+                        self.constraint_id.clone(),
+                        ConstraintType::NotCoexistence,
+                        Some(event.timestamp),
+                        state.config.node_id,
+                    );
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                    (claim_token, true)
+                }
             }
         };
 
-        // the token may have been created while answering the other sides negotiation, before this handler saw its own event
-        // record the event time now, so later negotiations and the case end fallback emit correct results
-        if claim_token.event_time.is_none() {
-            claim_token.event_time = Some(event.timestamp);
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-        }
-
-        if claim_token.payload == TokenPayload::None {
+        if negotiate {
             // negotiate execution permission
-
             let other_event_time = match self
                 .fetch_other_event_time(&claim_token, state.clone())
                 .await
@@ -129,7 +135,15 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             // save token with permissions
             {
                 let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                    Some(stored) => {
+                        stored.payload = claim_token.payload.clone();
+                        if stored.event_time.is_none() {
+                            stored.event_time = Some(event.timestamp);
+                        }
+                    }
+                    None => meta_tokens.insert_meta_token(claim_token.clone(), self.index),
+                }
             }
         }
 
@@ -282,19 +296,50 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 }
             }
             None => {
-                claim_token.payload.deny_execution_permission();
+                // the local event has not been seen here yet so leave the payload untouched
                 log::info!(
-                    "not coexistence a handler: set execution permission to {} because NONE > {}",
-                    claim_token.payload.is_execution_allowed(),
+                    "not coexistence a handler: local event time not known yet, leaving the permission undecided (other side at {})",
                     other_event_time
                 );
+                return;
             }
         }
 
         // save token with permissions
-        {
+        let permission_changed = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+            match meta_tokens.get_token_mut(&message.case_id, self.index) {
+                Some(stored) => {
+                    let changed = stored.payload != claim_token.payload;
+                    stored.payload = claim_token.payload.clone();
+                    if stored.event_time.is_none() {
+                        stored.event_time = claim_token.event_time;
+                    }
+                    changed
+                }
+                None => {
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                    true
+                }
+            }
+        };
+
+        if permission_changed && !claim_token.payload.is_execution_allowed() {
+            let info = format!(
+                "execution of event {} is forbidden, because not coexistence B event happened first",
+                self.event_id
+            );
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::NotCoexistence,
+                ConstraintResultType::Violated,
+                info,
+                state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
+            )
+            .await;
         }
     }
 
@@ -341,6 +386,28 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         return;
                     }
                 }
+            }
+            Some(token) if !token.payload.is_execution_allowed() => {
+                log::warn!(
+                    "not coexistence a handler: claim token for ({}/{}) is denied at case end but no result was emitted",
+                    case_id,
+                    self.constraint_id
+                );
+                emit_result(
+                    case_id,
+                    &self.constraint_id,
+                    ConstraintType::NotCoexistence,
+                    ConstraintResultType::Violated,
+                    format!(
+                        "execution of event {} is forbidden, because not coexistence B event happened first",
+                        self.event_id
+                    ),
+                    state.clone(),
+                    ResultTrigger::CaseEnd,
+                    None,
+                )
+                .await;
+                return;
             }
             Some(_) => {
                 // A happened and was allowed - the B side is responsible for
@@ -440,47 +507,53 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             event
         );
 
-        // get claim token or create one
-        let meta_token = {
-            let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(&event.case_id, self.index)
-        };
-
-        let mut claim_token = match meta_token {
-            Some(token) => token,
-            None => {
-                log::info!(
-                    "not coexistence b handler: no meta execution token exists yet. producing claim token and starting negotiation"
-                );
-
-                let claim_token = Token::new(
-                    event.case_id.clone(),
-                    self.constraint_id.clone(),
-                    ConstraintType::NotCoexistence,
-                    Some(event.timestamp),
-                    state.config.node_id,
-                );
-
-                {
-                    let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+        // record the earliest local occurrence and decide whether a negotiation is needed
+        let (mut claim_token, negotiate) = {
+            let mut meta_tokens = state.meta_token_store.lock().unwrap();
+            match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                Some(stored) => {
+                    let negotiate = match stored.event_time {
+                        // the token was created while answering the other sides negotiation before this handler saw its own event
+                        None => {
+                            stored.event_time = Some(event.timestamp);
+                            true
+                        }
+                        Some(recorded) if event.timestamp < recorded => {
+                            log::info!(
+                                "not coexistence b handler: event at {} is earlier than the recorded occurrence at {} - renegotiating",
+                                event.timestamp,
+                                recorded
+                            );
+                            stored.event_time = Some(event.timestamp);
+                            // the recorded permission was decided against the later time
+                            stored.payload = TokenPayload::None;
+                            true
+                        }
+                        // a later occurrence does not change the earliest one
+                        Some(_) => stored.payload == TokenPayload::None,
+                    };
+                    (stored.clone(), negotiate)
                 }
+                None => {
+                    log::info!(
+                        "not coexistence b handler: no meta execution token exists yet. producing claim token and starting negotiation"
+                    );
 
-                claim_token
+                    let claim_token = Token::new(
+                        event.case_id.clone(),
+                        self.constraint_id.clone(),
+                        ConstraintType::NotCoexistence,
+                        Some(event.timestamp),
+                        state.config.node_id,
+                    );
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                    (claim_token, true)
+                }
             }
         };
 
-        // the token may have been created while answering the other sides negotiation, before this handler saw its own event
-        // record the event time now, so later negotiations and the case end fallback emit correct results
-        if claim_token.event_time.is_none() {
-            claim_token.event_time = Some(event.timestamp);
-            let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-        }
-
-        if claim_token.payload == TokenPayload::None {
+        if negotiate {
             // negotiate execution permission
-
             let message = PeerMessage::conformance_req(
                 Uuid::new_v4(),
                 CCMessage::push_claim_token(claim_token.clone(), self.role),
@@ -550,7 +623,15 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             // save token with permissions
             {
                 let mut meta_tokens = state.meta_token_store.lock().unwrap();
-                meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                match meta_tokens.get_token_mut(&event.case_id, self.index) {
+                    Some(stored) => {
+                        stored.payload = claim_token.payload.clone();
+                        if stored.event_time.is_none() {
+                            stored.event_time = Some(event.timestamp);
+                        }
+                    }
+                    None => meta_tokens.insert_meta_token(claim_token.clone(), self.index),
+                }
             }
         }
 
@@ -702,19 +783,50 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 }
             }
             None => {
-                claim_token.payload.deny_execution_permission();
+                // the local event has not been seen here yet so leave the payload untouched
                 log::info!(
-                    "not coexistence b handler: set execution permission to {} because NONE > {}",
-                    claim_token.payload.is_execution_allowed(),
+                    "not coexistence b handler: local event time not known yet, leaving the permission undecided (other side at {})",
                     other_event_time
                 );
+                return;
             }
         }
 
         // save token with permissions
-        {
+        let permission_changed = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+            match meta_tokens.get_token_mut(&message.case_id, self.index) {
+                Some(stored) => {
+                    let changed = stored.payload != claim_token.payload;
+                    stored.payload = claim_token.payload.clone();
+                    if stored.event_time.is_none() {
+                        stored.event_time = claim_token.event_time;
+                    }
+                    changed
+                }
+                None => {
+                    meta_tokens.insert_meta_token(claim_token.clone(), self.index);
+                    true
+                }
+            }
+        };
+
+        if permission_changed && !claim_token.payload.is_execution_allowed() {
+            let info = format!(
+                "execution of event {} is forbidden, because not coexistence A event happened first",
+                self.event_id
+            );
+            emit_result(
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::NotCoexistence,
+                ConstraintResultType::Violated,
+                info,
+                state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
+            )
+            .await;
         }
     }
 
@@ -741,20 +853,44 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             meta_tokens.get_token_cloned(case_id, self.index)
         };
 
-        if let Some(token) = &claim_token
-            && token.event_time.is_none()
-        {
-            emit_result(
-                case_id,
-                &self.constraint_id,
-                ConstraintType::NotCoexistence,
-                ConstraintResultType::Satisfied,
-                "only the not coexistence A event happened until case end".to_string(),
-                state.clone(),
-                ResultTrigger::CaseEnd,
-                None,
-            )
-            .await;
+        match &claim_token {
+            Some(token) if token.event_time.is_none() => {
+                emit_result(
+                    case_id,
+                    &self.constraint_id,
+                    ConstraintType::NotCoexistence,
+                    ConstraintResultType::Satisfied,
+                    "only the not coexistence A event happened until case end".to_string(),
+                    state.clone(),
+                    ResultTrigger::CaseEnd,
+                    None,
+                )
+                .await;
+            }
+            Some(token)
+                if token.payload != TokenPayload::None && !token.payload.is_execution_allowed() =>
+            {
+                log::warn!(
+                    "not coexistence b handler: claim token for ({}/{}) is denied at case end but no result was emitted",
+                    case_id,
+                    self.constraint_id
+                );
+                emit_result(
+                    case_id,
+                    &self.constraint_id,
+                    ConstraintType::NotCoexistence,
+                    ConstraintResultType::Violated,
+                    format!(
+                        "execution of event {} is forbidden, because not coexistence A event happened first",
+                        self.event_id
+                    ),
+                    state.clone(),
+                    ResultTrigger::CaseEnd,
+                    None,
+                )
+                .await;
+            }
+            _ => {}
         }
     }
 

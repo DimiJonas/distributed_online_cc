@@ -148,20 +148,34 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                         token_out.produce_with_overwrite(consumer_token, self.index);
                     }
                 }
-                // emit violated result (for now)
-                let info = "producer event has not happened (yet)".to_string();
-                emit_result(
-                    &event.case_id,
-                    &self.constraint_id,
-                    ConstraintType::Precedence,
-                    ConstraintResultType::Violated,
-                    info,
-                    state.clone(),
-                    ResultTrigger::Event,
-                    Some(event.instance_id),
-                )
-                .await;
-                return;
+
+                // re-read because token_in and token_out have different locks
+                if let Some(late_producer_event_time) = {
+                    let token_in = state.token_in.lock().unwrap();
+                    token_in
+                        .get_in_cloned(&event.case_id, self.index)
+                        .and_then(|t| t.event_time)
+                } {
+                    log::info!(
+                        "precedence consumer handler: producer token appeared while recording the consumer event - evaluating against it"
+                    );
+                    late_producer_event_time
+                } else {
+                    // emit violated result (for now)
+                    let info = "producer event has not happened (yet)".to_string();
+                    emit_result(
+                        &event.case_id,
+                        &self.constraint_id,
+                        ConstraintType::Precedence,
+                        ConstraintResultType::Violated,
+                        info,
+                        state.clone(),
+                        ResultTrigger::Event,
+                        Some(event.instance_id),
+                    )
+                    .await;
+                    return;
+                }
             }
         };
 
