@@ -1,10 +1,11 @@
 use std::time::Duration;
 
+use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::node_config::MinMaxMode,
-    conformance_checking::result_emitter::emit_result,
+    conformance_checking::result_emitter::emit_result_at,
     measurement::record::ResultTrigger,
     state::app_state::AppState,
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventTime, TokenId},
@@ -35,6 +36,7 @@ pub async fn watchdog_task(
 
         _ = state.stream_clock.wait_for(deadline) => {
             // the stream time moved past the deadline - stop event never arrived in time
+            let decided_at = Utc::now();
             let claimed = {
                 let mut timer_store = state.timer_token_store.lock().unwrap();
                 timer_store.fire_timer_token(&token_id)
@@ -60,7 +62,8 @@ pub async fn watchdog_task(
                         "time watchdog: MAX constraint {}/case {} VIOLATED because token {} passed its deadline {} (limit {:?})",
                         constraint_id, case_id, token_id, deadline, duration
                     );
-                    emit_result(
+                    emit_result_at(
+                        decided_at,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,
@@ -80,7 +83,8 @@ pub async fn watchdog_task(
                         "time watchdog: MIN constraint {}/case {}: token {} passed its deadline {}",
                         constraint_id, case_id, token_id, deadline
                     );
-                    emit_result(
+                    emit_result_at(
+                        decided_at,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,

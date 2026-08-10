@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
     config::node_config::{AppearanceCounterReset, MinMaxMode},
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::{emit_result, emit_result_at},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -19,7 +21,7 @@ use crate::{
     },
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
+        EventTime, HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
@@ -112,7 +114,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
             return;
         }
 
-        let count: u64 = self.get_and_reset_counter(&message.case_id, state.clone());
+        let (count, decided_at) = self.get_and_reset_counter(&message.case_id, state.clone());
 
         // remember the evaluation for late corrections
         match message.timestamp {
@@ -140,7 +142,8 @@ impl ConstraintHandler for AppearanceCounterHandler {
         }
 
         if let Some((info, result)) = self.evaluate_counter(count) {
-            emit_result(
+            emit_result_at(
+                decided_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -210,9 +213,13 @@ impl AppearanceCounterHandler {
         evaluation: LastEvaluation,
         state: AppState,
     ) {
-        let corrected = {
+        let (corrected, decided_at) = {
             let mut evaluations = state.evaluations.lock().unwrap();
-            evaluations.increment_evaluated_count(&event.case_id, self.index)
+            // this store read decides the verdict
+            (
+                evaluations.increment_evaluated_count(&event.case_id, self.index),
+                Utc::now(),
+            )
         };
         let corrected = match corrected {
             Some(count) => count,
@@ -246,7 +253,8 @@ impl AppearanceCounterHandler {
             ),
         };
 
-        emit_result(
+        emit_result_at(
+            decided_at,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Appearance,
@@ -259,8 +267,10 @@ impl AppearanceCounterHandler {
         .await;
     }
 
-    fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> u64 {
+    fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> (u64, EventTime) {
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
+        // this store read decides the verdict
+        let decided_at = Utc::now();
         match meta_tokens.get_token_mut(case_id, self.index) {
             Some(token) => {
                 let count = token.payload.get_count();
@@ -276,9 +286,9 @@ impl AppearanceCounterHandler {
                         }
                     }
                 }
-                count
+                (count, decided_at)
             }
-            None => 0,
+            None => (0, decided_at),
         }
     }
 

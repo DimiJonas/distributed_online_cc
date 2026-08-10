@@ -35,7 +35,33 @@ pub async fn emit_result(
     result_trigger: ResultTrigger,
     instance_id: Option<EventInstanceId>,
 ) {
-    let result_receive_time = Utc::now();
+    emit_result_at(
+        Utc::now(),
+        case_id,
+        constraint_id,
+        constraint_type,
+        result,
+        info,
+        state,
+        result_trigger,
+        instance_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn emit_result_at(
+    decided_at: DateTime<Utc>,
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
+    result: ConstraintResultType,
+    info: String,
+    state: AppState,
+    result_trigger: ResultTrigger,
+    instance_id: Option<EventInstanceId>,
+) {
+    let result_receive_time = decided_at;
 
     log::debug!(
         "emitting result for ({}/{}): {:?}: {}",
