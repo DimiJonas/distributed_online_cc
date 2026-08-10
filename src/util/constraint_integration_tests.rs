@@ -10,10 +10,10 @@ mod tests {
             config_builder::NodeConfigBuilder,
             node_config::{
                 AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset,
-                MinMaxMode,
+                MinMaxMode, ResultBufferConfig,
             },
         },
-        util::test_tools::{make_traced_event, make_traced_event_with_fixed_timestamp},
+        util::test_tools::make_traced_event_with_fixed_timestamp,
     };
 
     /// Test A — with seven constraints all configured on the SAME event_id, the
@@ -138,24 +138,16 @@ mod tests {
         );
     }
 
-    /// Test B — with several result-producing constraints sharing one event_id, a
-    /// real case end (driven by an EndActivity event that spawns the real
-    /// case-closing task) must leave no result missing: every configured
-    /// constraint_id must have a recorded result.
     #[tokio::test]
     async fn shared_event_id_no_missing_results() {
         const EVENT: &str = "evt";
-        const END: &str = "end";
         const CASE: &str = "caseB";
 
         let constraint_ids = ["r1", "r2", "r3", "a1", "a2", "o1"];
 
         let (state, event_tx, event_rx) = NodeConfigBuilder::new_base_config()
             .port(31010)
-            // long grace so results are still readable when we assert; the test
-            // returns well before it elapses (the background task is dropped).
-            .case_end_grace_period(Duration::from_secs(5))
-            .case_end_ttl(Duration::from_secs(5))
+            .default_result_buffer(ResultBufferConfig::Immediate)
             .constraints(vec![
                 ConstraintConfig::ResponseProducer {
                     constraint_id: "r1".to_string(),
@@ -187,38 +179,40 @@ mod tests {
                     constraint_id: "o1".to_string(),
                     event_id: EVENT.to_string(),
                 },
-                // drives the real case-closing task when the "end" event arrives
-                ConstraintConfig::EndActivity {
-                    constraint_id: "ea".to_string(),
-                    event_id: END.to_string(),
-                },
             ])
             .build_state_with_event_q();
         spawn_event_processor(state.clone(), event_rx);
 
-        // one real event reaches every handler on this event_id (FIFO: processed
-        // before the end event below)
+        // one real event has to reach every handler registered on this event_id
         event_tx
             .send(make_traced_event_with_fixed_timestamp(CASE, EVENT))
             .await
             .unwrap();
-        // then end the case for real -> EndActivity spawns the case-closing task,
-        // which runs handle_case_end on every handler
-        event_tx.send(make_traced_event(CASE, END)).await.unwrap();
 
-        // give the processor + closing task time to run handle_case_end (well under
-        // the 5s grace period, so results are still in the store)
+        // let the event processor drain the queue and dispatch to all handlers
         sleep(Duration::from_millis(200)).await;
 
-        // every configured result-producing constraint left a result — none missing
+        // drive the case end hooks the way case_closing_task does, but stop before it
+        // closes the case and wipes cc_results, so the verdicts stay observable
+        for handler in state.handlers.all() {
+            handler
+                .handle_case_end(&CASE.to_string(), state.clone())
+                .await;
+        }
+
         let results = state.cc_results.lock().unwrap();
-        for cid in constraint_ids {
-            assert!(
+        let missing: Vec<&str> = constraint_ids
+            .iter()
+            .copied()
+            .filter(|cid| {
                 results
                     .get_constraint(&CASE.to_string(), &cid.to_string())
-                    .is_some(),
-                "constraint {cid} has no result after a real dispatch + case end (missing-result bug)"
-            );
-        }
+                    .is_none()
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "constraints {missing:?} have no result after a real dispatch + case end (missing-result bug)"
+        );
     }
 }

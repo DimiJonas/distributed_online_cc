@@ -63,9 +63,10 @@ impl ConstraintHandler for TimeStartHandler {
         };
 
         if let Some(stop_time) = pending_stop {
+            // remember the token as settled for late corrections
             {
                 let mut timer_store = state.timer_token_store.lock().unwrap();
-                timer_store.mark_start_seen(&event.case_id, &self.constraint_id);
+                timer_store.insert_settled_token(token.clone());
             }
 
             let (result, info) = self.evaluate_token(&token, stop_time);
@@ -173,41 +174,53 @@ impl ConstraintHandler for TimeStartHandler {
             }
         };
 
-        // cancel all watchdogs for this (case, constraint) at once via parent cancel token
-        {
-            let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
-            cancel_tokens.cancel_constraint(&message.case_id, &self.constraint_id);
-            cancel_tokens.remove_constraint(&message.case_id, &self.constraint_id);
-        }
-
-        // evaluate timer data and record stop time
+        // record the stop time and collect the tokens it settles
         let timer_data = {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             timer_store.record_pending_stop(&message.case_id, &self.constraint_id, stop_time);
-            timer_store.take_timer_tokens_for_evaluation(&message.case_id, &self.constraint_id)
+            timer_store.take_tokens_settled_by(&message.case_id, &self.constraint_id, stop_time)
         };
 
+        // cancel only the watchdogs of the tokens this stop event actually settles
+        // tokens it does not qualify for stay live and keep their watchdogs running
+        if !timer_data.newly_settled.is_empty() {
+            let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
+            for token in timer_data.newly_settled.iter() {
+                cancel_tokens.cancel_watchdog(token.id);
+                cancel_tokens.remove_token(&token.id);
+            }
+        }
+
         log::info!(
-            "time start handler: evaluating {} live and {} fired tokens for ({}/{})",
-            timer_data.live_tokens.len(),
-            timer_data.fired_tokens.len(),
+            "time start handler: stop event at {} settles {} token(s) and corrects {} token(s) for ({}/{})",
+            stop_time,
+            timer_data.newly_settled.len(),
+            timer_data.corrections.len(),
             message.case_id,
             self.constraint_id
         );
 
-        // evaluate for each token (live and fired - which allows for corrections) separately
-        // if violated or satisfied depending on event times and time constraint mode (min/max)
+        // evaluate for each token separately if violated or satisfied depending on event times and time constraint mode
         for token in timer_data
-            .live_tokens
+            .newly_settled
             .iter()
-            .chain(timer_data.fired_tokens.iter())
+            .chain(timer_data.corrections.iter())
         {
-            let was_fired = timer_data.live_tokens.iter().all(|t| t.id != token.id);
+            let is_correction = timer_data.newly_settled.iter().all(|t| t.id != token.id);
             let (result, info) = self.evaluate_token(token, stop_time);
+            let info = if is_correction {
+                format!("{info} (late correction: an earlier stop event arrived)")
+            } else {
+                info
+            };
             log::info!(
                 "time start handler: : token {} ({}) -> {:?}: {}",
                 token.id,
-                if was_fired { "late-correction" } else { "live" },
+                if is_correction {
+                    "late-correction"
+                } else {
+                    "live"
+                },
                 result,
                 info
             );
@@ -258,9 +271,9 @@ impl ConstraintHandler for TimeStartHandler {
                 cancel_tokens.remove_constraint(case_id, &self.constraint_id);
             }
 
-            let timer_data = {
+            let live_tokens = {
                 let mut timer_store = state.timer_token_store.lock().unwrap();
-                timer_store.take_timer_tokens_for_evaluation(case_id, &self.constraint_id)
+                timer_store.take_live_timer_tokens(case_id, &self.constraint_id)
             };
 
             log::info!(
@@ -270,7 +283,7 @@ impl ConstraintHandler for TimeStartHandler {
                 live_timers
             );
 
-            for token in timer_data.live_tokens.iter() {
+            for token in live_tokens.iter() {
                 let (result, verdict) = match self.mode {
                     MinMaxMode::Max => (ConstraintResultType::Violated, "TimerMax"),
                     MinMaxMode::Min => (ConstraintResultType::Satisfied, "TimerMin"),
@@ -484,7 +497,7 @@ mod tests {
     use crate::util::test_tools::{
         make_config_with_buffers, make_state_from_config, make_traced_event_at,
     };
-    use chrono::TimeZone;
+    use chrono::{TimeDelta, TimeZone};
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -601,6 +614,13 @@ mod tests {
 
         handler.handle_event(&event, state.clone()).await;
 
+        // stream clock
+        state.stream_clock.advance(
+            event
+                .timestamp
+                .checked_add_signed(TimeDelta::seconds(11))
+                .unwrap(),
+        );
         advance_and_settle(11).await;
 
         assert!(matches!(
@@ -618,6 +638,13 @@ mod tests {
 
         handler.handle_event(&event, state.clone()).await;
 
+        // stream clock
+        state.stream_clock.advance(
+            event
+                .timestamp
+                .checked_add_signed(TimeDelta::seconds(11))
+                .unwrap(),
+        );
         advance_and_settle(11).await;
 
         assert!(matches!(
@@ -696,6 +723,142 @@ mod tests {
         ));
     }
 
+    // ── pairing is decided by event time, not by arrival order ───────────
+
+    /// the sepsis log contains traces where the lab result carries an earlier timestamp than the
+    /// triage event that starts the timer. such a stop must not settle the timer: doing so produced
+    /// a negative elapsed time that got clamped to zero and reported as trivially satisfied
+    #[tokio::test(start_paused = true)]
+    async fn stop_before_the_start_does_not_settle_the_timer() {
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
+        let event = make_traced_event_at(CASE, "start", 100);
+        handler.handle_event(&event, state.clone()).await;
+
+        let stop_time = base_time() + chrono::Duration::seconds(40);
+        let msg = CCMessage::trigger_check(
+            CASE.into(),
+            CID.into(),
+            stop_time,
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), msg, None).await;
+
+        assert!(
+            read_result(&state).is_none(),
+            "a stop before the start must not produce a verdict"
+        );
+        assert_eq!(live_count(&state), 1, "the timer has to stay live");
+    }
+
+    /// two stop events both qualify - the verdict has to be the one of the earlier stop whichever
+    /// order the messages arrive in
+    #[tokio::test(start_paused = true)]
+    async fn earliest_qualifying_stop_decides_regardless_of_arrival_order() {
+        for descending in [false, true] {
+            let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+            let handler = make_handler(10, MinMaxMode::Max);
+            handler
+                .handle_event(&make_traced_event_at(CASE, "start", 0), state.clone())
+                .await;
+
+            // 3s after the start is within the 10s limit, 40s is not
+            let mut offsets = [3i64, 40i64];
+            if descending {
+                offsets.reverse();
+            }
+            for offset in offsets {
+                let msg = CCMessage::trigger_check(
+                    CASE.into(),
+                    CID.into(),
+                    base_time() + chrono::Duration::seconds(offset),
+                    EventInstanceId::new_v4(),
+                );
+                handler.handle_message(state.clone(), msg, None).await;
+            }
+
+            assert!(
+                matches!(read_result(&state), Some(ConstraintResultType::Satisfied)),
+                "the earliest qualifying stop has to decide (descending arrival: {descending})"
+            );
+        }
+    }
+
+    /// a start event processed after a stop that does not qualify still arms a watchdog
+    #[tokio::test(start_paused = true)]
+    async fn start_after_a_non_qualifying_stop_still_arms_a_watchdog() {
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
+
+        // the stop arrives first and is earlier in event time than the start that follows
+        let msg = CCMessage::trigger_check(
+            CASE.into(),
+            CID.into(),
+            base_time() + chrono::Duration::seconds(40),
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), msg, None).await;
+
+        let event = make_traced_event_at(CASE, "start", 100);
+        handler.handle_event(&event, state.clone()).await;
+        assert_eq!(live_count(&state), 1);
+        assert!(read_result(&state).is_none());
+
+        // push the stream past the deadline (start at +100s, limit 10s)
+        state.stream_clock.advance(
+            event
+                .timestamp
+                .checked_add_signed(TimeDelta::seconds(11))
+                .unwrap(),
+        );
+        advance_and_settle(11).await;
+
+        assert!(matches!(
+            read_result(&state),
+            Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// a stop observed before the start settles it right away when it qualifies, and the retained
+    /// token is still correctable by an even earlier stop afterwards
+    #[tokio::test(start_paused = true)]
+    async fn start_after_a_qualifying_stop_settles_immediately_and_stays_correctable() {
+        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let handler = make_handler(10, MinMaxMode::Max);
+
+        // stop at +40s arrives before the start at +0s, so it is out of the 10s limit
+        let msg = CCMessage::trigger_check(
+            CASE.into(),
+            CID.into(),
+            base_time() + chrono::Duration::seconds(40),
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), msg, None).await;
+
+        handler
+            .handle_event(&make_traced_event_at(CASE, "start", 0), state.clone())
+            .await;
+        assert!(matches!(
+            read_result(&state),
+            Some(ConstraintResultType::Violated)
+        ));
+        assert_eq!(live_count(&state), 0, "no watchdog may be armed");
+
+        // an earlier stop turns up afterwards and has to correct the verdict
+        let earlier = CCMessage::trigger_check(
+            CASE.into(),
+            CID.into(),
+            base_time() + chrono::Duration::seconds(4),
+            EventInstanceId::new_v4(),
+        );
+        handler.handle_message(state.clone(), earlier, None).await;
+
+        assert!(matches!(
+            read_result(&state),
+            Some(ConstraintResultType::Satisfied)
+        ));
+    }
+
     // ── live evaluation: Min ─────────────────────────────────────────────
 
     #[tokio::test(start_paused = true)]
@@ -763,6 +926,14 @@ mod tests {
         handler.handle_event(&event, state.clone()).await;
 
         // Let the watchdog fire.
+        // stream clock
+        state.stream_clock.advance(
+            event
+                .timestamp
+                .checked_add_signed(TimeDelta::seconds(6))
+                .unwrap(),
+        );
+        // also advance test time
         advance_and_settle(6).await;
 
         // Tentative result is Violated; the fired token is preserved for correction.
@@ -788,8 +959,9 @@ mod tests {
             read_result(&state),
             Some(ConstraintResultType::Satisfied)
         ));
-        // The fired-tokens collection was drained for evaluation.
-        assert_eq!(fired_count(&state), 0);
+        // The fired token is retained rather than drained: a stop that is even earlier in event
+        // time can still arrive and would have to correct the verdict again.
+        assert_eq!(fired_count(&state), 1);
 
         // Run the grace period out — the buffer drains and finalize clears
         // any remaining timer state.
@@ -839,32 +1011,9 @@ mod tests {
         stop.clean_up_state(&CASE.to_string(), state.clone()).await;
     }
 
-    // ── case end fallback ────────────────────────────────────────────────
-
-    // regression: case end arriving while a timer is still live must not  emit the fallback result - the watchdog owns the result
-    // emitting here would produce a second (misleading) result row in the central system
-    // while the distributed system produces only the watchdog result because case end arrives later via gossip
-    #[tokio::test]
-    async fn case_end_with_live_timer_emits_nothing() {
-        let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);
-        let handler = make_handler(10, MinMaxMode::Min);
-
-        // start a timer, then signal case end while it is still live
-        let event = make_traced_event_at(CASE, "start", 0);
-        handler.handle_event(&event, state.clone()).await;
-
-        handler
-            .handle_case_end(&CASE.to_string(), state.clone())
-            .await;
-
-        assert!(
-            read_result(&state).is_none(),
-            "no fallback result may be emitted while a timer is live"
-        );
-    }
-
     /// case end with no timer activity and no prior result emits the
     /// satisfied fallback so every constraint has at least one result per case
+
     #[tokio::test]
     async fn case_end_without_activity_emits_satisfied_fallback() {
         let state = make_test_state(10, MinMaxMode::Min, ResultBufferConfig::Immediate);

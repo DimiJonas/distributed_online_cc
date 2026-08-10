@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::measurement::api::{event_input, timed};
 use crate::network::message_types::PeerMessage;
@@ -15,6 +16,7 @@ use process_mining::core::event_data::case_centric::{
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tokio::time::sleep;
 
 pub async fn handle_event(
     mut stream: UnixStream,
@@ -26,8 +28,15 @@ pub async fn handle_event(
     let mut read_buf = BytesMut::with_capacity(8 * 1024);
 
     loop {
-        let n = stream.read_buf(&mut read_buf).await.unwrap();
-        if n == 0 {
+        let bytes_read = match stream.read_buf(&mut read_buf).await {
+            Ok(bytes_read) => bytes_read,
+            Err(e) => {
+                log::error!("event input handler: error reading from unix socket: {}", e);
+                sleep(Duration::from_millis(5)).await;
+                continue;
+            }
+        };
+        if bytes_read == 0 {
             // full document received, or connection closed
             break;
         }

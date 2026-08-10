@@ -245,7 +245,7 @@ async fn send_result_outbound(
                 result,
             });
             for address in addresses {
-                log::info!(
+                log::debug!(
                     "send_result_outbound: sending result message {} to result sink at {}",
                     result_message,
                     address,
@@ -265,7 +265,7 @@ async fn send_result_outbound(
         None => {
             // no sink configured - logging result
             log::info!(
-                "send_result_outbound: RESULT for case/constraint {}/{} is {:?}: {}",
+                "send_result_outbound: RESULT for case/constraint {}/{} is {}: {}",
                 case_id,
                 constraint_id,
                 result,

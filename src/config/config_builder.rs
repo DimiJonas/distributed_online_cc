@@ -15,11 +15,13 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{
+    network::message_types::CCResultMessage,
     state::app_state::AppState,
     types::{CaseEnd, TracedEvent},
     util::test_tools::{
         make_state_from_config, make_state_with_config_and_event_q,
-        make_state_with_config_and_event_q_and_local_end_q,
+        make_state_with_config_and_event_q_and_outbound_gossip_q,
+        make_state_with_config_and_event_q_and_sink_q,
     },
 };
 pub struct NodeConfigBuilder {
@@ -288,11 +290,31 @@ impl NodeConfigBuilder {
     ) {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (local_end_tx, local_end_rx) = mpsc::channel(64);
-        let state = make_state_with_config_and_event_q_and_local_end_q(
+        let state = make_state_with_config_and_event_q_and_outbound_gossip_q(
             self.config,
             event_tx.clone(),
             local_end_tx.clone(),
         );
         (state, event_tx, event_rx, local_end_tx, local_end_rx)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn build_state_with_event_q_and_sink_q(
+        self,
+    ) -> (
+        AppState,
+        mpsc::Sender<TracedEvent>,
+        mpsc::Receiver<TracedEvent>,
+        mpsc::Sender<CCResultMessage>,
+        mpsc::Receiver<CCResultMessage>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(64);
+        let (sink_tx, sink_rx) = mpsc::channel(64);
+        let state = make_state_with_config_and_event_q_and_sink_q(
+            self.config,
+            event_tx.clone(),
+            sink_tx.clone(),
+        );
+        (state, event_tx, event_rx, sink_tx, sink_rx)
     }
 }

@@ -13,7 +13,7 @@ use crate::{
         node_config::{ConfigMode, ConstraintConfig, NodeConfig, ResultBufferConfig},
     },
     network::{
-        message_types::{CCMessage, CliTestMessage, PeerMessage},
+        message_types::{CCMessage, CCResultMessage, CliTestMessage, PeerMessage},
         peer_manager_task::{PeerManagerMessage, peer_manager_task},
     },
     state::app_state::AppState,
@@ -101,7 +101,7 @@ pub fn make_state_with_config_and_event_q(
     )
 }
 
-pub fn make_state_with_config_and_event_q_and_local_end_q(
+pub fn make_state_with_config_and_event_q_and_outbound_gossip_q(
     config: NodeConfig,
     event_tx: mpsc::Sender<TracedEvent>,
     outbound_gossip_q: mpsc::Sender<Vec<CaseEnd>>,
@@ -115,6 +115,24 @@ pub fn make_state_with_config_and_event_q_and_local_end_q(
         loopback_tx,
         sink_tx,
         outbound_gossip_q,
+        inbound_gossip_tx,
+    )
+}
+
+pub fn make_state_with_config_and_event_q_and_sink_q(
+    config: NodeConfig,
+    event_tx: mpsc::Sender<TracedEvent>,
+    sink_tx: mpsc::Sender<CCResultMessage>,
+) -> AppState {
+    let (loopback_tx, _loopback_rx) = mpsc::channel(16);
+    let (outbound_gossip_tx, _outbound_gossip_rx) = mpsc::channel(16);
+    let (inbound_gossip_tx, _inbound_gossip_rx) = mpsc::channel(16);
+    AppState::new_decentralized(
+        config,
+        event_tx,
+        loopback_tx,
+        sink_tx,
+        outbound_gossip_tx,
         inbound_gossip_tx,
     )
 }
