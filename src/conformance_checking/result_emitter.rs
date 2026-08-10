@@ -81,6 +81,7 @@ pub async fn emit_result_at(
         &policy,
         instance_id,
         result_trigger,
+        decided_at,
     );
 
     match policy {
@@ -326,6 +327,7 @@ pub async fn emit_result_immediate(
         },
         instance_id,
         result_trigger,
+        result_receive_time,
     );
 
     {

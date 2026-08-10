@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::measurement::record::{
@@ -126,6 +127,7 @@ pub fn result_emitted(
     policy: &ResultBufferPolicy,
     instance_id: Option<EventInstanceId>,
     trigger: ResultTrigger,
+    decided_at: DateTime<Utc>,
 ) {
     record(Record::ResultEmitted {
         case_id: case_id.clone(),
@@ -135,6 +137,7 @@ pub fn result_emitted(
         policy: format!("{}", policy),
         instance_id,
         trigger,
+        decided_at,
     });
 }
 

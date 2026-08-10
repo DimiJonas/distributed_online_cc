@@ -36,10 +36,9 @@ pub async fn watchdog_task(
 
         _ = state.stream_clock.wait_for(deadline) => {
             // the stream time moved past the deadline - stop event never arrived in time
-            let decided_at = Utc::now();
-            let claimed = {
+            let (claimed, timer_store_read_at) = {
                 let mut timer_store = state.timer_token_store.lock().unwrap();
-                timer_store.fire_timer_token(&token_id)
+                (timer_store.fire_timer_token(&token_id), Utc::now())
             };
             if claimed.is_none() {
                 log::info!(
@@ -63,7 +62,7 @@ pub async fn watchdog_task(
                         constraint_id, case_id, token_id, deadline, duration
                     );
                     emit_result_at(
-                        decided_at,
+                        timer_store_read_at,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,
@@ -84,7 +83,7 @@ pub async fn watchdog_task(
                         constraint_id, case_id, token_id, deadline
                     );
                     emit_result_at(
-                        decided_at,
+                        timer_store_read_at,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,

@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::types::{CaseId, ConstraintId, EventInstanceId, PeerAddress};
@@ -121,6 +122,7 @@ pub enum Record {
         instance_id: Option<EventInstanceId>,
         // TODO: when aggregating measurements: substract timer duration from the detection delay if needed.
         trigger: ResultTrigger,
+        decided_at: DateTime<Utc>,
     },
 
     /// the result sink persisted a row

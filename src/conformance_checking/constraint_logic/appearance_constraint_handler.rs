@@ -164,15 +164,19 @@ impl ConstraintHandler for AppearanceCounterHandler {
             case_id
         );
 
-        let result_exists = {
+        let (result_exists, results_read_at) = {
             let results = state.cc_results.lock().unwrap();
-            results
-                .get_constraint(case_id, &self.constraint_id)
-                .is_some()
+            (
+                results
+                    .get_constraint(case_id, &self.constraint_id)
+                    .is_some(),
+                Utc::now(),
+            )
         };
         if !result_exists {
             // produce result because none was emitted yet
-            emit_result(
+            emit_result_at(
+                results_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -272,18 +276,16 @@ impl AppearanceCounterHandler {
         // this store read decides the verdict
         let decided_at = Utc::now();
         match meta_tokens.get_token_mut(case_id, self.index) {
-            Some(token) => {
-                let count = token.payload.get_count();
+            Some(counter_token) => {
+                let count = counter_token.payload.get_count();
                 // reset counter while store is locked
-                if let Some(counter_token) = meta_tokens.get_token_mut(case_id, self.index) {
-                    match self.reset {
-                        AppearanceCounterReset::Keep => {}
-                        AppearanceCounterReset::Subtract => {
-                            counter_token.payload.subtract_counter(self.frequency);
-                        }
-                        AppearanceCounterReset::Zero => {
-                            counter_token.payload.reset_counter();
-                        }
+                match self.reset {
+                    AppearanceCounterReset::Keep => {}
+                    AppearanceCounterReset::Subtract => {
+                        counter_token.payload.subtract_counter(self.frequency);
+                    }
+                    AppearanceCounterReset::Zero => {
+                        counter_token.payload.reset_counter();
                     }
                 }
                 (count, decided_at)

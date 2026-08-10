@@ -53,15 +53,15 @@ impl ConstraintHandler for TimeStartHandler {
         );
         let token_id = token.id;
 
-        // the verdict below is decided by this lookup
-        let decided_at = Utc::now();
-        // a matching time stop event can already have been observed. if so evaluate it right away
-        let pending_stop = {
+        let (pending_stop, timer_store_read_at) = {
             let timer_store = state.timer_token_store.lock().unwrap();
-            timer_store.earliest_pending_stop_after(
-                &event.case_id,
-                &self.constraint_id,
-                event.timestamp,
+            (
+                timer_store.earliest_pending_stop_after(
+                    &event.case_id,
+                    &self.constraint_id,
+                    event.timestamp,
+                ),
+                Utc::now(),
             )
         };
 
@@ -82,7 +82,7 @@ impl ConstraintHandler for TimeStartHandler {
                 info
             );
             emit_result_at(
-                decided_at,
+                timer_store_read_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -178,14 +178,17 @@ impl ConstraintHandler for TimeStartHandler {
             }
         };
 
-        // the verdict below is decided by this lookup
-        let decided_at = Utc::now();
-
-        // record the stop time and collect the tokens it settles
-        let timer_data = {
+        let (timer_data, timer_store_read_at) = {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             timer_store.record_pending_stop(&message.case_id, &self.constraint_id, stop_time);
-            timer_store.take_tokens_settled_by(&message.case_id, &self.constraint_id, stop_time)
+            (
+                timer_store.take_tokens_settled_by(
+                    &message.case_id,
+                    &self.constraint_id,
+                    stop_time,
+                ),
+                Utc::now(),
+            )
         };
 
         // cancel only the watchdogs of the tokens this stop event actually settles
@@ -232,7 +235,7 @@ impl ConstraintHandler for TimeStartHandler {
                 info
             );
             emit_result_at(
-                decided_at,
+                timer_store_read_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -253,13 +256,15 @@ impl ConstraintHandler for TimeStartHandler {
             case_id
         );
 
-        // the verdict below is decided by this lookup
-        let decided_at = Utc::now();
-        let result_exists = {
+        // each verdict below is stamped inside the lock that decides it
+        let (result_exists, results_read_at) = {
             let results = state.cc_results.lock().unwrap();
-            results
-                .get_constraint(case_id, &self.constraint_id)
-                .is_some()
+            (
+                results
+                    .get_constraint(case_id, &self.constraint_id)
+                    .is_some(),
+                Utc::now(),
+            )
         };
 
         // a timer still running at case end means the stop event never arrived
@@ -281,9 +286,12 @@ impl ConstraintHandler for TimeStartHandler {
                 cancel_tokens.remove_constraint(case_id, &self.constraint_id);
             }
 
-            let live_tokens = {
+            let (live_tokens, timer_store_read_at) = {
                 let mut timer_store = state.timer_token_store.lock().unwrap();
-                timer_store.take_live_timer_tokens(case_id, &self.constraint_id)
+                (
+                    timer_store.take_live_timer_tokens(case_id, &self.constraint_id),
+                    Utc::now(),
+                )
             };
 
             log::info!(
@@ -317,7 +325,7 @@ impl ConstraintHandler for TimeStartHandler {
                     info
                 );
                 emit_result_at(
-                    decided_at,
+                    timer_store_read_at,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::Time,
@@ -335,7 +343,7 @@ impl ConstraintHandler for TimeStartHandler {
         if !result_exists {
             // produce result because none was emitted yet
             emit_result_at(
-                decided_at,
+                results_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Time,

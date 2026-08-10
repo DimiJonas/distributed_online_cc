@@ -1,12 +1,14 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     config::node_config::{DistributedAppearanceCounterReset, MinMaxMode},
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::{emit_result, emit_result_at},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -355,7 +357,7 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         let distributed_count: u64 = per_peer.values().sum();
 
         // remember the evaluation for late corrections
-        {
+        let evaluations_read_at = {
             let mut evaluations = state.evaluations.lock().unwrap();
             evaluations.insert(
                 &event.case_id,
@@ -366,10 +368,12 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                     detail: EvaluationDetail::DistributedCounterTotals { per_peer },
                 },
             );
-        }
+            Utc::now()
+        };
 
         if let Some((info, result)) = self.evaluate_count(distributed_count) {
-            emit_result(
+            emit_result_at(
+                evaluations_read_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
@@ -430,9 +434,12 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             return;
         }
 
-        let corrected = {
+        let (corrected, evaluations_read_at) = {
             let mut evaluations = state.evaluations.lock().unwrap();
-            evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta)
+            (
+                evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta),
+                Utc::now(),
+            )
         };
         let corrected = match corrected {
             Some(total) => total,
@@ -468,7 +475,8 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             ),
         };
 
-        emit_result(
+        emit_result_at(
+            evaluations_read_at,
             &message.case_id,
             &self.constraint_id,
             ConstraintType::DistributedAppearance,
@@ -502,15 +510,19 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             case_id
         );
 
-        let result_exists = {
+        let (result_exists, results_read_at) = {
             let results = state.cc_results.lock().unwrap();
-            results
-                .get_constraint(case_id, &self.constraint_id)
-                .is_some()
+            (
+                results
+                    .get_constraint(case_id, &self.constraint_id)
+                    .is_some(),
+                Utc::now(),
+            )
         };
         if !result_exists {
             // produce result because none was emitted yet
-            emit_result(
+            emit_result_at(
+                results_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
