@@ -56,13 +56,13 @@ impl ConstraintHandler for ResponseProducerHandler {
         );
 
         // check if consumer event already happened. create late correction if so
-        let consumer_event_time = {
+        let mut consumer_event_time = {
             let token_in = state.token_in.lock().unwrap();
             token_in
                 .get_in_cloned(&event.case_id, self.index)
                 .and_then(|t| t.event_time)
         };
-        let already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
+        let mut already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
 
         if already_consumed {
             // the consumer event follows this producer event in event time
@@ -91,6 +91,28 @@ impl ConstraintHandler for ResponseProducerHandler {
                 producer_token
             );
             log::debug!("token={:?}", producer_token);
+
+            // check if another consumer time came in while a producer token was produced
+            let recheck = {
+                let token_in = state.token_in.lock().unwrap();
+                token_in
+                    .get_in_cloned(&event.case_id, self.index)
+                    .and_then(|t| t.event_time)
+            };
+            if recheck.is_some_and(|w| w > event.timestamp) {
+                {
+                    let mut token_out = state.token_out.lock().unwrap();
+                    token_out.remove_out(&event.case_id, self.index);
+                }
+                log::info!(
+                    "response producer handler: consumer event at {} was recorded concurrently for {}/{}, dropping the token just produced",
+                    recheck.unwrap(),
+                    event.case_id,
+                    self.constraint_id
+                );
+                consumer_event_time = recheck;
+                already_consumed = true;
+            }
         }
 
         // produce result if case already ended
@@ -963,5 +985,57 @@ mod tests {
             result.constraint_result,
             crate::types::ConstraintResultType::Violated
         ));
+    }
+
+    /// The producer reads token_in and writes token_out under two separate locks, so a DeleteToken
+    /// handled on another worker thread can land between the two. Before the re-read in
+    /// handle_event() that left the token in place forever and reported the constraint violated
+    /// even though the consumer event was later in event time.
+    ///
+    /// Runs both paths concurrently on a multi threaded runtime for many cases so the interleaving
+    /// is actually hit. The invariant is arrival order independent: with a consumer event AFTER the
+    /// producer event, no token may survive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_delete_and_produce_never_strands_a_token() {
+        let state = make_producer_state(20140);
+        let handler = std::sync::Arc::new(ResponseProducerHandler {
+            index: 15,
+            role: ConstraintRole::ResponseProducer,
+            constraint_id: "rp".to_string(),
+            event_id: "produce".to_string(),
+        });
+
+        const ROUNDS: usize = 300;
+        for i in 0..ROUNDS {
+            let case = format!("race-{i}");
+            {
+                let mut store = state.cc_results.lock().unwrap();
+                store.register_case(case.clone());
+            }
+
+            // producer event at +10s, consumer event at +20s -> the response is satisfied
+            let event = make_traced_event_at(&case, "produce", 10);
+            let delete = CCMessage::delete_token(
+                case.clone(),
+                "rp".to_string(),
+                chrono::TimeZone::with_ymd_and_hms(&Utc, 2024, 1, 1, 0, 0, 20).unwrap(),
+                EventInstanceId::new_v4(),
+            );
+
+            let (h1, s1) = (handler.clone(), state.clone());
+            let (h2, s2) = (handler.clone(), state.clone());
+            let produce = tokio::spawn(async move { h1.handle_event(&event, s1).await });
+            let consume = tokio::spawn(async move { h2.handle_message(s2, delete, None).await });
+            let _ = tokio::join!(produce, consume);
+
+            assert!(
+                !state
+                    .token_out
+                    .lock()
+                    .unwrap()
+                    .contains_out_token(&case, 15),
+                "token stranded for {case}: a consumer event at +20s must not leave a producer token from +10s behind"
+            );
+        }
     }
 }
