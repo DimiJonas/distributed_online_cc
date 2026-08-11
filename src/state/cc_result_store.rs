@@ -50,12 +50,8 @@ impl CCResultStore {
 
     pub fn has_violations(&self, case_id: &CaseId) -> bool {
         self.results.get(case_id).is_some_and(|case| {
-            case.values().any(|r| {
-                matches!(
-                    r.constraint_result,
-                    ConstraintResultType::Violated | ConstraintResultType::TemporarilyViolated
-                )
-            })
+            case.values()
+                .any(|r| matches!(r.constraint_result, ConstraintResultType::Violated))
         })
     }
 
@@ -64,13 +60,7 @@ impl CCResultStore {
             .get(case_id)
             .map(|case| {
                 case.iter()
-                    .filter(|(_, r)| {
-                        matches!(
-                            r.constraint_result,
-                            ConstraintResultType::Violated
-                                | ConstraintResultType::TemporarilyViolated
-                        )
-                    })
+                    .filter(|(_, r)| matches!(r.constraint_result, ConstraintResultType::Violated))
                     .collect()
             })
             .unwrap_or_default()
@@ -175,20 +165,6 @@ mod tests {
             ConstraintType::Response,
             ConstraintResultType::Violated,
             "violated".to_string(),
-        );
-        assert!(store.has_violations(&"case-1".to_string()));
-    }
-
-    #[test]
-    fn has_violations_true_for_temporarily_violated() {
-        let mut store = CCResultStore::new();
-        store.register_case("case-1".to_string());
-        store.upsert(
-            &"case-1".to_string(),
-            &"c-response".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::TemporarilyViolated,
-            "temp".to_string(),
         );
         assert!(store.has_violations(&"case-1".to_string()));
     }

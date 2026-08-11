@@ -27,7 +27,7 @@ use crate::network::tcp_router::send_to_conformance_peer;
 
 */
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
-use crate::conformance_checking::result_emitter::emit_result;
+use crate::conformance_checking::result_emitter::emit_result_at;
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::state::app_state::AppState;
 use crate::types::{
@@ -35,6 +35,7 @@ use crate::types::{
     EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
+use chrono::Utc;
 
 pub struct ResponseProducerHandler {
     pub index: HandlerIndex,
@@ -56,11 +57,14 @@ impl ConstraintHandler for ResponseProducerHandler {
         );
 
         // check if consumer event already happened. create late correction if so
-        let mut consumer_event_time = {
+        let (mut consumer_event_time, mut token_read_at) = {
             let token_in = state.token_in.lock().unwrap();
-            token_in
-                .get_in_cloned(&event.case_id, self.index)
-                .and_then(|t| t.event_time)
+            (
+                token_in
+                    .get_in_cloned(&event.case_id, self.index)
+                    .and_then(|t| t.event_time),
+                Utc::now(),
+            )
         };
         let mut already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
 
@@ -95,6 +99,7 @@ impl ConstraintHandler for ResponseProducerHandler {
             // check if another consumer time came in while a producer token was produced
             let recheck = {
                 let token_in = state.token_in.lock().unwrap();
+                token_read_at = Utc::now();
                 token_in
                     .get_in_cloned(&event.case_id, self.index)
                     .and_then(|t| t.event_time)
@@ -139,7 +144,8 @@ impl ConstraintHandler for ResponseProducerHandler {
                     ),
                 )
             };
-            emit_result(
+            emit_result_at(
+                token_read_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -210,9 +216,16 @@ impl ConstraintHandler for ResponseProducerHandler {
             }
         }
 
-        let removed_producer_token = {
+        let (removed_producer_token, state_read_at) = {
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out_before(&message.case_id, self.index, consumer_event_time)
+            (
+                token_out.remove_out_before(&message.case_id, self.index, consumer_event_time),
+                Utc::now(),
+            )
+        };
+        let case_ended = {
+            let case_state = state.case_state.lock().unwrap();
+            case_state.is_ended(&message.case_id)
         };
         if let Some(token) = &removed_producer_token {
             log::info!("response producer handler: removed token {}", token);
@@ -220,13 +233,10 @@ impl ConstraintHandler for ResponseProducerHandler {
         }
 
         // produce result if case already ended
-        let case_ended = {
-            let case_state = state.case_state.lock().unwrap();
-            case_state.is_ended(&message.case_id)
-        };
         // only correct to Satisfied when this delete actually found a matching producer token
         if case_ended && removed_producer_token.is_some() {
-            emit_result(
+            emit_result_at(
+                state_read_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -251,7 +261,7 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        let (constraint_result, info) = {
+        let (constraint_result, info, token_read_at) = {
             let mut token_out = state.token_out.lock().unwrap();
             match token_out.remove_out(case_id, self.index) {
                 Some(token) => (
@@ -260,15 +270,18 @@ impl ConstraintHandler for ResponseProducerHandler {
                         "producer token from {} was not consumed",
                         token.event_time.unwrap_or(token.created_at),
                     ),
+                    Utc::now(),
                 ),
                 None => (
                     ConstraintResultType::Satisfied,
                     "no producer tokens exist".to_string(),
+                    Utc::now(),
                 ),
             }
         };
 
-        emit_result(
+        emit_result_at(
+            token_read_at,
             case_id,
             &self.constraint_id,
             ConstraintType::Response,

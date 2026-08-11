@@ -1,12 +1,14 @@
 use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
     config::node_config::SensorConstraintMode,
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -136,7 +138,7 @@ impl ConstraintHandler for SensorCollectorHandler {
             }
         };
 
-        let sensor_event_map_entry = {
+        let (sensor_event_map_entry, entry_read_at) = {
             let sensor_events = state.sensor_events.lock().unwrap();
             let entry = sensor_events.value_at_cloned(
                 &message.case_id,
@@ -160,7 +162,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                 );
             }
 
-            entry
+            (entry, Utc::now())
         };
 
         // get value, emit violated result if none exists or its outdated
@@ -177,7 +179,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                             humantime::format_duration(value_age.to_std().unwrap_or_default()),
                             humantime::format_duration(self.max_value_age),
                         );
-                        emit_result(
+                        emit_result_at(
+                            entry_read_at,
                             &message.case_id,
                             &self.constraint_id,
                             ConstraintType::Sensor,
@@ -198,7 +201,8 @@ impl ConstraintHandler for SensorCollectorHandler {
                         "no sensor value exists for case={} key={}",
                         message.case_id, self.attribute_key
                     );
-                    emit_result(
+                    emit_result_at(
+                        entry_read_at,
                         &message.case_id,
                         &self.constraint_id,
                         ConstraintType::Sensor,
@@ -231,7 +235,8 @@ impl ConstraintHandler for SensorCollectorHandler {
         );
         if !condition_met {
             // produce negative result
-            emit_result(
+            emit_result_at(
+                entry_read_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
@@ -273,17 +278,25 @@ impl ConstraintHandler for SensorCollectorHandler {
                 .get_constraint(case_id, &self.constraint_id)
                 .is_some()
         };
+        let (value_was_checked, state_read_at) = {
+            let meta_tokens = state.meta_token_store.lock().unwrap();
+            (
+                meta_tokens.contains_meta_token(case_id, self.index),
+                Utc::now(),
+            )
+        };
         if !result_exists {
             // produce result because none was emitted yet
             let info_str = {
-                let meta_tokens = state.meta_token_store.lock().unwrap();
-                if meta_tokens.contains_meta_token(case_id, self.index) {
+                if value_was_checked {
+                    // conditions was met because no violation was emitted
                     "condition was met"
                 } else {
                     "sensor trigger event never happened"
                 }
             };
-            emit_result(
+            emit_result_at(
+                state_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
@@ -344,12 +357,15 @@ impl SensorCollectorHandler {
             }
         };
 
-        let sensor_value = {
+        let (sensor_value, value_read_at) = {
             let sensor_events = state.sensor_events.lock().unwrap();
-            sensor_events.value_at_cloned(
-                &event.case_id,
-                &self.attribute_key,
-                evaluation.trigger_time,
+            (
+                sensor_events.value_at_cloned(
+                    &event.case_id,
+                    &self.attribute_key,
+                    evaluation.trigger_time,
+                ),
+                Utc::now(),
             )
         };
         let sensor_value = match sensor_value {
@@ -413,7 +429,8 @@ impl SensorCollectorHandler {
             result
         );
 
-        emit_result(
+        emit_result_at(
+            value_read_at,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Sensor,

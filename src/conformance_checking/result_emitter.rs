@@ -49,6 +49,13 @@ pub async fn emit_result(
     .await
 }
 
+/// emit a constraint result, stamping the result with the supplied decision time and applying the configured buffering policy for the
+/// given constraint
+///
+/// - Immediate (zero grace): writes to cc_results immediately
+/// - GracePeriod: writes to cc_results immediately (so the store is always up to date) AND buffers the send; the buffered send fires after the
+///   grace window, merging any updates that arrive in the meantime
+/// - Revocable: writes to cc_results immediately and keeps the result open to overwrite for the time window, then finalizes
 #[allow(clippy::too_many_arguments)]
 pub async fn emit_result_at(
     decided_at: DateTime<Utc>,

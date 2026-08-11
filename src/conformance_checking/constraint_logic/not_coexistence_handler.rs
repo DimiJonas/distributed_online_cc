@@ -1,11 +1,13 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -47,7 +49,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         );
 
         // record the earliest local occurrence and decide whether a negotiation is needed
-        let (mut claim_token, negotiate) = {
+        let (mut claim_token, negotiate, mut decided_at) = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             match meta_tokens.get_token_mut(&event.case_id, self.index) {
                 Some(stored) => {
@@ -71,7 +73,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         // a later occurrence does not change the earliest one
                         Some(_) => stored.payload == TokenPayload::None,
                     };
-                    (stored.clone(), negotiate)
+                    (stored.clone(), negotiate, Utc::now())
                 }
                 None => {
                     log::info!(
@@ -86,7 +88,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-                    (claim_token, true)
+                    (claim_token, true, Utc::now())
                 }
             }
         };
@@ -97,9 +99,11 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 .fetch_other_event_time(&claim_token, state.clone())
                 .await
             {
-                Ok(t) => t,
+                Ok(timestamp) => timestamp,
                 Err(()) => return,
             };
+            // overwrite current decided_at timestamp because it was decided again here by acquiring the timestamp from the other side
+            decided_at = Utc::now();
 
             // set execution permission
             match other_event_time {
@@ -153,7 +157,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 "execution of event {} is forbidden, because not coexistence B event happened first",
                 self.event_id
             );
-            emit_result(
+            emit_result_at(
+                decided_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -230,10 +235,10 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         };
 
         // create own claim token if it does not exist yet
-        let mut claim_token = {
+        let (mut claim_token, mut decided_at) = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             match meta_tokens.get_token_cloned(&message.case_id, self.index) {
-                Some(token) => token,
+                Some(token) => (token, Utc::now()),
                 None => {
                     // create token without timestamp
                     log::info!(
@@ -249,7 +254,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-                    claim_token
+                    (claim_token, Utc::now())
                 }
             }
         };
@@ -315,6 +320,10 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                     if stored.event_time.is_none() {
                         stored.event_time = claim_token.event_time;
                     }
+                    if changed {
+                        // overwrite decided_at since permissions were changed here
+                        decided_at = Utc::now();
+                    }
                     changed
                 }
                 None => {
@@ -329,7 +338,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 "execution of event {} is forbidden, because not coexistence B event happened first",
                 self.event_id
             );
-            emit_result(
+            emit_result_at(
+                decided_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -361,9 +371,12 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             return;
         }
 
-        let claim_token = {
+        let (claim_token, mut decided_at) = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(case_id, self.index)
+            (
+                meta_tokens.get_token_cloned(case_id, self.index),
+                Utc::now(),
+            )
         };
 
         let info: String = match &claim_token {
@@ -375,6 +388,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 // incomplete negotiation - ask the B side as a best effort
                 match self.fetch_other_event_time(token, state.clone()).await {
                     Ok(None) => {
+                        // overwrite decided_at since this information (may have) changed the result
+                        decided_at = Utc::now();
                         "only the not coexistence A event happened until case end".to_string()
                     }
                     Ok(Some(_)) | Err(()) => {
@@ -393,7 +408,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                     case_id,
                     self.constraint_id
                 );
-                emit_result(
+                emit_result_at(
+                    decided_at,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,
@@ -416,7 +432,8 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             }
         };
 
-        emit_result(
+        emit_result_at(
+            decided_at,
             case_id,
             &self.constraint_id,
             ConstraintType::NotCoexistence,
@@ -508,7 +525,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         );
 
         // record the earliest local occurrence and decide whether a negotiation is needed
-        let (mut claim_token, negotiate) = {
+        let (mut claim_token, negotiate, mut decided_at) = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             match meta_tokens.get_token_mut(&event.case_id, self.index) {
                 Some(stored) => {
@@ -532,7 +549,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         // a later occurrence does not change the earliest one
                         Some(_) => stored.payload == TokenPayload::None,
                     };
-                    (stored.clone(), negotiate)
+                    (stored.clone(), negotiate, Utc::now())
                 }
                 None => {
                     log::info!(
@@ -547,7 +564,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-                    (claim_token, true)
+                    (claim_token, true, Utc::now())
                 }
             }
         };
@@ -555,7 +572,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         if negotiate {
             // negotiate execution permission
             let message = PeerMessage::conformance_req(
-                Uuid::new_v4(),
+                RequestId::new_v4(),
                 CCMessage::push_claim_token(claim_token.clone(), self.role),
             );
             let other_event_time = match send_and_receive_conformance(
@@ -587,6 +604,9 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     return;
                 }
             };
+
+            // overwrite current decided_at timestamp because it was decided again here by acquiring the timestamp from the other side
+            decided_at = Utc::now();
 
             // set execution permission
             match other_event_time {
@@ -641,7 +661,8 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 "execution of event {} is forbidden, because not coexistence A event happened first",
                 self.event_id
             );
-            emit_result(
+            emit_result_at(
+                decided_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -718,10 +739,10 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         };
 
         // create own claim token if it does not exist yet
-        let mut claim_token = {
+        let (mut claim_token, mut decided_at) = {
             let mut meta_tokens = state.meta_token_store.lock().unwrap();
             match meta_tokens.get_token_cloned(&message.case_id, self.index) {
-                Some(token) => token,
+                Some(token) => (token, Utc::now()),
                 None => {
                     // create token without timestamp
                     log::info!(
@@ -737,7 +758,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
-                    claim_token
+                    (claim_token, Utc::now())
                 }
             }
         };
@@ -802,6 +823,10 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     if stored.event_time.is_none() {
                         stored.event_time = claim_token.event_time;
                     }
+                    if changed {
+                        // overwrite decided_at since permissions were changed here
+                        decided_at = Utc::now();
+                    }
                     changed
                 }
                 None => {
@@ -816,7 +841,8 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 "execution of event {} is forbidden, because not coexistence A event happened first",
                 self.event_id
             );
-            emit_result(
+            emit_result_at(
+                decided_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -848,14 +874,18 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             return;
         }
 
-        let claim_token = {
+        let (claim_token, token_read_at) = {
             let meta_tokens = state.meta_token_store.lock().unwrap();
-            meta_tokens.get_token_cloned(case_id, self.index)
+            (
+                meta_tokens.get_token_cloned(case_id, self.index),
+                Utc::now(),
+            )
         };
 
         match &claim_token {
             Some(token) if token.event_time.is_none() => {
-                emit_result(
+                emit_result_at(
+                    token_read_at,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,
@@ -875,7 +905,8 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                     case_id,
                     self.constraint_id
                 );
-                emit_result(
+                emit_result_at(
+                    token_read_at,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,

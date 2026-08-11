@@ -184,7 +184,6 @@ impl Display for ConstraintRole {
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum ConstraintResultType {
     Violated,
-    TemporarilyViolated,
     Satisfied,
 }
 
@@ -192,7 +191,6 @@ impl ConstraintResultType {
     pub fn as_db_str(&self) -> &'static str {
         match self {
             Self::Violated => "Violated",
-            Self::TemporarilyViolated => "TemporarilyViolated",
             Self::Satisfied => "Satisfied",
         }
     }
@@ -202,7 +200,6 @@ impl Display for ConstraintResultType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConstraintResultType::Satisfied => write!(f, "satisfied"),
-            ConstraintResultType::TemporarilyViolated => write!(f, "temporarily violated"),
             ConstraintResultType::Violated => write!(f, "violated"),
         }
     }

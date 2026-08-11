@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -39,10 +41,14 @@ impl ConstraintHandler for OrderFirstHandler {
             event
         );
 
-        if let Some(blocking_token) = {
+        let (token, token_read_at) = {
             let token_in = state.token_in.lock().unwrap();
-            token_in.get_in_cloned(&event.case_id, self.index)
-        } {
+            (
+                token_in.get_in_cloned(&event.case_id, self.index),
+                Utc::now(),
+            )
+        };
+        if let Some(blocking_token) = token {
             log::info!(
                 "order first handler: blocking token exists - order second event has already happened"
             );
@@ -66,7 +72,8 @@ impl ConstraintHandler for OrderFirstHandler {
                     "order first event happened at {} after order second event at {}",
                     event.timestamp, order_second_event_time
                 );
-                emit_result(
+                emit_result_at(
+                    token_read_at,
                     &event.case_id,
                     &self.constraint_id,
                     ConstraintType::Order,
@@ -115,9 +122,9 @@ impl ConstraintHandler for OrderFirstHandler {
             if let Some(blocking_token) = late_blocking_token
                 && let Some(order_second_event_time) = blocking_token.event_time
             {
-                let recording_token = {
+                let (recording_token, token_read_at) = {
                     let mut token_out = state.token_out.lock().unwrap();
-                    token_out.remove_out(&event.case_id, self.index)
+                    (token_out.remove_out(&event.case_id, self.index), Utc::now())
                 };
                 if let Some(token) = recording_token {
                     log::info!(
@@ -125,7 +132,8 @@ impl ConstraintHandler for OrderFirstHandler {
                     );
                     for order_first_time in token.payload.timestamps().to_vec() {
                         if order_first_time >= order_second_event_time {
-                            emit_result(
+                            emit_result_at(
+                                token_read_at,
                                 &event.case_id,
                                 &self.constraint_id,
                                 ConstraintType::Order,
@@ -210,10 +218,13 @@ impl ConstraintHandler for OrderFirstHandler {
                 token_in.receive_without_overwrite(new_blocking_token, self.index);
             }
         }
-        let recording_token = {
+        let (recording_token, token_read_at) = {
             // retrieve the recording token
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out(&message.case_id, self.index)
+            (
+                token_out.remove_out(&message.case_id, self.index),
+                Utc::now(),
+            )
         };
 
         // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
@@ -224,7 +235,8 @@ impl ConstraintHandler for OrderFirstHandler {
             for order_first_time in order_first_executions {
                 if order_first_time >= order_second_event_time {
                     // produce negative result
-                    emit_result(
+                    emit_result_at(
+                        token_read_at,
                         &message.case_id,
                         &self.constraint_id,
                         ConstraintType::Order,
@@ -250,15 +262,19 @@ impl ConstraintHandler for OrderFirstHandler {
             case_id
         );
 
-        let result_exists = {
+        let (result_exists, result_read_at) = {
             let results = state.cc_results.lock().unwrap();
-            results
-                .get_constraint(case_id, &self.constraint_id)
-                .is_some()
+            (
+                results
+                    .get_constraint(case_id, &self.constraint_id)
+                    .is_some(),
+                Utc::now(),
+            )
         };
         if !result_exists {
             // produce result because none was emitted yet
-            emit_result(
+            emit_result_at(
+                result_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Order,

@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
     conformance_checking::{
-        constraint_logic::constraint_handler_trait::ConstraintHandler, result_emitter::emit_result,
+        constraint_logic::constraint_handler_trait::ConstraintHandler,
+        result_emitter::emit_result_at,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -118,9 +120,12 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             event
         );
 
-        let producer_token = {
+        let (producer_token, mut token_read_at) = {
             let token_in = state.token_in.lock().unwrap();
-            token_in.get_in_cloned(&event.case_id, self.index)
+            (
+                token_in.get_in_cloned(&event.case_id, self.index),
+                Utc::now(),
+            )
         };
 
         let producer_event_time = match producer_token {
@@ -152,6 +157,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 // re-read because token_in and token_out have different locks
                 if let Some(late_producer_event_time) = {
                     let token_in = state.token_in.lock().unwrap();
+                    // overwrite old token read time
+                    token_read_at = Utc::now();
                     token_in
                         .get_in_cloned(&event.case_id, self.index)
                         .and_then(|t| t.event_time)
@@ -163,7 +170,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 } else {
                     // emit violated result (for now)
                     let info = "producer event has not happened (yet)".to_string();
-                    emit_result(
+                    emit_result_at(
+                        token_read_at,
                         &event.case_id,
                         &self.constraint_id,
                         ConstraintType::Precedence,
@@ -181,7 +189,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
 
         // evaluate timestamps
         if event.timestamp <= producer_event_time {
-            emit_result(
+            emit_result_at(
+                token_read_at,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
@@ -281,13 +290,15 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             }
         };
 
-        // emit new result if a consumer event already happened, but the producer time is valid but the message was delayed
-        if let Some(consumer_event_time) = {
+        // emit new result if a consumer event already happened, but the producer time is valid and the message was just delayed
+        let (consumer_token, token_read_at) = {
             let token_out = state.token_out.lock().unwrap();
-            token_out
-                .get_out_cloned(&message.case_id, self.index)
-                .and_then(|t| t.event_time)
-        } {
+            (
+                token_out.get_out_cloned(&message.case_id, self.index),
+                Utc::now(),
+            )
+        };
+        if let Some(consumer_event_time) = consumer_token.and_then(|token| token.event_time) {
             // evaluate timestamps
             let (result, info) = if consumer_event_time <= producer_event_time {
                 (
@@ -306,7 +317,8 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     ),
                 )
             };
-            emit_result(
+            emit_result_at(
+                token_read_at,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
@@ -333,19 +345,19 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 .get_constraint(case_id, &self.constraint_id)
                 .is_some()
         };
+        let (producer_token_exists, state_read_at) = {
+            let token_in = state.token_in.lock().unwrap();
+            (token_in.contains_in_token(case_id, self.index), Utc::now())
+        };
         if !result_exists {
             // produce result because none was emitted yet
-            let producer_token_exists = {
-                let token_in = state.token_in.lock().unwrap();
-                token_in.contains_in_token(case_id, self.index)
-            };
-
             let info = if producer_token_exists {
                 "consumer event never happened".to_string()
             } else {
                 "neither producer nor consumer event happened".to_string()
             };
-            emit_result(
+            emit_result_at(
+                state_read_at,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
