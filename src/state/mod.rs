@@ -7,6 +7,7 @@ pub mod meta_token_store;
 pub mod peer_cache;
 pub mod peer_manager_map;
 pub mod pending_requests;
+pub mod result_revision_store;
 pub mod result_send_buffer;
 pub mod sensor_event_store;
 pub mod stream_clock;

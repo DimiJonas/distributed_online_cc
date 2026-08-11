@@ -26,6 +26,10 @@ pub async fn case_closing_task(state: AppState, case_id: CaseId) {
         let mut result_store = state.cc_results.lock().unwrap();
         result_store.remove_case(&case_id);
     }
+    {
+        let mut revisions = state.result_revisions.lock().unwrap();
+        revisions.remove_case(&case_id);
+    }
 
     for handler in state.handlers.all() {
         handler.clean_up_state(&case_id, state.clone()).await;

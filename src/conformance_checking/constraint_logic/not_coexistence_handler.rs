@@ -1170,7 +1170,8 @@ mod tests {
     async fn handle_event_records_time_into_negotiated_token() {
         let case = "c13";
         let (state, b_peer) = a_state(24130, 24131, case);
-        let h = handler(b_peer);
+        let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(b_peer));
+        let b_handler = handler(b_peer);
 
         // as created by handle_message while answering the other side
         let mut token = Token::new(
@@ -1185,11 +1186,14 @@ mod tests {
             .meta_token_store
             .lock()
             .unwrap()
-            .insert_meta_token(token, h.index());
+            .insert_meta_token(token, b_handler.index());
 
-        // permission already set -> no negotiation round-trip needed
+        // let negotiation run
         let ev = make_traced_event_at(case, EID, 30);
-        h.handle_event(&ev, state.clone()).await;
+        let run = b_handler.handle_event(&ev, state.clone());
+        let mock =
+            answer_one_conformance_request(state.clone(), &mut mgr_rx, b_response(case, Some(10)));
+        tokio::join!(run, mock);
 
         // denied -> local violation, and the token now carries the time
         assert!(matches!(
@@ -1200,7 +1204,7 @@ mod tests {
             .meta_token_store
             .lock()
             .unwrap()
-            .get_token_cloned(&case.to_string(), h.index())
+            .get_token_cloned(&case.to_string(), b_handler.index())
             .unwrap();
         assert_eq!(stored.event_time, Some(at(30)));
     }

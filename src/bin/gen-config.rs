@@ -1297,6 +1297,8 @@ fn emit_decentralized(
                 mpsc_channel_size: 1024,
                 retry_interval: Duration::from_secs(15),
                 retry_buffer_size: 4096,
+                max_batch_size: 512,
+                flush_interval: Duration::from_millis(200),
             });
         } else {
             // gather the roles placed on this node (layout slots start at 0, node ids start at 1)
@@ -1359,6 +1361,8 @@ fn emit_central(
             mpsc_channel_size: 1024,
             retry_interval: Duration::from_secs(15),
             retry_buffer_size: 4096,
+            max_batch_size: 512,
+            flush_interval: Duration::from_millis(200),
         })
         .result_sink_addresses(vec![central_address]);
 

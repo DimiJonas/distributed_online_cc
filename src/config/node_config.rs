@@ -222,6 +222,15 @@ pub struct ResultSinkConfig {
     pub retry_interval: Duration,
     #[serde(default = "default_retry_buffer_size")]
     pub retry_buffer_size: usize,
+    /// how many results are written in one sqlite transaction
+    #[serde(default = "default_result_sink_max_batch_size")]
+    pub max_batch_size: usize,
+    /// how long a partially filled batch waits before it is written anyway
+    #[serde(
+        default = "default_result_sink_flush_interval",
+        with = "humantime_serde"
+    )]
+    pub flush_interval: Duration,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -558,6 +567,14 @@ impl ConstraintConfig {
             ConstraintConfig::DistributedAppearanceTrigger { event_id, .. } => event_id,
         }
     }
+}
+
+fn default_result_sink_max_batch_size() -> usize {
+    512
+}
+
+fn default_result_sink_flush_interval() -> Duration {
+    Duration::from_millis(200)
 }
 
 fn default_unix_socket() -> String {

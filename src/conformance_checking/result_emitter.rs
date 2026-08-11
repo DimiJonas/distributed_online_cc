@@ -13,7 +13,10 @@ use crate::{
         message_types::{CCResultMessage, PeerMessage},
         tcp_router::send_to_conformance_peer,
     },
-    state::{app_state::AppState, result_send_buffer::ResultBufferPolicy},
+    state::{
+        app_state::AppState, result_revision_store::RevisionNumber,
+        result_send_buffer::ResultBufferPolicy,
+    },
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventInstanceId},
 };
 
@@ -70,10 +73,16 @@ pub async fn emit_result_at(
 ) {
     let result_receive_time = decided_at;
 
+    let revision = {
+        let mut revisions = state.result_revisions.lock().unwrap();
+        revisions.next_revision(case_id, constraint_id)
+    };
+
     log::debug!(
-        "emitting result for ({}/{}): {:?}: {}",
+        "emitting result for ({}/{}) revision {}: {:?}: {}",
         constraint_id,
         case_id,
+        revision,
         result,
         info,
     );
@@ -94,9 +103,10 @@ pub async fn emit_result_at(
     match policy {
         ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
             log::info!(
-                "immediate result configured for ({}/{}): result is final; sending result {:?}",
+                "immediate result configured for ({}/{}): revision {} is final; sending result {:?}",
                 case_id,
                 constraint_id,
+                revision,
                 result
             );
             // Immediate: no buffering at all
@@ -118,6 +128,7 @@ pub async fn emit_result_at(
                 &info,
                 state.clone(),
                 result_receive_time,
+                revision,
             )
             .await;
         }
@@ -149,6 +160,7 @@ pub async fn emit_result_at(
                 constraint_type,
                 cancel_token,
                 result_receive_time,
+                revision,
             ));
         }
 
@@ -172,6 +184,7 @@ pub async fn emit_result_at(
                 &info,
                 state.clone(),
                 result_receive_time,
+                revision,
             )
             .await;
 
@@ -199,6 +212,7 @@ async fn grace_period_timer(
     constraint_type: ConstraintType,
     cancel_token: CancellationToken,
     created_at: DateTime<Utc>,
+    revision: RevisionNumber,
 ) {
     tokio::select! {
         _ = tokio::time::sleep(duration) => {
@@ -208,15 +222,13 @@ async fn grace_period_timer(
             };
             if let Some(pending) = pending {
                 log::info!(
-                    "grace period expired for ({}/{}): result is now final; sending result {:?}",
-                    case_id, constraint_id, pending.result
+                    "grace period expired for ({}/{}): revision {} is now final; sending result {:?}",
+                    case_id, constraint_id, revision, pending.result
                 );
-                // cc_results already holds the current value; this
-                // is the outbound dispatch.
                 send_result_outbound(
                     &case_id, &constraint_id,constraint_type,
                     pending.result, &pending.info, state.clone(),
-                    created_at,
+                    created_at, revision,
                 ).await;
             }
         }
@@ -266,12 +278,14 @@ async fn send_result_outbound(
     info: &str,
     state: AppState,
     created_at: DateTime<Utc>,
+    revision: RevisionNumber,
 ) {
     match &state.config.result_sink_addresses {
         Some(addresses) => {
             // sink addresses were configured - sending result there
             let result_message = PeerMessage::result(CCResultMessage {
                 created_at,
+                revision,
                 info: info.to_string(),
                 case_id: case_id.clone(),
                 constraint_type,
@@ -299,9 +313,10 @@ async fn send_result_outbound(
         None => {
             // no sink configured - logging result
             log::info!(
-                "send_result_outbound: RESULT for case/constraint {}/{} is {}: {}",
+                "send_result_outbound: RESULT for case/constraint {}/{} (revision {}) is {}: {}",
                 case_id,
                 constraint_id,
+                revision,
                 result,
                 info
             );
@@ -322,6 +337,11 @@ pub async fn emit_result_immediate(
     instance_id: Option<EventInstanceId>,
 ) {
     let result_receive_time = Utc::now();
+
+    let revision = {
+        let mut revisions = state.result_revisions.lock().unwrap();
+        revisions.next_revision(case_id, constraint_id)
+    };
 
     // record result emitted
     result_emitted(
@@ -355,6 +375,7 @@ pub async fn emit_result_immediate(
         &info,
         state.clone(),
         result_receive_time,
+        revision,
     )
     .await;
 }

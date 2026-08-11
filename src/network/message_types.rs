@@ -7,6 +7,7 @@ use tokio::time::Instant;
 use crate::{
     config::node_config::NodeConfig,
     network::message_types::MessageKind::{FireAndForget, Request, Response},
+    state::result_revision_store::RevisionNumber,
     types::{
         CaseEnd, CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType,
         EventInstanceId, EventTime, MessageId, PeerBatch, RequestId, Token, TracedEvent,
@@ -366,6 +367,7 @@ impl Display for CCMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CCResultMessage {
     pub created_at: DateTime<Utc>,
+    pub revision: RevisionNumber,
     pub info: String,
     pub case_id: CaseId,
     pub constraint_id: ConstraintId,
@@ -376,11 +378,12 @@ pub struct CCResultMessage {
 impl CCResultMessage {
     pub fn display_result(&self) -> String {
         format!(
-            "Result of constraint {} ({:?} constraint) for {} at {} is {:?}:{}",
+            "Result of constraint {} ({:?} constraint) for {} at {} (revision {}) is {}:{}",
             self.constraint_id,
             self.constraint_type,
             self.case_id,
             self.created_at,
+            self.revision,
             self.result,
             self.info
         )

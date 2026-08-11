@@ -200,7 +200,7 @@ pub fn depth_of<T>(sender: &mpsc::Sender<T>) -> [usize; 2] {
     ]
 }
 
-/// helper for timing a synchronous block or function
+/// helper for timing a function
 #[inline]
 pub fn timed<T, F: FnOnce() -> T>(f: F) -> (T, u64) {
     if !enabled() {

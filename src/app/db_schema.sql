@@ -3,6 +3,8 @@
 -- All statements are idempotent
 
 PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
+PRAGMA wal_autocheckpoint = 4000;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS cases (
@@ -22,6 +24,7 @@ CREATE TABLE IF NOT EXISTS results (
     constraint_id TEXT NOT NULL REFERENCES constraints(constraint_id),
     result        TEXT NOT NULL CHECK (result IN ('Violated', 'TemporarilyViolated', 'Satisfied')),
     info          TEXT NOT NULL,
+    revision      INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     inserted_at   TEXT NOT NULL
 );
@@ -33,3 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_results_case
 -- Supports "all results for a specific case + constraint" ordered by created_at
 CREATE INDEX IF NOT EXISTS idx_results_case_constraint
     ON results (case_id, constraint_id, created_at);
+
+-- Supports "the final revision of a specific case + constraint"
+CREATE INDEX IF NOT EXISTS idx_results_case_constraint_revision
+    ON results (case_id, constraint_id, revision);

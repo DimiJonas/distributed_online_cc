@@ -8,6 +8,7 @@ use crate::state::meta_token_store::MetaTokenStore;
 use crate::state::peer_cache::PeerCache;
 use crate::state::peer_manager_map::PeerManagerMap;
 use crate::state::pending_requests::PendingRequestManager;
+use crate::state::result_revision_store::ResultRevisionStore;
 use crate::state::result_send_buffer::ConstraintResultSendBuffer;
 use crate::state::sensor_event_store::SensorEventStore;
 use crate::state::stream_clock::StreamClock;
@@ -31,6 +32,7 @@ pub struct AppState {
     pub peer_managers: Arc<Mutex<PeerManagerMap>>,
     pub watchdog_cancel_tokens: Arc<Mutex<WatchdogCancelStore>>,
     pub result_send_buffer: Arc<Mutex<ConstraintResultSendBuffer>>,
+    pub result_revisions: Arc<Mutex<ResultRevisionStore>>,
     pub timer_token_store: Arc<Mutex<TimerTokenStore>>,
     pub meta_token_store: Arc<Mutex<MetaTokenStore>>,
     pub evaluations: Arc<Mutex<EvaluationStore>>,
@@ -69,6 +71,7 @@ impl AppState {
             peer_managers: Arc::new(Mutex::new(PeerManagerMap::new())),
             watchdog_cancel_tokens: Arc::new(Mutex::new(WatchdogCancelStore::new())),
             result_send_buffer: Arc::new(Mutex::new(ConstraintResultSendBuffer::new())),
+            result_revisions: Arc::new(Mutex::new(ResultRevisionStore::new())),
             timer_token_store: Arc::new(Mutex::new(TimerTokenStore::new())),
             meta_token_store: Arc::new(Mutex::new(MetaTokenStore::new())),
             evaluations: Arc::new(Mutex::new(EvaluationStore::new())),

@@ -181,7 +181,7 @@ impl Display for ConstraintRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, Copy, PartialEq)]
 pub enum ConstraintResultType {
     Violated,
     Satisfied,
