@@ -1,10 +1,19 @@
 use std::collections::HashMap;
 
+use chrono::{DateTime, Utc};
+
 use crate::types::{CaseId, ConstraintId};
 
 pub type RevisionNumber = i64;
 
-/// monotonic revision numbers per (case, constraint) to determine the order in which results very created
+/// a revision number together with a timestamp when it was created
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecisionStamp {
+    pub decided_at: DateTime<Utc>,
+    pub revision: RevisionNumber,
+}
+
+/// monotonic revision numbers per (case, constraint) to determine the order in which results were created
 #[derive(Debug, Default)]
 pub struct ResultRevisionStore {
     revisions: HashMap<(CaseId, ConstraintId), RevisionNumber>,
@@ -13,6 +22,15 @@ pub struct ResultRevisionStore {
 impl ResultRevisionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// draw the stamp for a result that is about to be emitted
+    pub fn stamp(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) -> DecisionStamp {
+        let revision = self.next_revision(case_id, constraint_id);
+        DecisionStamp {
+            decided_at: Utc::now(),
+            revision,
+        }
     }
 
     pub fn next_revision(
@@ -94,5 +112,20 @@ mod tests {
 
         assert_eq!(store.current_revision(&case_a, &constraint), 0);
         assert_eq!(store.current_revision(&case_b, &constraint), 1);
+    }
+
+    /// stamps drawn from one store are ordered the same way by revision and by
+    /// decided_at - the property `--rank-by revision` relies on
+    #[test]
+    fn stamp_orders_revision_and_time_the_same_way() {
+        let mut store = ResultRevisionStore::new();
+        let case = "a".to_string();
+        let constraint = "c".to_string();
+
+        let first = store.stamp(&case, &constraint);
+        let second = store.stamp(&case, &constraint);
+
+        assert!(first.revision < second.revision);
+        assert!(first.decided_at <= second.decided_at);
     }
 }

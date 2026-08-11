@@ -1,14 +1,13 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use uuid::Uuid;
 
 use crate::{
     config::node_config::{DistributedAppearanceCounterReset, MinMaxMode},
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at,
+        result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -381,8 +380,7 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             .await;
         let distributed_count: u64 = per_peer.values().sum();
 
-        // remember the evaluation for late corrections
-        let evaluations_read_at = {
+        let pending = {
             let mut evaluations = state.evaluations.lock().unwrap();
             evaluations.insert(
                 &event.case_id,
@@ -393,18 +391,19 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                     detail: EvaluationDetail::DistributedCounterTotals { per_peer },
                 },
             );
-            Utc::now()
+            self.evaluate_count(distributed_count)
+                .map(|(info, result)| {
+                    (
+                        stamp_decision(&state, &event.case_id, &self.constraint_id),
+                        info,
+                        result,
+                    )
+                })
         };
 
-        if let Some((info, result)) = self.evaluate_count(distributed_count) {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&event.case_id, &self.constraint_id)
-            };
-            emit_result_at(
-                evaluations_read_at,
-                revision,
+        if let Some((stamp, info, result)) = pending {
+            emit_result_stamped(
+                stamp,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
@@ -465,31 +464,24 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             return;
         }
 
-        let (corrected, evaluations_read_at) = {
+        let (corrected, stamp) = {
             let mut evaluations = state.evaluations.lock().unwrap();
-            (
-                evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta),
-                Utc::now(),
-            )
-        };
-        let corrected = match corrected {
-            Some(total) => total,
-            None => {
-                // either the trigger event never fired here or the case was already cleaned up
-                log::warn!(
-                    "distributed appearance trigger handler: no recorded evaluation for ({}/{}). dropping late delta from {}",
-                    message.case_id,
-                    self.constraint_id,
-                    peer
-                );
-                return;
+            match evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta) {
+                Some(total) => (
+                    total,
+                    stamp_decision(&state, &message.case_id, &self.constraint_id),
+                ),
+                None => {
+                    // either the trigger event never fired here or the case was already cleaned up
+                    log::warn!(
+                        "distributed appearance trigger handler: no recorded evaluation for ({}/{}). dropping late delta from {}",
+                        message.case_id,
+                        self.constraint_id,
+                        peer
+                    );
+                    return;
+                }
             }
-        };
-
-        // take next revision number since a result will be emitted
-        let revision = {
-            let mut revisions = state.result_revisions.lock().unwrap();
-            revisions.next_revision(&message.case_id, &self.constraint_id)
         };
 
         log::info!(
@@ -512,9 +504,8 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             ),
         };
 
-        emit_result_at(
-            evaluations_read_at,
-            revision,
+        emit_result_stamped(
+            stamp,
             &message.case_id,
             &self.constraint_id,
             ConstraintType::DistributedAppearance,
@@ -548,25 +539,21 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             case_id
         );
 
-        let (result_exists, results_read_at) = {
+        let pending = {
             let results = state.cc_results.lock().unwrap();
-            (
-                results
-                    .get_constraint(case_id, &self.constraint_id)
-                    .is_some(),
-                Utc::now(),
-            )
+            if results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+            {
+                None
+            } else {
+                Some(stamp_decision(&state, case_id, &self.constraint_id))
+            }
         };
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
+        if let Some(stamp) = pending {
             // produce result because none was emitted yet
-            emit_result_at(
-                results_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,

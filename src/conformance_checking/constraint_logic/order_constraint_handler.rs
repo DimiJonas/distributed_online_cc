@@ -1,12 +1,11 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at,
+        result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -14,7 +13,7 @@ use crate::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
     },
-    state::app_state::AppState,
+    state::{app_state::AppState, result_revision_store::DecisionStamp},
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
         EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TracedEvent,
@@ -41,129 +40,81 @@ impl ConstraintHandler for OrderFirstHandler {
             event
         );
 
-        let (token, token_read_at) = {
-            let token_in = state.token_in.lock().unwrap();
-            (
-                token_in.get_in_cloned(&event.case_id, self.index),
-                Utc::now(),
-            )
-        };
-        if let Some(blocking_token) = token {
-            log::info!(
-                "order first handler: blocking token exists - order second event has already happened"
-            );
-            let order_second_event_time = match blocking_token.event_time {
-                Some(event_time) => event_time,
-                None => {
-                    log::error!(
-                        "order first handler: blocking token exists but it does not have the stop event time recorded - cannot evaluate - removing blocking token"
-                    );
-                    {
-                        let mut store = state.token_in.lock().unwrap();
-                        store.remove_in(&event.case_id, self.index);
-                    }
-                    return;
-                }
-            };
+        let pending: Vec<(DecisionStamp, String)> = {
+            let mut token_in = state.token_in.lock().unwrap();
+            let mut token_out = state.token_out.lock().unwrap();
 
-            if event.timestamp >= order_second_event_time {
-                // take next revision number since a result will be emitted
-                let revision = {
-                    let mut revisions = state.result_revisions.lock().unwrap();
-                    revisions.next_revision(&event.case_id, &self.constraint_id)
-                };
-                // produce negative result
-                let info = format!(
-                    "order first event happened at {} after order second event at {}",
-                    event.timestamp, order_second_event_time
-                );
-                emit_result_at(
-                    token_read_at,
-                    revision,
-                    &event.case_id,
-                    &self.constraint_id,
-                    ConstraintType::Order,
-                    ConstraintResultType::Violated,
-                    info,
-                    state.clone(),
-                    ResultTrigger::Event,
-                    Some(event.instance_id),
-                )
-                .await;
-            }
-        } else {
-            // no order-second-token received yet - just record the event time in the recording token in token out token
-            log::info!(
-                "order first handler: no blocking token exists - order second event has not happened yet"
-            );
-
-            {
-                let mut token_out = state.token_out.lock().unwrap();
-
-                match token_out.get_out_mut(&event.case_id, self.index) {
-                    // a token for recording the order first executions already exists
-                    Some(recording_token) => {
-                        recording_token.payload.push_timestamp(event.timestamp)
-                    }
-
-                    None => {
-                        let mut recording_token = Token::new(
-                            event.case_id.clone(),
-                            self.constraint_id.clone(),
-                            ConstraintType::Order,
-                            Some(event.timestamp),
-                            state.config.node_id,
-                        );
-                        recording_token.payload.push_timestamp(event.timestamp);
-                        token_out.produce_without_overwrite(recording_token, self.index);
-                    }
-                };
-            }
-
-            // re-read because token_in and token_out have different locks
-            let late_blocking_token = {
-                let token_in = state.token_in.lock().unwrap();
-                token_in.get_in_cloned(&event.case_id, self.index)
-            };
-            if let Some(blocking_token) = late_blocking_token
-                && let Some(order_second_event_time) = blocking_token.event_time
-            {
-                let (recording_token, token_read_at) = {
-                    let mut token_out = state.token_out.lock().unwrap();
-                    (token_out.remove_out(&event.case_id, self.index), Utc::now())
-                };
-                if let Some(token) = recording_token {
+            match token_in.get_in_cloned(&event.case_id, self.index) {
+                Some(blocking_token) => {
                     log::info!(
-                        "order first handler: blocking token appeared while recording - evaluating the recorded executions here"
+                        "order first handler: blocking token exists - order second event has already happened"
                     );
-                    for order_first_time in token.payload.timestamps().to_vec() {
-                        if order_first_time >= order_second_event_time {
-                            // take next revision number since a result will be emitted
-                            let revision = {
-                                let mut revisions = state.result_revisions.lock().unwrap();
-                                revisions.next_revision(&event.case_id, &self.constraint_id)
-                            };
-                            emit_result_at(
-                                token_read_at,
-                                revision,
-                                &event.case_id,
-                                &self.constraint_id,
-                                ConstraintType::Order,
-                                ConstraintResultType::Violated,
+                    match blocking_token.event_time {
+                        None => {
+                            log::error!(
+                                "order first handler: blocking token exists but it does not have the stop event time recorded - cannot evaluate - removing blocking token"
+                            );
+                            token_in.remove_in(&event.case_id, self.index);
+                            Vec::new()
+                        }
+                        Some(order_second_event_time)
+                            if event.timestamp >= order_second_event_time =>
+                        {
+                            vec![(
+                                stamp_decision(&state, &event.case_id, &self.constraint_id),
                                 format!(
                                     "order first event happened at {} after order second event at {}",
-                                    order_first_time, order_second_event_time
+                                    event.timestamp, order_second_event_time
                                 ),
-                                state.clone(),
-                                ResultTrigger::Event,
-                                Some(event.instance_id),
-                            )
-                            .await;
+                            )]
                         }
+                        Some(_) => Vec::new(),
                     }
+                }
+                None => {
+                    // no order-second-token received yet so just record the event time
+                    log::info!(
+                        "order first handler: no blocking token exists - order second event has not happened yet"
+                    );
+
+                    match token_out.get_out_mut(&event.case_id, self.index) {
+                        // a token for recording the order first executions already exists so just append
+                        Some(recording_token) => {
+                            recording_token.payload.push_timestamp(event.timestamp)
+                        }
+                        // no token exists so create one
+                        None => {
+                            let mut recording_token = Token::new(
+                                event.case_id.clone(),
+                                self.constraint_id.clone(),
+                                ConstraintType::Order,
+                                Some(event.timestamp),
+                                state.config.node_id,
+                            );
+                            recording_token.payload.push_timestamp(event.timestamp);
+                            token_out.produce_without_overwrite(recording_token, self.index);
+                        }
+                    };
+                    Vec::new()
                 }
             }
         };
+
+        for (stamp, info) in pending {
+            // produce negative result
+            emit_result_stamped(
+                stamp,
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::Order,
+                ConstraintResultType::Violated,
+                info,
+                state.clone(),
+                ResultTrigger::Event,
+                Some(event.instance_id),
+            )
+            .await;
+        }
     }
 
     /// receive token from order second with timestamp of first execution of order second (multiple order seconds possible?)
@@ -214,9 +165,11 @@ impl ConstraintHandler for OrderFirstHandler {
             }
         };
 
-        {
+        let pending: Vec<(DecisionStamp, EventTime)> = {
             // create blocking token if it doesnt exist yet
             let mut token_in = state.token_in.lock().unwrap();
+            // retrieve the recording token
+            let mut token_out = state.token_out.lock().unwrap();
 
             if !token_in.contains_in_token(&message.case_id, self.index) {
                 // no token exists - create one
@@ -229,47 +182,45 @@ impl ConstraintHandler for OrderFirstHandler {
                 );
                 token_in.receive_without_overwrite(new_blocking_token, self.index);
             }
-        }
-        let (recording_token, token_read_at) = {
-            // retrieve the recording token
-            let mut token_out = state.token_out.lock().unwrap();
-            (
-                token_out.remove_out(&message.case_id, self.index),
-                Utc::now(),
-            )
+
+            // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
+            match token_out.remove_out(&message.case_id, self.index) {
+                Some(token) => {
+                    // check all recorded event times until now
+                    let order_first_executions: Vec<EventTime> =
+                        token.payload.timestamps().to_vec();
+                    order_first_executions
+                        .into_iter()
+                        .filter(|t| *t >= order_second_event_time)
+                        .map(|order_first_time| {
+                            (
+                                stamp_decision(&state, &message.case_id, &self.constraint_id),
+                                order_first_time,
+                            )
+                        })
+                        .collect()
+                }
+                None => Vec::new(),
+            }
         };
 
-        // if its the first time receiving an order second event execution notification then we have to check the order first executions that have been recorded till now
-        if let Some(token) = recording_token {
-            // check all recorded event times until now
-            let order_first_executions: Vec<EventTime> = token.payload.timestamps().to_vec();
-
-            for order_first_time in order_first_executions {
-                if order_first_time >= order_second_event_time {
-                    // take next revision number since a result will be emitted
-                    let revision = {
-                        let mut revisions = state.result_revisions.lock().unwrap();
-                        revisions.next_revision(&message.case_id, &self.constraint_id)
-                    };
-                    // produce negative result
-                    emit_result_at(
-                        token_read_at,
-                        revision,
-                        &message.case_id,
-                        &self.constraint_id,
-                        ConstraintType::Order,
-                        ConstraintResultType::Violated,
-                        format!(
-                            "order first event happened at {} after order second event at {}",
-                            order_first_time, order_second_event_time
-                        ),
-                        state.clone(),
-                        ResultTrigger::Event,
-                        message.triggering_event,
-                    )
-                    .await;
-                }
-            }
+        for (stamp, order_first_time) in pending {
+            // produce negative result
+            emit_result_stamped(
+                stamp,
+                &message.case_id,
+                &self.constraint_id,
+                ConstraintType::Order,
+                ConstraintResultType::Violated,
+                format!(
+                    "order first event happened at {} after order second event at {}",
+                    order_first_time, order_second_event_time
+                ),
+                state.clone(),
+                ResultTrigger::Event,
+                message.triggering_event,
+            )
+            .await;
         }
     }
 
@@ -280,25 +231,22 @@ impl ConstraintHandler for OrderFirstHandler {
             case_id
         );
 
-        let (result_exists, result_read_at) = {
+        let pending = {
             let results = state.cc_results.lock().unwrap();
-            (
-                results
-                    .get_constraint(case_id, &self.constraint_id)
-                    .is_some(),
-                Utc::now(),
-            )
+            if results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+            {
+                None
+            } else {
+                Some(stamp_decision(&state, case_id, &self.constraint_id))
+            }
         };
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
+
+        if let Some(stamp) = pending {
             // produce result because none was emitted yet
-            emit_result_at(
-                result_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Order,

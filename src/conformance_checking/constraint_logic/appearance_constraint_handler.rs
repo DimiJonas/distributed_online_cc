@@ -1,13 +1,12 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     config::node_config::{AppearanceCounterReset, MinMaxMode},
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at,
+        result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -21,7 +20,7 @@ use crate::{
     },
     types::{
         CaseId, ConstraintId, ConstraintResultType, ConstraintRole, ConstraintType, EventId,
-        EventTime, HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
+        HandlerIndex, RequestId, Token, TokenPayload, TracedEvent,
     },
 };
 
@@ -141,9 +140,9 @@ impl ConstraintHandler for AppearanceCounterHandler {
             return;
         }
 
-        let (count, decided_at) = {
+        let pending = {
             let mut evaluations = state.evaluations.lock().unwrap();
-            let (count, decided_at) = self.get_and_reset_counter(&message.case_id, state.clone());
+            let count = self.get_and_reset_counter(&message.case_id, state.clone());
 
             // remember the evaluation for late corrections
             match message.timestamp {
@@ -169,18 +168,18 @@ impl ConstraintHandler for AppearanceCounterHandler {
                 }
             }
 
-            (count, decided_at)
+            self.evaluate_counter(count).map(|(info, result)| {
+                (
+                    stamp_decision(&state, &message.case_id, &self.constraint_id),
+                    info,
+                    result,
+                )
+            })
         };
 
-        if let Some((info, result)) = self.evaluate_counter(count) {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&message.case_id, &self.constraint_id)
-            };
-            emit_result_at(
-                decided_at,
-                revision,
+        if let Some((stamp, info, result)) = pending {
+            emit_result_stamped(
+                stamp,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -201,25 +200,21 @@ impl ConstraintHandler for AppearanceCounterHandler {
             case_id
         );
 
-        let (result_exists, results_read_at) = {
+        let pending = {
             let results = state.cc_results.lock().unwrap();
-            (
-                results
-                    .get_constraint(case_id, &self.constraint_id)
-                    .is_some(),
-                Utc::now(),
-            )
+            if results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+            {
+                None
+            } else {
+                Some(stamp_decision(&state, case_id, &self.constraint_id))
+            }
         };
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
+        if let Some(stamp) = pending {
             // produce result because none was emitted yet
-            emit_result_at(
-                results_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -259,29 +254,22 @@ impl AppearanceCounterHandler {
         evaluation: LastEvaluation,
         state: AppState,
     ) {
-        let (corrected, decided_at) = {
+        let (corrected, stamp) = {
             let mut evaluations = state.evaluations.lock().unwrap();
-            // this store read decides the verdict
-            (
-                evaluations.increment_evaluated_count(&event.case_id, self.index),
-                Utc::now(),
-            )
-        };
-        let corrected = match corrected {
-            Some(count) => count,
-            None => {
-                log::error!(
-                    "appearance counter handler: no counter evaluation recorded for ({}/{}). cannot correct with late event",
-                    event.case_id,
-                    self.constraint_id
-                );
-                return;
+            match evaluations.increment_evaluated_count(&event.case_id, self.index) {
+                Some(count) => (
+                    count,
+                    stamp_decision(&state, &event.case_id, &self.constraint_id),
+                ),
+                None => {
+                    log::error!(
+                        "appearance counter handler: no counter evaluation recorded for ({}/{}). cannot correct with late event",
+                        event.case_id,
+                        self.constraint_id
+                    );
+                    return;
+                }
             }
-        };
-        // take next revision number since a result will be emitted
-        let revision = {
-            let mut revisions = state.result_revisions.lock().unwrap();
-            revisions.next_revision(&event.case_id, &self.constraint_id)
         };
 
         log::info!(
@@ -304,9 +292,8 @@ impl AppearanceCounterHandler {
             ),
         };
 
-        emit_result_at(
-            decided_at,
-            revision,
+        emit_result_stamped(
+            stamp,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Appearance,
@@ -319,10 +306,9 @@ impl AppearanceCounterHandler {
         .await;
     }
 
-    fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> (u64, EventTime) {
+    /// read and reset the counter under the meta token lock
+    fn get_and_reset_counter(&self, case_id: &CaseId, state: AppState) -> u64 {
         let mut meta_tokens = state.meta_token_store.lock().unwrap();
-        // this store read decides the verdict
-        let decided_at = Utc::now();
         match meta_tokens.get_token_mut(case_id, self.index) {
             Some(counter_token) => {
                 let count = counter_token.payload.get_count();
@@ -336,9 +322,9 @@ impl AppearanceCounterHandler {
                         counter_token.payload.reset_counter();
                     }
                 }
-                (count, decided_at)
+                count
             }
-            None => (0, decided_at),
+            None => 0,
         }
     }
 

@@ -1,13 +1,13 @@
 use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     config::node_config::MinMaxMode,
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at, watchdog_task::watchdog_task,
+        result_emitter::{emit_result_stamped, stamp_decision},
+        watchdog_task::watchdog_task,
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -53,7 +53,7 @@ impl ConstraintHandler for TimeStartHandler {
         );
         let token_id = token.id;
 
-        let (pending_stop, timer_store_read_at) = {
+        let (pending_stop, pending) = {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             let pending_stop = timer_store.earliest_pending_stop_after(
                 &event.case_id,
@@ -65,15 +65,12 @@ impl ConstraintHandler for TimeStartHandler {
                 Some(_) => timer_store.insert_settled_token(token.clone()),
                 None => timer_store.insert_timer_token(token.clone()),
             }
-            (pending_stop, Utc::now())
+            let pending =
+                pending_stop.map(|_| stamp_decision(&state, &event.case_id, &self.constraint_id));
+            (pending_stop, pending)
         };
 
-        if let Some(stop_time) = pending_stop {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&event.case_id, &self.constraint_id)
-            };
+        if let (Some(stop_time), Some(stamp)) = (pending_stop, pending) {
             let (result, info) = self.evaluate_token(&token, stop_time);
             let info = format!("{info} (late correction: stop event observed before start event)");
             log::info!(
@@ -83,9 +80,8 @@ impl ConstraintHandler for TimeStartHandler {
                 result,
                 info
             );
-            emit_result_at(
-                timer_store_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -176,21 +172,21 @@ impl ConstraintHandler for TimeStartHandler {
             }
         };
 
-        let (timer_data, timer_store_read_at) = {
+        let (timer_data, stamps) = {
             let mut timer_store = state.timer_token_store.lock().unwrap();
             timer_store.record_pending_stop(&message.case_id, &self.constraint_id, stop_time);
-            (
-                timer_store.take_tokens_settled_by(
-                    &message.case_id,
-                    &self.constraint_id,
-                    stop_time,
-                ),
-                Utc::now(),
-            )
+            let timer_data = timer_store.take_tokens_settled_by(
+                &message.case_id,
+                &self.constraint_id,
+                stop_time,
+            );
+            let stamps: Vec<_> = (0..timer_data.newly_settled.len() + timer_data.corrections.len())
+                .map(|_| stamp_decision(&state, &message.case_id, &self.constraint_id))
+                .collect();
+            (timer_data, stamps)
         };
 
         // cancel only the watchdogs of the tokens this stop event actually settles
-        // tokens it does not qualify for stay live and keep their watchdogs running
         if !timer_data.newly_settled.is_empty() {
             let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
             for token in timer_data.newly_settled.iter() {
@@ -209,16 +205,12 @@ impl ConstraintHandler for TimeStartHandler {
         );
 
         // evaluate for each token separately if violated or satisfied depending on event times and time constraint mode
-        for token in timer_data
+        for (token, stamp) in timer_data
             .newly_settled
             .iter()
             .chain(timer_data.corrections.iter())
+            .zip(stamps)
         {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&message.case_id, &self.constraint_id)
-            };
             let is_correction = timer_data.newly_settled.iter().all(|t| t.id != token.id);
             let (result, info) = self.evaluate_token(token, stop_time);
             let info = if is_correction {
@@ -237,9 +229,8 @@ impl ConstraintHandler for TimeStartHandler {
                 result,
                 info
             );
-            emit_result_at(
-                timer_store_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -260,57 +251,33 @@ impl ConstraintHandler for TimeStartHandler {
             case_id
         );
 
-        // each verdict below is stamped inside the lock that decides it
-        let (result_exists, results_read_at) = {
-            let results = state.cc_results.lock().unwrap();
-            (
-                results
-                    .get_constraint(case_id, &self.constraint_id)
-                    .is_some(),
-                Utc::now(),
-            )
-        };
-
         // a timer still running at case end means the stop event never arrived
         let case_end_time = {
             let case_state = state.case_state.lock().unwrap();
             case_state.case_end_time(case_id)
         };
 
-        let live_timers = {
-            let timer_store = state.timer_token_store.lock().unwrap();
-            timer_store.timer_token_count(case_id, &self.constraint_id)
+        let live_tokens_with_stamps: Vec<_> = {
+            let mut timer_store = state.timer_token_store.lock().unwrap();
+            timer_store
+                .take_live_timer_tokens(case_id, &self.constraint_id)
+                .into_iter()
+                .map(|token| {
+                    let stamp = stamp_decision(&state, case_id, &self.constraint_id);
+                    (token, stamp)
+                })
+                .collect()
         };
 
-        if live_timers > 0 {
-            // cancel the watchdogs first so they cannot emit a second result later
-            {
-                let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
-                cancel_tokens.cancel_constraint(case_id, &self.constraint_id);
-                cancel_tokens.remove_constraint(case_id, &self.constraint_id);
-            }
-
-            let (live_tokens, timer_store_read_at) = {
-                let mut timer_store = state.timer_token_store.lock().unwrap();
-                (
-                    timer_store.take_live_timer_tokens(case_id, &self.constraint_id),
-                    Utc::now(),
-                )
-            };
-
+        if !live_tokens_with_stamps.is_empty() {
             log::info!(
                 "time start handler: case end for ({}/{}) with {} live timer(s) - settling now",
                 case_id,
                 self.constraint_id,
-                live_timers
+                live_tokens_with_stamps.len()
             );
 
-            for token in live_tokens.iter() {
-                // take next revision number since a result will be emitted
-                let revision = {
-                    let mut revisions = state.result_revisions.lock().unwrap();
-                    revisions.next_revision(case_id, &self.constraint_id)
-                };
+            for (token, stamp) in live_tokens_with_stamps.iter() {
                 let (result, verdict) = match self.mode {
                     MinMaxMode::Max => (ConstraintResultType::Violated, "TimerMax"),
                     MinMaxMode::Min => (ConstraintResultType::Satisfied, "TimerMin"),
@@ -324,18 +291,20 @@ impl ConstraintHandler for TimeStartHandler {
                     None => "unknown time".to_string(),
                 };
                 let info = format!(
-                    "{}: stop event never arrived; case ended {} after the start event, limit {:?} (token {})",
-                    verdict, elapsed, self.duration, token.id
+                    "{}: stop event never arrived; case ended {} after the start event, limit {} (token {})",
+                    verdict,
+                    elapsed,
+                    humantime::format_duration(self.duration),
+                    token.id
                 );
                 log::info!(
-                    "time start handler: token {} (case end) -> {:?}: {}",
+                    "time start handler: token {} (case end) -> {}: {}",
                     token.id,
                     result,
                     info
                 );
-                emit_result_at(
-                    timer_store_read_at,
-                    revision,
+                emit_result_stamped(
+                    *stamp,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::Time,
@@ -350,16 +319,23 @@ impl ConstraintHandler for TimeStartHandler {
             return;
         }
 
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
+        // no live timers: fall back to satisfied when nothing was emitted at all
+        let pending = {
+            let results = state.cc_results.lock().unwrap();
+            if results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+            {
+                None
+            } else {
+                Some(stamp_decision(&state, case_id, &self.constraint_id))
+            }
+        };
+
+        if let Some(stamp) = pending {
             // produce result because none was emitted yet
-            emit_result_at(
-                results_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Time,

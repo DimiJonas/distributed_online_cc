@@ -1,14 +1,13 @@
 use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use process_mining::core::event_data::case_centric::AttributeValue;
 
 use crate::{
     config::node_config::SensorConstraintMode,
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at,
+        result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -138,7 +137,7 @@ impl ConstraintHandler for SensorCollectorHandler {
             }
         };
 
-        let (sensor_event_map_entry, entry_read_at) = {
+        let (pending, value_checked) = {
             let sensor_events = state.sensor_events.lock().unwrap();
             let entry = sensor_events.value_at_cloned(
                 &message.case_id,
@@ -162,110 +161,84 @@ impl ConstraintHandler for SensorCollectorHandler {
                 );
             }
 
-            (entry, Utc::now())
-        };
-
-        // get value, emit violated result if none exists or its outdated
-        let attribute_value: f64 = {
-            match sensor_event_map_entry {
+            let mut value_checked = false;
+            let verdict: Option<String> = match &entry {
                 Some(entry) => {
                     // check if entry is outdated
                     let value_age = trigger_event_time - entry.timestamp;
                     if value_age.to_std().unwrap_or(Duration::MAX) > self.max_value_age {
-                        // take next revision number since a result will be emitted
-                        let revision = {
-                            let mut revisions = state.result_revisions.lock().unwrap();
-                            revisions.next_revision(&message.case_id, &self.constraint_id)
-                        };
-                        let info = format!(
+                        Some(format!(
                             "sensor value for case={} key={} is outdated. value age relative to trigger event: {} > {} (max allowed age)",
                             message.case_id,
                             self.attribute_key,
                             humantime::format_duration(value_age.to_std().unwrap_or_default()),
                             humantime::format_duration(self.max_value_age),
+                        ))
+                    } else {
+                        value_checked = true;
+                        // evaluate value and produce result
+                        let condition_met = self.mode.evaluate_condition(entry.value, self.value);
+                        log::info!(
+                            "sensor collector handler: evaluated ({}/{}): {} {} {} -> {}",
+                            message.case_id,
+                            self.constraint_id,
+                            entry.value,
+                            self.mode,
+                            self.value,
+                            if condition_met {
+                                "condition met, no violation emitted"
+                            } else {
+                                "condition not met, emitting violation"
+                            }
                         );
-                        emit_result_at(
-                            entry_read_at,
-                            revision,
-                            &message.case_id,
-                            &self.constraint_id,
-                            ConstraintType::Sensor,
-                            ConstraintResultType::Violated,
-                            info,
-                            state.clone(),
-                            ResultTrigger::Event,
-                            message.triggering_event,
-                        )
-                        .await;
-                        return;
+                        if condition_met {
+                            None
+                        } else {
+                            Some(format!(
+                                "{} {} {} is false",
+                                entry.value, self.mode, self.value
+                            ))
+                        }
                     }
-                    entry.value
                 }
                 None => {
-                    // take next revision number since a result will be emitted
-                    let revision = {
-                        let mut revisions = state.result_revisions.lock().unwrap();
-                        revisions.next_revision(&message.case_id, &self.constraint_id)
-                    };
                     // no value exists
-                    let info = format!(
+                    Some(format!(
                         "no sensor value exists for case={} key={}",
                         message.case_id, self.attribute_key
-                    );
-                    emit_result_at(
-                        entry_read_at,
-                        revision,
-                        &message.case_id,
-                        &self.constraint_id,
-                        ConstraintType::Sensor,
-                        ConstraintResultType::Violated,
-                        info,
-                        state.clone(),
-                        ResultTrigger::Event,
-                        message.triggering_event,
-                    )
-                    .await;
-                    return;
+                    ))
                 }
-            }
+            };
+
+            let stamped = verdict.map(|info| {
+                (
+                    stamp_decision(&state, &message.case_id, &self.constraint_id),
+                    info,
+                )
+            });
+            (stamped, value_checked)
         };
 
-        // evaluate value and produce result result
-        let condition_met = self.mode.evaluate_condition(attribute_value, self.value);
-        log::info!(
-            "sensor collector handler: evaluated ({}/{}): {} {} {} -> {}",
-            message.case_id,
-            self.constraint_id,
-            attribute_value,
-            self.mode,
-            self.value,
-            if condition_met {
-                "condition met, no violation emitted"
-            } else {
-                "condition not met, emitting violation"
-            }
-        );
-        if !condition_met {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&message.case_id, &self.constraint_id)
-            };
+        if let Some((stamp, info)) = pending {
             // produce negative result
-            emit_result_at(
-                entry_read_at,
-                revision,
+            emit_result_stamped(
+                stamp,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
                 ConstraintResultType::Violated,
-                format!("{} {} {} is false", attribute_value, self.mode, self.value),
+                info,
                 state.clone(),
                 ResultTrigger::Event,
                 message.triggering_event,
             )
             .await;
-        };
+        }
+
+        if !value_checked {
+            // no usable value existed so nothing was checked
+            return;
+        }
 
         // record that value was checked via creating a meta token for better result information
         {
@@ -290,42 +263,38 @@ impl ConstraintHandler for SensorCollectorHandler {
             case_id
         );
 
-        let result_exists = {
+        let pending = {
+            let meta_tokens = state.meta_token_store.lock().unwrap();
             let results = state.cc_results.lock().unwrap();
-            results
+
+            if results
                 .get_constraint(case_id, &self.constraint_id)
                 .is_some()
-        };
-        let (value_was_checked, state_read_at) = {
-            let meta_tokens = state.meta_token_store.lock().unwrap();
-            (
-                meta_tokens.contains_meta_token(case_id, self.index),
-                Utc::now(),
-            )
-        };
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
-            // produce result because none was emitted yet
-            let info_str = {
-                if value_was_checked {
-                    // conditions was met because no violation was emitted
+            {
+                None
+            } else {
+                // produce result because none was emitted yet
+                let info_str = if meta_tokens.contains_meta_token(case_id, self.index) {
+                    // condition must have been met because no violation was emitted
                     "condition was met"
                 } else {
                     "sensor trigger event never happened"
-                }
-            };
-            emit_result_at(
-                state_read_at,
-                revision,
+                };
+                Some((
+                    stamp_decision(&state, case_id, &self.constraint_id),
+                    info_str.to_string(),
+                ))
+            }
+        };
+
+        if let Some((stamp, info_str)) = pending {
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
                 ConstraintResultType::Satisfied,
-                info_str.to_string(),
+                info_str,
                 state.clone(),
                 ResultTrigger::CaseEnd,
                 None,
@@ -381,40 +350,34 @@ impl SensorCollectorHandler {
             }
         };
 
-        let (sensor_value, value_read_at) = {
+        let (sensor_value, stamp) = {
             let sensor_events = state.sensor_events.lock().unwrap();
-            (
-                sensor_events.value_at_cloned(
-                    &event.case_id,
-                    &self.attribute_key,
-                    evaluation.trigger_time,
-                ),
-                Utc::now(),
-            )
-        };
-        let sensor_value = match sensor_value {
-            Some(entry) => entry,
-            None => {
-                // nothing known at or before the trigger
+            let sensor_value = match sensor_events.value_at_cloned(
+                &event.case_id,
+                &self.attribute_key,
+                evaluation.trigger_time,
+            ) {
+                Some(entry) => entry,
+                None => {
+                    // nothing known at or before the trigger
+                    return;
+                }
+            };
+
+            // check if the trigger already evaluated this value
+            if evaluated_value_time == Some(sensor_value.timestamp) {
+                log::debug!(
+                    "sensor collector handler: late value for ({}/{}) at {} does not change the value as of trigger time {}. no correction needed",
+                    event.case_id,
+                    self.constraint_id,
+                    event.timestamp,
+                    evaluation.trigger_time
+                );
                 return;
             }
-        };
 
-        // check if the trigger already evaluated exactly this value
-        if evaluated_value_time == Some(sensor_value.timestamp) {
-            log::debug!(
-                "sensor collector handler: late value for ({}/{}) at {} does not change the value as of trigger time {}. no correction needed",
-                event.case_id,
-                self.constraint_id,
-                event.timestamp,
-                evaluation.trigger_time
-            );
-            return;
-        }
-        // take next revision number since a result will be emitted
-        let revision = {
-            let mut revisions = state.result_revisions.lock().unwrap();
-            revisions.next_revision(&event.case_id, &self.constraint_id)
+            let stamp = stamp_decision(&state, &event.case_id, &self.constraint_id);
+            (sensor_value, stamp)
         };
 
         let value_age = evaluation.trigger_time - sensor_value.timestamp;
@@ -458,9 +421,8 @@ impl SensorCollectorHandler {
             result
         );
 
-        emit_result_at(
-            value_read_at,
-            revision,
+        emit_result_stamped(
+            stamp,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Sensor,

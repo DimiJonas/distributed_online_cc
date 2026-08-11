@@ -1,12 +1,11 @@
 use std::net::SocketAddr;
 
 use async_trait::async_trait;
-use chrono::Utc;
 
 use crate::{
     conformance_checking::{
         constraint_logic::constraint_handler_trait::ConstraintHandler,
-        result_emitter::emit_result_at,
+        result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
     measurement::record::ResultTrigger,
@@ -120,97 +119,64 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             event
         );
 
-        let (producer_token, mut token_read_at) = {
+        let pending = {
             let token_in = state.token_in.lock().unwrap();
-            (
-                token_in.get_in_cloned(&event.case_id, self.index),
-                Utc::now(),
-            )
-        };
+            let mut token_out = state.token_out.lock().unwrap();
 
-        let producer_event_time = match producer_token {
-            Some(token) => token.event_time.unwrap(),
-            None => {
-                // producer event has not happened yet
-                // save consumer event time for a possible late arrival of the producer event
-                {
-                    let mut token_out = state.token_out.lock().unwrap();
-                    let keep = match token_out
-                        .get_out_cloned(&event.case_id, self.index)
-                        .and_then(|t| t.event_time)
-                    {
-                        Some(existing) => event.timestamp < existing,
-                        None => true,
-                    };
-                    if keep {
-                        let consumer_token = Token::new(
-                            event.case_id.clone(),
-                            self.constraint_id.clone(),
-                            ConstraintType::Precedence,
-                            Some(event.timestamp),
-                            state.config.node_id,
-                        );
-                        token_out.produce_with_overwrite(consumer_token, self.index);
-                    }
-                }
-
-                // re-read because token_in and token_out have different locks
-                if let Some(late_producer_event_time) = {
-                    let token_in = state.token_in.lock().unwrap();
-                    // overwrite old token read time
-                    token_read_at = Utc::now();
-                    token_in
-                        .get_in_cloned(&event.case_id, self.index)
-                        .and_then(|t| t.event_time)
-                } {
-                    log::info!(
-                        "precedence consumer handler: producer token appeared while recording the consumer event - evaluating against it"
-                    );
-                    late_producer_event_time
-                } else {
-                    // take next revision number since a result will be emitted
-                    let revision = {
-                        let mut revisions = state.result_revisions.lock().unwrap();
-                        revisions.next_revision(&event.case_id, &self.constraint_id)
-                    };
-                    // emit violated result (for now)
-                    let info = "producer event has not happened (yet)".to_string();
-                    emit_result_at(
-                        token_read_at,
-                        revision,
-                        &event.case_id,
-                        &self.constraint_id,
+            // keep if its the earliest
+            let is_earliest = match token_out
+                .get_out_cloned(&event.case_id, self.index)
+                .and_then(|t| t.event_time)
+            {
+                Some(existing) => event.timestamp < existing,
+                None => true,
+            };
+            if is_earliest {
+                token_out.produce_with_overwrite(
+                    Token::new(
+                        event.case_id.clone(),
+                        self.constraint_id.clone(),
                         ConstraintType::Precedence,
-                        ConstraintResultType::Violated,
-                        info,
-                        state.clone(),
-                        ResultTrigger::Event,
-                        Some(event.instance_id),
-                    )
-                    .await;
-                    return;
-                }
+                        Some(event.timestamp),
+                        state.config.node_id,
+                    ),
+                    self.index,
+                );
+            }
+
+            match token_in
+                .get_in_cloned(&event.case_id, self.index)
+                .and_then(|t| t.event_time)
+            {
+                Some(producer_event_time) if event.timestamp > producer_event_time => None,
+
+                // producer event is known but happened later: violated
+                Some(producer_event_time) => Some((
+                    stamp_decision(&state, &event.case_id, &self.constraint_id),
+                    ConstraintResultType::Violated,
+                    format!(
+                        "consumer event happened before producer event: {} <= {}",
+                        event.timestamp, producer_event_time
+                    ),
+                )),
+
+                // producer event not seen (yet): violated for now (handle_message corrects it if the token was only delayed)
+                None => Some((
+                    stamp_decision(&state, &event.case_id, &self.constraint_id),
+                    ConstraintResultType::Violated,
+                    "producer event has not happened (yet)".to_string(),
+                )),
             }
         };
 
-        // evaluate timestamps
-        if event.timestamp <= producer_event_time {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&event.case_id, &self.constraint_id)
-            };
-            emit_result_at(
-                token_read_at,
-                revision,
+        if let Some((stamp, result, info)) = pending {
+            emit_result_stamped(
+                stamp,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
-                ConstraintResultType::Violated,
-                format!(
-                    "consumer event happened before producer event: {} <= {}",
-                    event.timestamp, producer_event_time
-                ),
+                result,
+                info,
                 state.clone(),
                 ResultTrigger::Event,
                 Some(event.instance_id),
@@ -234,23 +200,21 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
 
         if message.message_type != CCMessageType::PushToken {
             log::warn!(
-                "precedence consumer handler: unexpected message type {:?} for constraint {}, ignoring",
+                "precedence consumer handler: unexpected message type {} for constraint {}, ignoring",
                 message.message_type,
                 self.constraint_id
             );
             return;
         }
 
-        let new_producer_token = {
-            match message.token.clone() {
-                Some(token) => token,
-                None => {
-                    log::error!(
-                        "precedence consumer handler: push token message did not contain a token. message={}",
-                        message
-                    );
-                    return;
-                }
+        let new_producer_token = match message.token.clone() {
+            Some(token) => token,
+            None => {
+                log::error!(
+                    "precedence consumer handler: push token message did not contain a token. message={}",
+                    message
+                );
+                return;
             }
         };
 
@@ -265,10 +229,12 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             }
         };
 
-        // save token if none exists yet or event time is earlier than the current one
-        let producer_event_time = {
+        let pending = {
             let mut token_in = state.token_in.lock().unwrap();
-            match token_in.get_in_mut(&message.case_id, self.index) {
+            let token_out = state.token_out.lock().unwrap();
+
+            // save token if none exists yet or the event time is earlier than the current one
+            let producer_event_time = match token_in.get_in_mut(&message.case_id, self.index) {
                 Some(existing_producer_token) => match existing_producer_token.event_time {
                     Some(existing_event_time) => {
                         if new_event_time < existing_event_time {
@@ -299,44 +265,50 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     );
                     new_event_time
                 }
+            };
+
+            let result_exists = {
+                let results = state.cc_results.lock().unwrap();
+                results
+                    .get_constraint(&message.case_id, &self.constraint_id)
+                    .is_some()
+            };
+
+            match token_out
+                .get_out_cloned(&message.case_id, self.index)
+                .and_then(|token| token.event_time)
+            {
+                Some(consumer_event_time) if result_exists => {
+                    let (result, info) = if consumer_event_time <= producer_event_time {
+                        (
+                            ConstraintResultType::Violated,
+                            format!(
+                                "consumer event happened before producer event: {} <= {} (late correction)",
+                                consumer_event_time, producer_event_time
+                            ),
+                        )
+                    } else {
+                        (
+                            ConstraintResultType::Satisfied,
+                            format!(
+                                "consumer event happened after producer event: {} > {} (late correction)",
+                                consumer_event_time, producer_event_time
+                            ),
+                        )
+                    };
+                    Some((
+                        stamp_decision(&state, &message.case_id, &self.constraint_id),
+                        result,
+                        info,
+                    ))
+                }
+                _ => None,
             }
         };
 
-        // emit new result if a consumer event already happened, but the producer time is valid and the message was just delayed
-        let (consumer_token, token_read_at) = {
-            let token_out = state.token_out.lock().unwrap();
-            (
-                token_out.get_out_cloned(&message.case_id, self.index),
-                Utc::now(),
-            )
-        };
-        if let Some(consumer_event_time) = consumer_token.and_then(|token| token.event_time) {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&message.case_id, &self.constraint_id)
-            };
-            // evaluate timestamps
-            let (result, info) = if consumer_event_time <= producer_event_time {
-                (
-                    ConstraintResultType::Violated,
-                    format!(
-                        "consumer event happened before producer event: {} <= {} (late correction)",
-                        consumer_event_time, producer_event_time
-                    ),
-                )
-            } else {
-                (
-                    ConstraintResultType::Satisfied,
-                    format!(
-                        "consumer event happened after producer event: {} <= {} (late correction)",
-                        consumer_event_time, producer_event_time
-                    ),
-                )
-            };
-            emit_result_at(
-                token_read_at,
-                revision,
+        if let Some((stamp, result, info)) = pending {
+            emit_result_stamped(
+                stamp,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
@@ -357,35 +329,66 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             case_id
         );
 
-        let result_exists = {
+        let pending = {
+            let token_in = state.token_in.lock().unwrap();
+            let token_out = state.token_out.lock().unwrap();
             let results = state.cc_results.lock().unwrap();
-            results
+
+            if results
                 .get_constraint(case_id, &self.constraint_id)
                 .is_some()
-        };
-        let (producer_token_exists, state_read_at) = {
-            let token_in = state.token_in.lock().unwrap();
-            (token_in.contains_in_token(case_id, self.index), Utc::now())
-        };
-        if !result_exists {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(case_id, &self.constraint_id)
-            };
-            // produce result because none was emitted yet
-            let info = if producer_token_exists {
-                "consumer event never happened".to_string()
+            {
+                // a result was already published
+                None
             } else {
-                "neither producer nor consumer event happened".to_string()
-            };
-            emit_result_at(
-                state_read_at,
-                revision,
+                let producer_seen = token_in.contains_in_token(case_id, self.index);
+                let consumer_seen = token_out.contains_out_token(case_id, self.index);
+
+                let (result, info) = match (producer_seen, consumer_seen) {
+                    // satisfied: no violations
+                    (true, true) => (
+                        ConstraintResultType::Satisfied,
+                        "every consumer event was preceded by the producer event".to_string(),
+                    ),
+                    // satisfied: nothing to precede
+                    (true, false) => (
+                        ConstraintResultType::Satisfied,
+                        "consumer event never happened".to_string(),
+                    ),
+                    // no events at all
+                    (false, false) => (
+                        ConstraintResultType::Satisfied,
+                        "neither producer nor consumer event happened".to_string(),
+                    ),
+                    // should never be reached because handle_event always emits violated in this situation
+                    (false, true) => {
+                        log::warn!(
+                            "precedence consumer handler: consumer event without producer token and no published result for ({}/{})",
+                            case_id,
+                            self.constraint_id
+                        );
+                        (
+                            ConstraintResultType::Violated,
+                            "consumer event happened, producer event never arrived".to_string(),
+                        )
+                    }
+                };
+
+                Some((
+                    stamp_decision(&state, case_id, &self.constraint_id),
+                    result,
+                    info,
+                ))
+            }
+        };
+
+        if let Some((stamp, result, info)) = pending {
+            emit_result_stamped(
+                stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
-                ConstraintResultType::Satisfied,
+                result,
                 info,
                 state.clone(),
                 ResultTrigger::CaseEnd,
@@ -493,6 +496,21 @@ mod tests {
             .map(|r| r.constraint_result)
     }
 
+    fn result_info(state: &AppState, case: &str) -> Option<String> {
+        let store = state.cc_results.lock().unwrap();
+        store
+            .get_constraint(&case.to_string(), &CID.to_string())
+            .map(|r| r.info.clone())
+    }
+
+    fn revision_count(state: &AppState, case: &str) -> i64 {
+        state
+            .result_revisions
+            .lock()
+            .unwrap()
+            .current_revision(&case.to_string(), &CID.to_string())
+    }
+
     /// neither producer nor consumer event → Satisfied at case end.
     #[tokio::test]
     async fn neither_event_satisfied_at_case_end() {
@@ -522,6 +540,10 @@ mod tests {
             result_type(&state, case),
             Some(ConstraintResultType::Satisfied)
         ));
+        assert_eq!(
+            result_info(&state, case).as_deref(),
+            Some("consumer event never happened")
+        );
     }
 
     /// only consumer event (no producer token) → Violated.
@@ -558,6 +580,11 @@ mod tests {
             result_type(&state, case),
             Some(ConstraintResultType::Satisfied)
         ));
+        // and it says so for the right reason
+        assert_eq!(
+            result_info(&state, case).as_deref(),
+            Some("every consumer event was preceded by the producer event")
+        );
     }
 
     /// both: consumer before producer → Violated.
@@ -575,6 +602,45 @@ mod tests {
         assert!(matches!(
             result_type(&state, case),
             Some(ConstraintResultType::Violated)
+        ));
+    }
+
+    /// a delayed producer token corrects the published violation, and the
+    /// correction gets the *higher* revision - this is the WIA regression.
+    #[tokio::test]
+    async fn late_producer_token_corrects_with_a_higher_revision() {
+        let case = "c6";
+        let state = consumer_state(21050, case);
+
+        // consumer event arrives first, producer token is still in flight
+        handler()
+            .handle_event(&consumer_event(case, 20), state.clone())
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Violated)
+        ));
+        assert_eq!(revision_count(&state, case), 1);
+
+        // the token arrives late and carries an earlier event time
+        handler()
+            .handle_message(state.clone(), producer_token(case, 10), None)
+            .await;
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
+        ));
+        // the correction is revision 2, not revision 1
+        assert_eq!(revision_count(&state, case), 2);
+
+        // case end must not add another verdict on top
+        handler()
+            .handle_case_end(&case.to_string(), state.clone())
+            .await;
+        assert_eq!(revision_count(&state, case), 2);
+        assert!(matches!(
+            result_type(&state, case),
+            Some(ConstraintResultType::Satisfied)
         ));
     }
 }

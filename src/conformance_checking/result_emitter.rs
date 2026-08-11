@@ -14,19 +14,14 @@ use crate::{
         tcp_router::send_to_conformance_peer,
     },
     state::{
-        app_state::AppState, result_revision_store::RevisionNumber,
+        app_state::AppState,
+        result_revision_store::{DecisionStamp, RevisionNumber},
         result_send_buffer::ResultBufferPolicy,
     },
     types::{CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventInstanceId},
 };
 
-/// emit a constraint result, applying the configured buffering policy for the
-/// given constraint
-///
-/// - Immediate (zero grace): writes to cc_results immediately
-/// - GracePeriod: writes to cc_results immediately (so the store is always up to date) AND buffers the send; the buffered send fires after the
-///   grace window, merging any updates that arrive in the meantime
-/// - Revocable: writes to cc_results immediately and keeps the result open to overwrite for the time window, then finalizes
+/// emit a constraint result, applying the configured buffering policy for the given constraint
 #[allow(clippy::too_many_arguments)]
 pub async fn emit_result(
     case_id: &CaseId,
@@ -57,7 +52,48 @@ pub async fn emit_result(
     .await
 }
 
-/// emit a constraint result, stamping the result with the supplied decision time and applying the configured buffering policy for the
+/// emit a constraint result using a stamp that was drawn at decision time
+#[allow(clippy::too_many_arguments)]
+pub async fn emit_result_stamped(
+    stamp: DecisionStamp,
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
+    result: ConstraintResultType,
+    info: String,
+    state: AppState,
+    result_trigger: ResultTrigger,
+    instance_id: Option<EventInstanceId>,
+) {
+    emit_result_at(
+        stamp.decided_at,
+        stamp.revision,
+        case_id,
+        constraint_id,
+        constraint_type,
+        result,
+        info,
+        state,
+        result_trigger,
+        instance_id,
+    )
+    .await
+}
+
+/// draw a decision stamp from the app state
+pub fn stamp_decision(
+    state: &AppState,
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+) -> DecisionStamp {
+    state
+        .result_revisions
+        .lock()
+        .unwrap()
+        .stamp(case_id, constraint_id)
+}
+
+/// emit a constraint result, stamping the result with the supplied decision time and revision and applying the configured buffering policy for the
 /// given constraint
 ///
 /// - Immediate (zero grace): writes to cc_results immediately
@@ -206,6 +242,7 @@ pub async fn emit_result_at(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn grace_period_timer(
     duration: Duration,
     state: AppState,
@@ -272,6 +309,7 @@ async fn revocable_result_timer(
 }
 
 /// send the constraint check result to the sink
+#[allow(clippy::too_many_arguments)]
 async fn send_result_outbound(
     case_id: &CaseId,
     constraint_id: &ConstraintId,

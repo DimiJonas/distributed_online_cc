@@ -27,7 +27,7 @@ use crate::network::tcp_router::send_to_conformance_peer;
 
 */
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
-use crate::conformance_checking::result_emitter::emit_result_at;
+use crate::conformance_checking::result_emitter::{emit_result_stamped, stamp_decision};
 use crate::network::message_types::{CCMessage, CCMessageType, PeerMessage};
 use crate::state::app_state::AppState;
 use crate::types::{
@@ -35,7 +35,6 @@ use crate::types::{
     EventInstanceId, EventTime, HandlerIndex, RequestId, Token, TracedEvent,
 };
 use async_trait::async_trait;
-use chrono::Utc;
 
 pub struct ResponseProducerHandler {
     pub index: HandlerIndex,
@@ -56,102 +55,73 @@ impl ConstraintHandler for ResponseProducerHandler {
             event
         );
 
-        // check if consumer event already happened. create late correction if so
-        let (mut consumer_event_time, mut token_read_at) = {
+        let pending = {
+            let case_state = state.case_state.lock().unwrap();
             let token_in = state.token_in.lock().unwrap();
-            (
-                token_in
-                    .get_in_cloned(&event.case_id, self.index)
-                    .and_then(|t| t.event_time),
-                Utc::now(),
-            )
-        };
-        let mut already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
-
-        if already_consumed {
-            // the consumer event follows this producer event in event time
             let mut token_out = state.token_out.lock().unwrap();
-            token_out.remove_out(&event.case_id, self.index);
-            log::debug!(
-                "response producer handler: consumer event at {} was already observed for {}/{}, no token produced",
-                consumer_event_time.unwrap(),
-                event.case_id,
-                self.constraint_id
-            );
-        } else {
-            let producer_token = Token::new(
-                event.case_id.clone(),
-                self.constraint_id.clone(),
-                ConstraintType::Response,
-                Some(event.timestamp),
-                state.config.node_id,
-            );
-            {
-                let mut token_out = state.token_out.lock().unwrap();
-                token_out.produce_with_overwrite(producer_token.clone(), self.index);
-            }
-            log::info!(
-                "response producer handler: produced token: {}",
-                producer_token
-            );
-            log::debug!("token={:?}", producer_token);
 
-            // check if another consumer time came in while a producer token was produced
-            let recheck = {
-                let token_in = state.token_in.lock().unwrap();
-                token_read_at = Utc::now();
-                token_in
-                    .get_in_cloned(&event.case_id, self.index)
-                    .and_then(|t| t.event_time)
-            };
-            if recheck.is_some_and(|w| w > event.timestamp) {
-                {
-                    let mut token_out = state.token_out.lock().unwrap();
-                    token_out.remove_out(&event.case_id, self.index);
-                }
-                log::info!(
-                    "response producer handler: consumer event at {} was recorded concurrently for {}/{}, dropping the token just produced",
-                    recheck.unwrap(),
+            let consumer_event_time = token_in
+                .get_in_cloned(&event.case_id, self.index)
+                .and_then(|t| t.event_time);
+            let already_consumed = consumer_event_time.is_some_and(|w| w > event.timestamp);
+
+            if already_consumed {
+                // the consumer event follows this producer event in event time
+                token_out.remove_out(&event.case_id, self.index);
+                log::debug!(
+                    "response producer handler: consumer event at {} was already observed for {}/{}, no token produced",
+                    consumer_event_time.unwrap(),
                     event.case_id,
                     self.constraint_id
                 );
-                consumer_event_time = recheck;
-                already_consumed = true;
-            }
-        }
-
-        // produce result if case already ended
-        let case_ended = {
-            let case_state = state.case_state.lock().unwrap();
-            case_state.is_ended(&event.case_id)
-        };
-        if case_ended {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&event.case_id, &self.constraint_id)
-            };
-            let (constraint_result, info) = if already_consumed {
-                (
-                    ConstraintResultType::Satisfied,
-                    format!(
-                        "producer token from {} was consumed by a consumer event at {} (late correction)",
-                        event.timestamp,
-                        consumer_event_time.unwrap(),
-                    ),
-                )
             } else {
-                (
-                    ConstraintResultType::Violated,
-                    format!(
-                        "producer token from {} for {}/{} was not consumed",
-                        event.timestamp, event.case_id, self.constraint_id,
-                    ),
-                )
-            };
-            emit_result_at(
-                token_read_at,
-                revision,
+                let producer_token = Token::new(
+                    event.case_id.clone(),
+                    self.constraint_id.clone(),
+                    ConstraintType::Response,
+                    Some(event.timestamp),
+                    state.config.node_id,
+                );
+                token_out.produce_with_overwrite(producer_token.clone(), self.index);
+                log::info!(
+                    "response producer handler: produced token: {}",
+                    producer_token
+                );
+                log::debug!("token={:?}", producer_token);
+            }
+
+            if case_state.is_ended(&event.case_id) {
+                let (constraint_result, info) = if already_consumed {
+                    (
+                        ConstraintResultType::Satisfied,
+                        format!(
+                            "producer token from {} was consumed by a consumer event at {} (late correction)",
+                            event.timestamp,
+                            consumer_event_time.unwrap(),
+                        ),
+                    )
+                } else {
+                    (
+                        ConstraintResultType::Violated,
+                        format!(
+                            "producer token from {} for {}/{} was not consumed",
+                            event.timestamp, event.case_id, self.constraint_id,
+                        ),
+                    )
+                };
+                Some((
+                    stamp_decision(&state, &event.case_id, &self.constraint_id),
+                    constraint_result,
+                    info,
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some((stamp, constraint_result, info)) = pending {
+            emit_result_stamped(
+                stamp,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -200,9 +170,12 @@ impl ConstraintHandler for ResponseProducerHandler {
             }
         };
 
-        // remember the consumer event time even when there is no token (yet) for possible late corrections
-        {
+        let pending = {
+            let case_state = state.case_state.lock().unwrap();
             let mut token_in = state.token_in.lock().unwrap();
+            let mut token_out = state.token_out.lock().unwrap();
+
+            // remember the consumer event time for possible late corrections
             let keep = match token_in
                 .get_in_cloned(&message.case_id, self.index)
                 .and_then(|t| t.event_time)
@@ -220,35 +193,29 @@ impl ConstraintHandler for ResponseProducerHandler {
                 );
                 token_in.receive_with_overwrite(consumer_token, self.index);
             }
-        }
 
-        let (removed_producer_token, state_read_at) = {
-            let mut token_out = state.token_out.lock().unwrap();
-            (
-                token_out.remove_out_before(&message.case_id, self.index, consumer_event_time),
-                Utc::now(),
-            )
-        };
-        let case_ended = {
-            let case_state = state.case_state.lock().unwrap();
-            case_state.is_ended(&message.case_id)
-        };
-        if let Some(token) = &removed_producer_token {
-            log::info!("response producer handler: removed token {}", token);
-            log::debug!("token={:?}", token);
-        }
+            let removed_producer_token =
+                token_out.remove_out_before(&message.case_id, self.index, consumer_event_time);
+            if let Some(token) = &removed_producer_token {
+                log::info!("response producer handler: removed token {}", token);
+                log::debug!("token={:?}", token);
+            }
 
-        // produce result if case already ended
-        // only correct to Satisfied when this delete actually found a matching producer token
-        if case_ended && removed_producer_token.is_some() {
-            // take next revision number since a result will be emitted
-            let revision = {
-                let mut revisions = state.result_revisions.lock().unwrap();
-                revisions.next_revision(&message.case_id, &self.constraint_id)
-            };
-            emit_result_at(
-                state_read_at,
-                revision,
+            // produce result if case already ended
+            if case_state.is_ended(&message.case_id) && removed_producer_token.is_some() {
+                Some(stamp_decision(
+                    &state,
+                    &message.case_id,
+                    &self.constraint_id,
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some(stamp) = pending {
+            emit_result_stamped(
+                stamp,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -273,34 +240,30 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_id
         );
 
-        let (constraint_result, info, token_read_at) = {
+        let (stamp, constraint_result, info) = {
             let mut token_out = state.token_out.lock().unwrap();
-            match token_out.remove_out(case_id, self.index) {
+            let (constraint_result, info) = match token_out.remove_out(case_id, self.index) {
                 Some(token) => (
                     ConstraintResultType::Violated,
                     format!(
                         "producer token from {} was not consumed",
                         token.event_time.unwrap_or(token.created_at),
                     ),
-                    Utc::now(),
                 ),
                 None => (
                     ConstraintResultType::Satisfied,
                     "no producer tokens exist".to_string(),
-                    Utc::now(),
                 ),
-            }
+            };
+            (
+                stamp_decision(&state, case_id, &self.constraint_id),
+                constraint_result,
+                info,
+            )
         };
 
-        // take next revision number since a result will be emitted
-        let revision = {
-            let mut revisions = state.result_revisions.lock().unwrap();
-            revisions.next_revision(case_id, &self.constraint_id)
-        };
-
-        emit_result_at(
-            token_read_at,
-            revision,
+        emit_result_stamped(
+            stamp,
             case_id,
             &self.constraint_id,
             ConstraintType::Response,
