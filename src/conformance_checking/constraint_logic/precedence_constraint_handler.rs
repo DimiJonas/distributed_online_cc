@@ -168,10 +168,16 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                     );
                     late_producer_event_time
                 } else {
+                    // take next revision number since a result will be emitted
+                    let revision = {
+                        let mut revisions = state.result_revisions.lock().unwrap();
+                        revisions.next_revision(&event.case_id, &self.constraint_id)
+                    };
                     // emit violated result (for now)
                     let info = "producer event has not happened (yet)".to_string();
                     emit_result_at(
                         token_read_at,
+                        revision,
                         &event.case_id,
                         &self.constraint_id,
                         ConstraintType::Precedence,
@@ -189,8 +195,14 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
 
         // evaluate timestamps
         if event.timestamp <= producer_event_time {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             emit_result_at(
                 token_read_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
@@ -299,6 +311,11 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             )
         };
         if let Some(consumer_event_time) = consumer_token.and_then(|token| token.event_time) {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             // evaluate timestamps
             let (result, info) = if consumer_event_time <= producer_event_time {
                 (
@@ -319,6 +336,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             };
             emit_result_at(
                 token_read_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,
@@ -350,6 +368,11 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             (token_in.contains_in_token(case_id, self.index), Utc::now())
         };
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             let info = if producer_token_exists {
                 "consumer event never happened".to_string()
@@ -358,6 +381,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
             };
             emit_result_at(
                 state_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Precedence,

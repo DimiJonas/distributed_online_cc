@@ -27,9 +27,8 @@ use online_cc::util::constraint_catalog::{
     AppearanceSpec, Catalog, DistAppearanceSpec, PairSpec, SensorSpec, TimeSpec, build_catalog,
     load_configs,
 };
-use process_mining::core::event_data::case_centric::AttributeValue;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(about = "Derive the expected conformance results for an event stream")]
@@ -70,14 +69,14 @@ struct ManifestLine {
     event_id: EventId,
     timestamp: String,
     #[serde(default)]
-    attributes: BTreeMap<AttributeKey, AttributeValue>,
+    attributes: BTreeMap<AttributeKey, Value>,
 }
 
 struct ManifestEvent {
     seq: u64,
     event_id: EventId,
     timestamp: EventTime,
-    attributes: BTreeMap<AttributeKey, AttributeValue>,
+    attributes: BTreeMap<AttributeKey, Value>,
 }
 
 fn parse_timestamp(raw_str: &str) -> Result<EventTime, String> {
@@ -159,10 +158,11 @@ fn times_of(events: &[ManifestEvent], event_id: &str) -> Vec<EventTime> {
         .collect()
 }
 
-fn to_sensor_attribute_value(value: &AttributeValue) -> Option<f64> {
+fn to_sensor_attribute_value(value: &Value) -> Option<f64> {
     match value {
-        AttributeValue::Float(f) => Some(*f),
-        AttributeValue::Int(i) => Some(*i as f64),
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
     }
 }

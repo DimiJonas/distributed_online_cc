@@ -397,8 +397,14 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         };
 
         if let Some((info, result)) = self.evaluate_count(distributed_count) {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             emit_result_at(
                 evaluations_read_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
@@ -480,6 +486,12 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             }
         };
 
+        // take next revision number since a result will be emitted
+        let revision = {
+            let mut revisions = state.result_revisions.lock().unwrap();
+            revisions.next_revision(&message.case_id, &self.constraint_id)
+        };
+
         log::info!(
             "distributed appearance trigger handler: late delta of {} from {} for ({}/{}). corrected distributed counter is now {}",
             delta,
@@ -502,6 +514,7 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
 
         emit_result_at(
             evaluations_read_at,
+            revision,
             &message.case_id,
             &self.constraint_id,
             ConstraintType::DistributedAppearance,
@@ -545,9 +558,15 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             )
         };
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             emit_result_at(
                 results_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,

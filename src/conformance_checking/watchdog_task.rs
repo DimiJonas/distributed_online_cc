@@ -53,6 +53,11 @@ pub async fn watchdog_task(
                 let mut cancel_tokens = state.watchdog_cancel_tokens.lock().unwrap();
                 cancel_tokens.remove_token(&token_id);
             }
+            // take next revision number since a result will be emitted
+                    let revision = {
+                        let mut revisions = state.result_revisions.lock().unwrap();
+                        revisions.next_revision(&case_id, &constraint_id)
+                    };
 
             // evaluate timeout
             match mode {
@@ -63,6 +68,7 @@ pub async fn watchdog_task(
                     );
                     emit_result_at(
                         timer_store_read_at,
+                        revision,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,
@@ -84,6 +90,7 @@ pub async fn watchdog_task(
                     );
                     emit_result_at(
                         timer_store_read_at,
+                        revision,
                         &case_id,
                         &constraint_id,
                         ConstraintType::Time,

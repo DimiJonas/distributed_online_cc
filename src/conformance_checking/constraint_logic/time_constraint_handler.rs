@@ -69,6 +69,11 @@ impl ConstraintHandler for TimeStartHandler {
         };
 
         if let Some(stop_time) = pending_stop {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             let (result, info) = self.evaluate_token(&token, stop_time);
             let info = format!("{info} (late correction: stop event observed before start event)");
             log::info!(
@@ -80,6 +85,7 @@ impl ConstraintHandler for TimeStartHandler {
             );
             emit_result_at(
                 timer_store_read_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -208,6 +214,11 @@ impl ConstraintHandler for TimeStartHandler {
             .iter()
             .chain(timer_data.corrections.iter())
         {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             let is_correction = timer_data.newly_settled.iter().all(|t| t.id != token.id);
             let (result, info) = self.evaluate_token(token, stop_time);
             let info = if is_correction {
@@ -228,6 +239,7 @@ impl ConstraintHandler for TimeStartHandler {
             );
             emit_result_at(
                 timer_store_read_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Time,
@@ -294,6 +306,11 @@ impl ConstraintHandler for TimeStartHandler {
             );
 
             for token in live_tokens.iter() {
+                // take next revision number since a result will be emitted
+                let revision = {
+                    let mut revisions = state.result_revisions.lock().unwrap();
+                    revisions.next_revision(case_id, &self.constraint_id)
+                };
                 let (result, verdict) = match self.mode {
                     MinMaxMode::Max => (ConstraintResultType::Violated, "TimerMax"),
                     MinMaxMode::Min => (ConstraintResultType::Satisfied, "TimerMin"),
@@ -318,6 +335,7 @@ impl ConstraintHandler for TimeStartHandler {
                 );
                 emit_result_at(
                     timer_store_read_at,
+                    revision,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::Time,
@@ -333,9 +351,15 @@ impl ConstraintHandler for TimeStartHandler {
         }
 
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             emit_result_at(
                 results_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Time,

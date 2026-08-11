@@ -134,7 +134,7 @@ impl ConstraintHandler for AppearanceCounterHandler {
 
         if message.message_type != CCMessageType::TriggerCheck {
             log::warn!(
-                "appearance counter handler: unexpected message type {:?} for constraint {}, ignoring",
+                "appearance counter handler: unexpected message type {} for constraint {}, ignoring",
                 message.message_type,
                 self.constraint_id
             );
@@ -173,8 +173,14 @@ impl ConstraintHandler for AppearanceCounterHandler {
         };
 
         if let Some((info, result)) = self.evaluate_counter(count) {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             emit_result_at(
                 decided_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -205,9 +211,15 @@ impl ConstraintHandler for AppearanceCounterHandler {
             )
         };
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             emit_result_at(
                 results_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Appearance,
@@ -266,6 +278,11 @@ impl AppearanceCounterHandler {
                 return;
             }
         };
+        // take next revision number since a result will be emitted
+        let revision = {
+            let mut revisions = state.result_revisions.lock().unwrap();
+            revisions.next_revision(&event.case_id, &self.constraint_id)
+        };
 
         log::info!(
             "appearance counter handler: late event for ({}/{}) (event time {} <= trigger time {}). corrected counter is now {}",
@@ -289,6 +306,7 @@ impl AppearanceCounterHandler {
 
         emit_result_at(
             decided_at,
+            revision,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Appearance,

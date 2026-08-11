@@ -153,12 +153,18 @@ impl ConstraintHandler for NotCoexistenceAHandler {
 
         // evaluate event execution based on the execution permission
         if !claim_token.payload.is_execution_allowed() {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             let info = format!(
                 "execution of event {} is forbidden, because not coexistence B event happened first",
                 self.event_id
             );
             emit_result_at(
                 decided_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -334,12 +340,18 @@ impl ConstraintHandler for NotCoexistenceAHandler {
         };
 
         if permission_changed && !claim_token.payload.is_execution_allowed() {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             let info = format!(
                 "execution of event {} is forbidden, because not coexistence B event happened first",
                 self.event_id
             );
             emit_result_at(
                 decided_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -379,6 +391,12 @@ impl ConstraintHandler for NotCoexistenceAHandler {
             )
         };
 
+        // take next revision number since a result will probably be emitted
+        let revision = {
+            let mut revisions = state.result_revisions.lock().unwrap();
+            revisions.next_revision(case_id, &self.constraint_id)
+        };
+
         let info: String = match &claim_token {
             None => "none of the not coexistence events happened until case end".to_string(),
             Some(token) if token.event_time.is_none() => {
@@ -403,6 +421,11 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 }
             }
             Some(token) if !token.payload.is_execution_allowed() => {
+                // take next revision number since a result will be emitted
+                let revision = {
+                    let mut revisions = state.result_revisions.lock().unwrap();
+                    revisions.next_revision(case_id, &self.constraint_id)
+                };
                 log::warn!(
                     "not coexistence a handler: claim token for ({}/{}) is denied at case end but no result was emitted",
                     case_id,
@@ -410,6 +433,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                 );
                 emit_result_at(
                     decided_at,
+                    revision,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,
@@ -434,6 +458,7 @@ impl ConstraintHandler for NotCoexistenceAHandler {
 
         emit_result_at(
             decided_at,
+            revision,
             case_id,
             &self.constraint_id,
             ConstraintType::NotCoexistence,
@@ -657,12 +682,18 @@ impl ConstraintHandler for NotCoexistenceBHandler {
 
         // evaluate event execution based on the execution permission
         if !claim_token.payload.is_execution_allowed() {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             let info = format!(
                 "execution of event {} is forbidden, because not coexistence A event happened first",
                 self.event_id
             );
             emit_result_at(
                 decided_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -837,12 +868,18 @@ impl ConstraintHandler for NotCoexistenceBHandler {
         };
 
         if permission_changed && !claim_token.payload.is_execution_allowed() {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             let info = format!(
                 "execution of event {} is forbidden, because not coexistence A event happened first",
                 self.event_id
             );
             emit_result_at(
                 decided_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::NotCoexistence,
@@ -884,8 +921,14 @@ impl ConstraintHandler for NotCoexistenceBHandler {
 
         match &claim_token {
             Some(token) if token.event_time.is_none() => {
+                // take next revision number since a result will be emitted
+                let revision = {
+                    let mut revisions = state.result_revisions.lock().unwrap();
+                    revisions.next_revision(case_id, &self.constraint_id)
+                };
                 emit_result_at(
                     token_read_at,
+                    revision,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,
@@ -900,6 +943,11 @@ impl ConstraintHandler for NotCoexistenceBHandler {
             Some(token)
                 if token.payload != TokenPayload::None && !token.payload.is_execution_allowed() =>
             {
+                // take next revision number since a result will be emitted
+                let revision = {
+                    let mut revisions = state.result_revisions.lock().unwrap();
+                    revisions.next_revision(case_id, &self.constraint_id)
+                };
                 log::warn!(
                     "not coexistence b handler: claim token for ({}/{}) is denied at case end but no result was emitted",
                     case_id,
@@ -907,6 +955,7 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                 );
                 emit_result_at(
                     token_read_at,
+                    revision,
                     case_id,
                     &self.constraint_id,
                     ConstraintType::NotCoexistence,

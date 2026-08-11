@@ -67,6 +67,11 @@ impl ConstraintHandler for OrderFirstHandler {
             };
 
             if event.timestamp >= order_second_event_time {
+                // take next revision number since a result will be emitted
+                let revision = {
+                    let mut revisions = state.result_revisions.lock().unwrap();
+                    revisions.next_revision(&event.case_id, &self.constraint_id)
+                };
                 // produce negative result
                 let info = format!(
                     "order first event happened at {} after order second event at {}",
@@ -74,6 +79,7 @@ impl ConstraintHandler for OrderFirstHandler {
                 );
                 emit_result_at(
                     token_read_at,
+                    revision,
                     &event.case_id,
                     &self.constraint_id,
                     ConstraintType::Order,
@@ -132,8 +138,14 @@ impl ConstraintHandler for OrderFirstHandler {
                     );
                     for order_first_time in token.payload.timestamps().to_vec() {
                         if order_first_time >= order_second_event_time {
+                            // take next revision number since a result will be emitted
+                            let revision = {
+                                let mut revisions = state.result_revisions.lock().unwrap();
+                                revisions.next_revision(&event.case_id, &self.constraint_id)
+                            };
                             emit_result_at(
                                 token_read_at,
+                                revision,
                                 &event.case_id,
                                 &self.constraint_id,
                                 ConstraintType::Order,
@@ -234,9 +246,15 @@ impl ConstraintHandler for OrderFirstHandler {
 
             for order_first_time in order_first_executions {
                 if order_first_time >= order_second_event_time {
+                    // take next revision number since a result will be emitted
+                    let revision = {
+                        let mut revisions = state.result_revisions.lock().unwrap();
+                        revisions.next_revision(&message.case_id, &self.constraint_id)
+                    };
                     // produce negative result
                     emit_result_at(
                         token_read_at,
+                        revision,
                         &message.case_id,
                         &self.constraint_id,
                         ConstraintType::Order,
@@ -272,9 +290,15 @@ impl ConstraintHandler for OrderFirstHandler {
             )
         };
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             emit_result_at(
                 result_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Order,

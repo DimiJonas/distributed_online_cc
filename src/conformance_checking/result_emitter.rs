@@ -38,8 +38,13 @@ pub async fn emit_result(
     result_trigger: ResultTrigger,
     instance_id: Option<EventInstanceId>,
 ) {
+    let revision = {
+        let mut revisions = state.result_revisions.lock().unwrap();
+        revisions.next_revision(case_id, constraint_id)
+    };
     emit_result_at(
         Utc::now(),
+        revision,
         case_id,
         constraint_id,
         constraint_type,
@@ -62,6 +67,7 @@ pub async fn emit_result(
 #[allow(clippy::too_many_arguments)]
 pub async fn emit_result_at(
     decided_at: DateTime<Utc>,
+    revision: RevisionNumber,
     case_id: &CaseId,
     constraint_id: &ConstraintId,
     constraint_type: ConstraintType,
@@ -72,11 +78,6 @@ pub async fn emit_result_at(
     instance_id: Option<EventInstanceId>,
 ) {
     let result_receive_time = decided_at;
-
-    let revision = {
-        let mut revisions = state.result_revisions.lock().unwrap();
-        revisions.next_revision(case_id, constraint_id)
-    };
 
     log::debug!(
         "emitting result for ({}/{}) revision {}: {:?}: {}",
@@ -98,6 +99,7 @@ pub async fn emit_result_at(
         instance_id,
         result_trigger,
         decided_at,
+        revision,
     );
 
     match policy {
@@ -355,6 +357,7 @@ pub async fn emit_result_immediate(
         instance_id,
         result_trigger,
         result_receive_time,
+        revision,
     );
 
     {

@@ -3,7 +3,10 @@ use std::net::SocketAddr;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::types::{CaseId, ConstraintId, EventInstanceId, PeerAddress};
+use crate::{
+    state::result_revision_store::RevisionNumber,
+    types::{CaseId, ConstraintId, EventInstanceId, PeerAddress},
+};
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +126,7 @@ pub enum Record {
         // TODO: when aggregating measurements: substract timer duration from the detection delay if needed.
         trigger: ResultTrigger,
         decided_at: DateTime<Utc>,
+        revision: RevisionNumber,
     },
 
     /// the result sink persisted a row

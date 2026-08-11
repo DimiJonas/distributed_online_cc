@@ -126,6 +126,11 @@ impl ConstraintHandler for ResponseProducerHandler {
             case_state.is_ended(&event.case_id)
         };
         if case_ended {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&event.case_id, &self.constraint_id)
+            };
             let (constraint_result, info) = if already_consumed {
                 (
                     ConstraintResultType::Satisfied,
@@ -146,6 +151,7 @@ impl ConstraintHandler for ResponseProducerHandler {
             };
             emit_result_at(
                 token_read_at,
+                revision,
                 &event.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -235,8 +241,14 @@ impl ConstraintHandler for ResponseProducerHandler {
         // produce result if case already ended
         // only correct to Satisfied when this delete actually found a matching producer token
         if case_ended && removed_producer_token.is_some() {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             emit_result_at(
                 state_read_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Response,
@@ -280,8 +292,15 @@ impl ConstraintHandler for ResponseProducerHandler {
             }
         };
 
+        // take next revision number since a result will be emitted
+        let revision = {
+            let mut revisions = state.result_revisions.lock().unwrap();
+            revisions.next_revision(case_id, &self.constraint_id)
+        };
+
         emit_result_at(
             token_read_at,
+            revision,
             case_id,
             &self.constraint_id,
             ConstraintType::Response,

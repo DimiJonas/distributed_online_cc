@@ -9,6 +9,7 @@ use crate::measurement::record::{
 };
 use crate::measurement::record_writer::{enabled, message_trace_enabled, record};
 use crate::network::message_types::{PeerMessage, PeerMessagePayload};
+use crate::state::result_revision_store::RevisionNumber;
 use crate::state::result_send_buffer::ResultBufferPolicy;
 use crate::types::{
     CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventInstanceId, PeerAddress,
@@ -129,6 +130,7 @@ pub fn result_emitted(
     instance_id: Option<EventInstanceId>,
     trigger: ResultTrigger,
     decided_at: DateTime<Utc>,
+    revision: RevisionNumber,
 ) {
     record(Record::ResultEmitted {
         case_id: case_id.clone(),
@@ -139,6 +141,7 @@ pub fn result_emitted(
         instance_id,
         trigger,
         decided_at,
+        revision,
     });
 }
 

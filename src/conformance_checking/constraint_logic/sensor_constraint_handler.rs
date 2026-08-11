@@ -172,6 +172,11 @@ impl ConstraintHandler for SensorCollectorHandler {
                     // check if entry is outdated
                     let value_age = trigger_event_time - entry.timestamp;
                     if value_age.to_std().unwrap_or(Duration::MAX) > self.max_value_age {
+                        // take next revision number since a result will be emitted
+                        let revision = {
+                            let mut revisions = state.result_revisions.lock().unwrap();
+                            revisions.next_revision(&message.case_id, &self.constraint_id)
+                        };
                         let info = format!(
                             "sensor value for case={} key={} is outdated. value age relative to trigger event: {} > {} (max allowed age)",
                             message.case_id,
@@ -181,6 +186,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                         );
                         emit_result_at(
                             entry_read_at,
+                            revision,
                             &message.case_id,
                             &self.constraint_id,
                             ConstraintType::Sensor,
@@ -196,6 +202,11 @@ impl ConstraintHandler for SensorCollectorHandler {
                     entry.value
                 }
                 None => {
+                    // take next revision number since a result will be emitted
+                    let revision = {
+                        let mut revisions = state.result_revisions.lock().unwrap();
+                        revisions.next_revision(&message.case_id, &self.constraint_id)
+                    };
                     // no value exists
                     let info = format!(
                         "no sensor value exists for case={} key={}",
@@ -203,6 +214,7 @@ impl ConstraintHandler for SensorCollectorHandler {
                     );
                     emit_result_at(
                         entry_read_at,
+                        revision,
                         &message.case_id,
                         &self.constraint_id,
                         ConstraintType::Sensor,
@@ -234,9 +246,15 @@ impl ConstraintHandler for SensorCollectorHandler {
             }
         );
         if !condition_met {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(&message.case_id, &self.constraint_id)
+            };
             // produce negative result
             emit_result_at(
                 entry_read_at,
+                revision,
                 &message.case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
@@ -286,6 +304,11 @@ impl ConstraintHandler for SensorCollectorHandler {
             )
         };
         if !result_exists {
+            // take next revision number since a result will be emitted
+            let revision = {
+                let mut revisions = state.result_revisions.lock().unwrap();
+                revisions.next_revision(case_id, &self.constraint_id)
+            };
             // produce result because none was emitted yet
             let info_str = {
                 if value_was_checked {
@@ -297,6 +320,7 @@ impl ConstraintHandler for SensorCollectorHandler {
             };
             emit_result_at(
                 state_read_at,
+                revision,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::Sensor,
@@ -387,6 +411,11 @@ impl SensorCollectorHandler {
             );
             return;
         }
+        // take next revision number since a result will be emitted
+        let revision = {
+            let mut revisions = state.result_revisions.lock().unwrap();
+            revisions.next_revision(&event.case_id, &self.constraint_id)
+        };
 
         let value_age = evaluation.trigger_time - sensor_value.timestamp;
         let (result, info) = if value_age.to_std().unwrap_or(Duration::MAX) > self.max_value_age {
@@ -431,6 +460,7 @@ impl SensorCollectorHandler {
 
         emit_result_at(
             value_read_at,
+            revision,
             &event.case_id,
             &self.constraint_id,
             ConstraintType::Sensor,
