@@ -109,8 +109,8 @@ pub async fn run(config: NodeConfig) {
     );
 
     // keeps main alive until i shut it down
-    tokio::signal::ctrl_c().await.unwrap();
-    log::warn!("shutting down main");
+    let signal = wait_for_shutdown().await;
+    log::warn!("received {}, shutting down main", signal);
 }
 
 async fn setup_tcp_channels(state: AppState) {
@@ -136,4 +136,28 @@ async fn setup_tcp_channels(state: AppState) {
     for address in constraint_peers {
         connect_peer(PeerAddress::new_conformance_address(address), state.clone()).await;
     }
+}
+
+// ctrl_c sends SIGINT on unix
+// a standard 'kill' signal is SIGTERM
+#[cfg(unix)]
+async fn wait_for_shutdown() -> &'static str {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("cannot install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("cannot install SIGINT handler");
+
+    tokio::select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    }
+}
+
+// windows
+#[cfg(not(unix))]
+async fn wait_for_shutdown() -> &'static str {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("cannot listen for ctrl_c");
+    "ctrl_c"
 }
