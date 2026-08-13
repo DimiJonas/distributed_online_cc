@@ -41,10 +41,11 @@ use clap::{Parser, ValueEnum};
 use online_cc::config::config_builder::NodeConfigBuilder;
 use online_cc::config::node_config::{
     AppearanceCounterReset, ConstraintConfig, DistributedAppearanceCounterReset, ForwarderConfig,
-    MinMaxMode, ResultBufferConfig, ResultSinkConfig, SensorConstraintMode,
+    MinMaxMode, NodeConfig, ResultBufferConfig, ResultSinkConfig, SensorConstraintMode,
 };
 use online_cc::types::{ConstraintId, EventId, SensorAttributeKey, SensorAttributeThreshold};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{create_dir_all, read_to_string};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1248,10 +1249,11 @@ fn event_layout(instances: &[Instance], role_node_count: u64) -> Layout {
 struct CommonParams {
     cyclon: CyclonParams,
     gossip: GossipParams,
-    case_end_retention: Duration,
+    case_end_ttl: Duration,
 }
 
 // constraints are placed per `layout`and peers resolve to the conformance address of the hosting node
+#[allow(clippy::too_many_arguments)]
 fn emit_decentralized(
     instances: &[Instance],
     layout: &Layout,
@@ -1260,10 +1262,11 @@ fn emit_decentralized(
     db_path: &Path,
     common: &CommonParams,
     out_dir: &Path,
+    baseline: Option<&Baseline>,
 ) {
     let sink_id = 0u64;
     let total_nodes = role_nodes + 1; // total nodes incl. sink
-    std::fs::create_dir_all(out_dir).unwrap();
+    create_dir_all(out_dir).unwrap();
 
     for node_id in 0..total_nodes {
         let peers: Vec<SocketAddr> = bootstrap_ids(node_id, total_nodes, common.cyclon.ring_degree)
@@ -1276,7 +1279,7 @@ fn emit_decentralized(
             .tcp_listen(addressing.listen_conformance(node_id))
             .overlay_listen(addressing.listen_overlay(node_id))
             .initial_peers(peers)
-            .case_end_ttl(common.case_end_retention)
+            .case_end_ttl(common.case_end_ttl)
             .default_result_buffer(ResultBufferConfig::Revocable {
                 duration: Duration::from_secs(10),
             })
@@ -1329,8 +1332,91 @@ fn emit_decentralized(
 
         let config = builder.build();
         let path = out_dir.join(format!("node-{node_id}-config.toml"));
-        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        write_node_config(&path, &config, baseline);
     }
+}
+
+// merge the config file supplied by --baseline into every generated config file to avoid exposing every rarely used config value separately
+fn merge_baseline(
+    target: &mut toml::Value,
+    baseline: &toml::Value,
+    path: &str,
+    cli_overrides: &BTreeSet<String>,
+    skipped: &mut BTreeSet<String>,
+) {
+    let (Some(target_table), Some(baseline_table)) = (target.as_table_mut(), baseline.as_table())
+    else {
+        return;
+    };
+    for (key, value) in baseline_table {
+        let key_path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        if cli_overrides.contains(&key_path) {
+            // skip the key from the baseline because it was passed explicitly in the cli
+            continue;
+        }
+        match target_table.get_mut(key) {
+            Some(existing) if value.is_table() && existing.is_table() => {
+                merge_baseline(existing, value, &key_path, cli_overrides, skipped);
+            }
+            Some(existing) => *existing = value.clone(),
+            // tables that the node doesnt have are skipped (e.g. [gossip] on the central node)
+            None if value.is_table() => {
+                skipped.insert(key_path);
+            }
+            None => {
+                target_table.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+fn baseline_has(values: &toml::Value, path: &str) -> bool {
+    let mut current = values;
+    for segment in path.split('.') {
+        match current.get(segment) {
+            Some(next) => current = next,
+            None => return false,
+        }
+    }
+    true
+}
+
+struct Baseline {
+    values: toml::Value,
+    // values that were explicitly supplied in the cli
+    cli_overrides: BTreeSet<String>,
+}
+
+fn write_node_config(path: &Path, config: &NodeConfig, baseline: Option<&Baseline>) {
+    let text = match baseline {
+        None => toml::to_string(config).unwrap(),
+        Some(baseline) => {
+            let mut value = toml::Value::try_from(config).unwrap();
+            let mut skipped = BTreeSet::new();
+            merge_baseline(
+                &mut value,
+                &baseline.values,
+                "",
+                &baseline.cli_overrides,
+                &mut skipped,
+            );
+            let merged: NodeConfig = value.clone().try_into().unwrap_or_else(|error| {
+                panic!(
+                    "--baseline produced an invalid config for {}: {}\n\
+                     (check the key names against NodeConfig - unknown fields are rejected)",
+                    path.display(),
+                    error
+                )
+            });
+            merged.validate();
+            toml::to_string(&merged).unwrap()
+        }
+    };
+    std::fs::write(path, text).unwrap();
 }
 
 // emit the central system: node 0 is the central node holding every constraint
@@ -1342,8 +1428,9 @@ fn emit_central(
     addressing: &Addressing,
     db_path: &Path,
     out_dir: &Path,
+    baseline: Option<&Baseline>,
 ) {
-    std::fs::create_dir_all(out_dir).unwrap();
+    create_dir_all(out_dir).unwrap();
     let central_id = 0u64;
     let central_address = addressing.reachable_conformance(central_id);
 
@@ -1398,11 +1485,11 @@ fn emit_central(
         }
     }
     let central = central.build();
-    std::fs::write(
-        out_dir.join("node-0-central-config.toml"),
-        toml::to_string(&central).unwrap(),
-    )
-    .unwrap();
+    write_node_config(
+        &out_dir.join("node-0-central-config.toml"),
+        &central,
+        baseline,
+    );
 
     // ---- forwarders ----
     // a forwarder that mirrors a constraint-free decentralized node gets an empty include list
@@ -1492,6 +1579,10 @@ struct Args {
     #[arg(long, action = clap::ArgAction::SetTrue)]
     no_bind_all: bool,
 
+    /// partial node config merged into every generated config to avoid having to expose all rarely used config values
+    #[arg(long)]
+    baseline: Option<PathBuf>,
+
     // base output dir for both systems
     #[arg(long, default_value = "run")]
     out_dir: PathBuf,
@@ -1502,8 +1593,9 @@ struct Args {
     #[arg(long)]
     db_dir: Option<PathBuf>,
 
-    #[arg(long, default_value_t = 180)]
-    case_end_retention_period_secs: u64,
+    /// how long a case end keeps being gossiped (in seconds)
+    #[arg(long)]
+    case_end_ttl: Option<u64>,
 
     #[arg(long)]
     shuffle_secs: Option<u64>,
@@ -1554,10 +1646,74 @@ fn main() {
         gossip.push_fanout = v;
     }
 
+    let baseline: Option<toml::Value> = args.baseline.as_ref().map(|path| {
+        let text = read_to_string(path)
+            .unwrap_or_else(|error| panic!("cannot read --baseline {}: {error}", path.display()));
+        let value: toml::Value = toml::from_str(&text)
+            .unwrap_or_else(|error| panic!("cannot parse --baseline {}: {error}", path.display()));
+        // list of sections of the config toml, to reject wrong sections realy
+        const SECTIONS: [&str; 6] = [
+            "tcp_channels",
+            "result_sink",
+            "overlay",
+            "gossip",
+            "forwarder",
+            "result_buffers",
+        ];
+        for (key, entry) in value.as_table().expect("--baseline must be a toml table") {
+            assert!(
+                !entry.is_table() || SECTIONS.contains(&key.as_str()),
+                "--baseline has an unknown section [{key}] (expected one of {SECTIONS:?})"
+            );
+        }
+        value
+    });
+
+    let mut cli_overrides: BTreeSet<String> = BTreeSet::new();
+    for (given, config_path) in [
+        (args.case_end_ttl.is_some(), "case_end_ttl"),
+        (args.shuffle_secs.is_some(), "overlay.shuffle_interval"),
+        (args.shuffle_length.is_some(), "overlay.shuffle_length"),
+        (args.cache_size.is_some(), "overlay.max_peer_cache_size"),
+        (args.idle_timeout_secs.is_some(), "overlay.idle_timeout"),
+        (
+            args.anti_entropy_secs.is_some(),
+            "gossip.anti_entropy_interval",
+        ),
+        (
+            args.anti_entropy_fanout.is_some(),
+            "gossip.anti_entropy_fanout",
+        ),
+        (args.push_fanout.is_some(), "gossip.push_fanout"),
+        (args.db_dir.is_some(), "result_sink.db_path"),
+    ] {
+        if given {
+            cli_overrides.insert(config_path.to_string());
+        }
+    }
+
+    let baseline = baseline.map(|values| {
+        // check if baseline values were shadowed
+        let shadowed: Vec<&String> = cli_overrides
+            .iter()
+            .filter(|path| baseline_has(&values, path))
+            .collect();
+        if !shadowed.is_empty() {
+            eprintln!(
+                "note: --baseline sets {:?} but an explicit flag was passed for it - the flag wins",
+                shadowed
+            );
+        }
+        Baseline {
+            values,
+            cli_overrides,
+        }
+    });
+
     let common = CommonParams {
         cyclon,
         gossip,
-        case_end_retention: Duration::from_secs(args.case_end_retention_period_secs),
+        case_end_ttl: Duration::from_secs(args.case_end_ttl.unwrap_or(180)),
     };
 
     let make_addressing = |conformance_base: u16| match args.addressing.as_str() {
@@ -1659,12 +1815,12 @@ fn main() {
 
     // create the log dirs up front so the node never has to
     for root in [&dist_root, &central_root] {
-        std::fs::create_dir_all(root.join("logs")).unwrap();
+        create_dir_all(root.join("logs")).unwrap();
     }
 
     let (dist_db, central_db) = match &args.db_dir {
         Some(dir) => {
-            std::fs::create_dir_all(dir).unwrap();
+            create_dir_all(dir).unwrap();
             (
                 dir.join("decentralized-cc-results.db"),
                 dir.join("central-cc-results.db"),
@@ -1684,6 +1840,7 @@ fn main() {
         &dist_db,
         &common,
         &dist_config_dir,
+        baseline.as_ref(),
     );
     emit_central(
         &instances,
@@ -1692,6 +1849,7 @@ fn main() {
         &central_addressing,
         &central_db,
         &central_config_dir,
+        baseline.as_ref(),
     );
 
     println!(

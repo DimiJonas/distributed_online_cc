@@ -1,0 +1,202 @@
+##############################################################################################################################
+# 
+# parametrisation for simulation runs (with run_simulations.py)
+#
+#   [defaults]                values for th simulation script specifically
+#   [defaults.params]         parameters for the gen-config and gen-events binaries
+#   [baseline.*]              config values in a nod config that are not changed during experiments
+#   [[experiment]]            
+#   [experiment.params]       
+#   [experiment.grid]         cartesian product of the given lists
+#   [experiment.sensitivity]  one factor at a time around the base point
+#
+#           [experiment.grid]         full cartesian product of the given lists
+#           [experiment.sensitivity]  one-at-a-time: the base point plus one variation per value
+#           seeds = [...]             stream seeds (a new stream per seed)
+#           replicates = n            repeat the identical run n times (measurement noise)
+#
+##############################################################################################################################
+
+[defaults]
+repo_root = "."
+results_dir = "results"
+bin_dir = "target/release"
+node_bin = "target/release/node"
+python = "python3.11"                   # python3.11 needed for tomllib
+send_script = "send_event_stream.py"
+compare_script = "compare_results.py"
+
+rust_log = "warn"
+rust_log_file = "warn"
+
+resource_interval_s = 0.25    # /proc sampling interval
+node_start_stagger_s = 0.05   # time between the start of the nodes to avoid a huge load of tcp channel setups at once
+ready_timeout_s = 30          # wait for this period until starting the simulation run (wait for system startup)
+between_systems_s = 5         # wait for this period between system change (tear down first and bring up second) (dcentralized and central one after another)
+send_timeout_s = 7200         # max time the send_event_stream.py script is allowed to run (7200s=120m=2h)
+
+[defaults.params]
+catalog = "default"               # the default catalog is the synthetic catalog for the scalability runs (see gen-config.rs)
+role_assignment = "round-robin"   # how constraint roles are assigned to the available nodes (see gen-config.rs)
+repeat = 1                        # copies of the catalog (constraint count multiplier)
+nodes = 23                        # 22 roles + 1 result sink (default catalog has 22 roles)
+rate = 100                        # events per second at the pacer
+cases = 50                        # amount of cases generated 
+violation_rate = 0.2              # how many cases should have deviations/violations
+violation_sampling = "exact"      # exact means exactly (violation_rate * cases) amount of cases have deviations; bernoulli means deviations are rolled for each case independently
+step_secs = 1.0                   # time between the timestamps of two events of one case
+case_gap_secs = 10.0              # time between the timestamps of case starts -> case concurrency (since the stream will be sorted by timestamp)
+msgtrace = true                   # per message records (needed for bytes/event)
+idle_window_s = 20                # overlay/gossip only without a workload to record idle cost baseline
+quiescence_s = 20                 # no new db row for this long = the system has settled (used to detect system settlement after the event stream has finished)
+max_wait_for_settlement_s = 240   # max time to wait for settlement of the system after the event stream has finished
+external_central_sink = true      # give the central system its own sink node instead of hosting the sink inside the central node
+
+[baseline]
+event_queue_size = 8192               # events are enqueued here after parsing
+loopback_queue_size = 8192            # used to skip tcp if the destination is the nodes own address (predominantly used by the central node)
+case_end_grace_period = "10s"         # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
+case_end_ttl = "60s"                  # how long a case end is gossiped -> should be bigger than gossip convergence time
+case_janitor_cleanup_interval = "1s"  # prunes completed cases from the node state
+
+[baseline.tcp_channels]
+tcp_channel_mpsc_channel_size = 1024    # internal mpsc channel to pass messages to the tcp channel
+peer_manager_mpsc_channel_size = 1024   # internal mpsc channel to give commands to the peer connection management
+message_queue_size = 4096               # per peer queue to buffer messages
+internal_message_ttl = "120s"           # how long a message in the message queue stays 'valid'. messages are dropped if this ttl expired
+reconnect_start_delay = "200ms"         # start delay of the exponential backoff when trying to reconnect to a peer
+reconnect_max_delay = "5s"              # max delay of the exponential backoff when trying to reconnect to a peer
+wait_for_response_timeout = "60s"       # timeout for when a peer waits for a response from another peer
+connect_timeout = "5s"                  # wait this long when trying to connect to a peer
+
+[baseline.result_sink]
+mpsc_channel_size = 8192        # internal mpsc channel to pass a message containing a result to the result sink
+retry_interval = "5s"           # interval in which the sink tries to reconnect to the database
+retry_buffer_size = 32768       # the retry buffer buffers results while the connection to the database is gone
+max_batch_size = 512            # batch size for writing results to the database
+flush_interval = "100ms"        # max time until a batch is flushed to the database (if max batch size is not reached)
+
+####################################################################################################
+# scalability
+####################################################################################################
+
+# 1) the rate ladder -> sustainable throughput, latency vs load, correctness under load
+[[experiment]]
+id = "throughput_ladder"
+kind = "scalability"
+seeds = [1, 2, 3]
+systems = ["decentralized", "central"]
+  [experiment.grid]
+  rate = [25, 50, 100, 200, 400, 800]
+
+# 2) node count at a fixed, safely unsaturated rate
+#    below 23 the roles wrap (more constraints per node), above 23 the extra nodes only
+#    participate in the overlay, which is exactly what the idle cost curve needs
+[[experiment]]
+id = "node_scaling"
+kind = "scalability"
+seeds = [1, 2, 3]
+  [experiment.params]
+  rate = 100
+  idle_window_s = 40
+  [experiment.grid]
+  nodes = [5, 9, 13, 17, 23, 33, 45]
+
+# 3) constraint density: more constraints on the same number of nodes
+[[experiment]]
+id = "constraint_density"
+kind = "scalability"
+seeds = [1, 2]
+  [experiment.params]
+  rate = 100
+  nodes = 23
+  [experiment.grid]
+  repeat = [1, 2, 4]
+
+####################################################################################################
+# sensitivity (one factor at a time around the base point)
+####################################################################################################
+
+[[experiment]]
+id = "sens_gossip"
+kind = "scalability"
+seeds = [1, 2]
+  [experiment.params]
+  rate = 100
+  anti_entropy_secs = 1
+  anti_entropy_fanout = 1
+  push_fanout = 4
+  idle_window_s = 40
+  [experiment.sensitivity]
+  anti_entropy_secs = [1, 5, 15]
+  anti_entropy_fanout = [1, 2, 3]
+  push_fanout = [1, 2, 4, 8]
+
+# artificial rtt on loopback. netem_ms is the ONE WAY delay, so the rtt between two local
+# nodes is about twice that. needs `sudo tc`, and it does not touch the unix socket ingress
+[[experiment]]
+id = "sens_netem"
+kind = "scalability"
+seeds = [1, 2]
+  [experiment.params]
+  rate = 100
+  [experiment.sensitivity]
+  netem_ms = [0, 1, 5, 25]
+
+# case concurrency: a smaller gap between case starts means more cases are open at once
+[[experiment]]
+id = "sens_case_concurrency"
+kind = "scalability"
+seeds = [1, 2]
+  [experiment.params]
+  rate = 100
+  [experiment.sensitivity]
+  case_gap_secs = [1.0, 5.0, 10.0, 30.0]
+
+# how much the measurement itself costs: same run with and without the per message trace
+[[experiment]]
+id = "sens_msgtrace"
+kind = "scalability"
+seeds = [1, 2]
+  [experiment.params]
+  rate = 200
+  [experiment.sensitivity]
+  msgtrace = [true, false]
+
+####################################################################################################
+# privacy (real log, real activity names, one node per activity)
+####################################################################################################
+
+[[experiment]]
+id = "privacy_sepsis"
+kind = "privacy"
+seeds = [1]
+systems = ["decentralized", "central"]
+  [experiment.params]
+  catalog = "sepsis"
+  role_assignment = "by-event"
+  nodes = 18                              # 17 activities + result sink
+  repeat = 1
+  stream_dir = "sepsis/events"
+  manifest = "manifest.jsonl"
+  rate = 200
+  msgtrace = true
+  idle_window_s = 30
+  quiescence_s = 25
+  max_drain_s = 300
+
+# the same log at several rates, so the privacy numbers can be reported together with the
+# behaviour of the system that produced them
+[[experiment]]
+id = "privacy_sepsis_rates"
+kind = "privacy"
+seeds = [1]
+systems = ["decentralized", "central"]
+  [experiment.params]
+  catalog = "sepsis"
+  role_assignment = "by-event"
+  nodes = 18                              # 17 activities + result sink
+  stream_dir = "sepsis/events"
+  msgtrace = true
+  [experiment.grid]
+  rate = [50, 200, 800]

@@ -17,7 +17,9 @@ use std::time::Instant;
 #[derive(Serialize)]
 struct Line {
     node_id: PeerId,
+    /// microseconds since node start
     timestamp_monotonic_us: u64,
+    /// current wallclock time in microseconds
     timestamp_wallclock_us: i64,
     #[serde(flatten)]
     record: Record,
