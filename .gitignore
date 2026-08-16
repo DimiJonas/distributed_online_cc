@@ -2,6 +2,8 @@
 /run
 /sepsis
 /traffic_fines
+/simulation/__pycache__
+/results
 
 .vscode
 *.zip

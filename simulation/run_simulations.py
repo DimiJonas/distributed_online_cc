@@ -80,13 +80,14 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
     runs = []
     seeds = exp.get("seeds", [defaults.get("seed", 1)])
     replicates = int(exp.get("replicates", 1))
+    label_keys = _varying_keys(points)
     for point in points:
         for seed in seeds:
             for rep in range(replicates):
                 params = dict(point)
                 params["seed"] = seed
                 label = "_".join(f"{k}{_fmt(v)}" for k, v in sorted(point.items())
-                                 if k in (exp.get("label_keys") or _varying_keys(points)))
+                             if k in label_keys)
                 run_id = f"{label or 'base'}__seed{seed}"
                 if replicates > 1:
                     run_id += f"__r{rep}"

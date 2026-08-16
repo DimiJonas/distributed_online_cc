@@ -5,15 +5,20 @@
 #   [defaults]                values for th simulation script specifically
 #   [defaults.params]         parameters for the gen-config and gen-events binaries
 #   [baseline.*]              config values in a nod config that are not changed during experiments
-#   [[experiment]]            
-#   [experiment.params]       
-#   [experiment.grid]         cartesian product of the given lists
+#   
+#   [[experiment]]            one experiment under results/ that will be expanded to multiple runs
 #   [experiment.sensitivity]  one factor at a time around the base point
 #
-#           [experiment.grid]         full cartesian product of the given lists
-#           [experiment.sensitivity]  one-at-a-time: the base point plus one variation per value
-#           seeds = [...]             stream seeds (a new stream per seed)
-#           replicates = n            repeat the identical run n times (measurement noise)
+#           id                        name of the experiment (sets the name of the directory under results/) e.g. "saturation test"
+#           kind                      "scalability"  will generate configs and stream (default)
+#                                     "privacy"      will take a prepared stream from params.stream_dir and mark runs for privacy evaluation
+#           seeds                     seeds for generating event streams (one stream per seed) e.g. [22, 5551, 4040412]
+#           systems                   whih deployments to run (sequentially) (default: ["decentralized", "central"])
+#           replicates                repeat the identical run n times (in case of measurement noise) (default: 1)
+#           include_base              whether the unmodified base configuration is also run (only with sensitivity) (default: true)
+#           [experiment.params]       override default.params for the experiment
+#           [experiment.grid]         full cartesian product of the given lists e.g. rate = [50, 100] X nodes = [5, 9] => 4 runs
+#           [experiment.sensitivity]  one variation per value e.g. rate = [50, 100, 200] + nodes = [5, 9] => 5 runs
 #
 ##############################################################################################################################
 
@@ -26,8 +31,8 @@ python = "python3.11"                   # python3.11 needed for tomllib
 send_script = "send_event_stream.py"
 compare_script = "compare_results.py"
 
-rust_log = "warn"
-rust_log_file = "warn"
+rust_log = "warn"         # log level for stdout for the node process
+rust_log_file = "warn"    # log level for the log file written by the node process
 
 resource_interval_s = 0.25    # /proc sampling interval
 node_start_stagger_s = 0.05   # time between the start of the nodes to avoid a huge load of tcp channel setups at once
@@ -88,115 +93,3 @@ seeds = [1, 2, 3]
 systems = ["decentralized", "central"]
   [experiment.grid]
   rate = [25, 50, 100, 200, 400, 800]
-
-# 2) node count at a fixed, safely unsaturated rate
-#    below 23 the roles wrap (more constraints per node), above 23 the extra nodes only
-#    participate in the overlay, which is exactly what the idle cost curve needs
-[[experiment]]
-id = "node_scaling"
-kind = "scalability"
-seeds = [1, 2, 3]
-  [experiment.params]
-  rate = 100
-  idle_window_s = 40
-  [experiment.grid]
-  nodes = [5, 9, 13, 17, 23, 33, 45]
-
-# 3) constraint density: more constraints on the same number of nodes
-[[experiment]]
-id = "constraint_density"
-kind = "scalability"
-seeds = [1, 2]
-  [experiment.params]
-  rate = 100
-  nodes = 23
-  [experiment.grid]
-  repeat = [1, 2, 4]
-
-####################################################################################################
-# sensitivity (one factor at a time around the base point)
-####################################################################################################
-
-[[experiment]]
-id = "sens_gossip"
-kind = "scalability"
-seeds = [1, 2]
-  [experiment.params]
-  rate = 100
-  anti_entropy_secs = 1
-  anti_entropy_fanout = 1
-  push_fanout = 4
-  idle_window_s = 40
-  [experiment.sensitivity]
-  anti_entropy_secs = [1, 5, 15]
-  anti_entropy_fanout = [1, 2, 3]
-  push_fanout = [1, 2, 4, 8]
-
-# artificial rtt on loopback. netem_ms is the ONE WAY delay, so the rtt between two local
-# nodes is about twice that. needs `sudo tc`, and it does not touch the unix socket ingress
-[[experiment]]
-id = "sens_netem"
-kind = "scalability"
-seeds = [1, 2]
-  [experiment.params]
-  rate = 100
-  [experiment.sensitivity]
-  netem_ms = [0, 1, 5, 25]
-
-# case concurrency: a smaller gap between case starts means more cases are open at once
-[[experiment]]
-id = "sens_case_concurrency"
-kind = "scalability"
-seeds = [1, 2]
-  [experiment.params]
-  rate = 100
-  [experiment.sensitivity]
-  case_gap_secs = [1.0, 5.0, 10.0, 30.0]
-
-# how much the measurement itself costs: same run with and without the per message trace
-[[experiment]]
-id = "sens_msgtrace"
-kind = "scalability"
-seeds = [1, 2]
-  [experiment.params]
-  rate = 200
-  [experiment.sensitivity]
-  msgtrace = [true, false]
-
-####################################################################################################
-# privacy (real log, real activity names, one node per activity)
-####################################################################################################
-
-[[experiment]]
-id = "privacy_sepsis"
-kind = "privacy"
-seeds = [1]
-systems = ["decentralized", "central"]
-  [experiment.params]
-  catalog = "sepsis"
-  role_assignment = "by-event"
-  nodes = 18                              # 17 activities + result sink
-  repeat = 1
-  stream_dir = "sepsis/events"
-  manifest = "manifest.jsonl"
-  rate = 200
-  msgtrace = true
-  idle_window_s = 30
-  quiescence_s = 25
-  max_drain_s = 300
-
-# the same log at several rates, so the privacy numbers can be reported together with the
-# behaviour of the system that produced them
-[[experiment]]
-id = "privacy_sepsis_rates"
-kind = "privacy"
-seeds = [1]
-systems = ["decentralized", "central"]
-  [experiment.params]
-  catalog = "sepsis"
-  role_assignment = "by-event"
-  nodes = 18                              # 17 activities + result sink
-  stream_dir = "sepsis/events"
-  msgtrace = true
-  [experiment.grid]
-  rate = [50, 200, 800]
