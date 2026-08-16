@@ -199,6 +199,7 @@ def assert_addresses_free(nodes: list[NodeInfo]) -> None:
 
 # blocks until every node listens on its unix socket and its tcp port and is ready and give up if one of them dies
 def wait_until_ready(nodes: list[NodeInfo], procs: dict[int, subprocess.Popen] | None = None, timeout: float = 60.0) -> float:
+ 
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     while time.monotonic() < deadline:
@@ -207,20 +208,20 @@ def wait_until_ready(nodes: list[NodeInfo], procs: dict[int, subprocess.Popen] |
                     if process.poll() is not None}
             if dead:
                 raise RuntimeError(
-                    f"node process(es) exited during startup: {dead}. see the .stderr files next to the node logs "
-                    "(a panic at tcp_listener.rs with AddrInUse means the port was still held)")
+                    f"node process(es) exited during startup: {dead}")
         missing = [node for node in nodes
-                   if not (os.path.exists(node.unix_socket) and tcp_ready(node.tcp) and (node.overlay is None or tcp_ready(node.overlay)))]
+                   if not (os.path.exists(node.unix_socket) and tcp_ready(node.tcp)
+                           and (node.overlay is None or tcp_ready(node.overlay)))]
         if not missing:
             return time.monotonic() - started
         time.sleep(0.2)
-    raise TimeoutError(f"nodes not ready after {timeout}s: {[missing_node.node_id for missing_node in missing]}")
+    raise TimeoutError(f"nodes not ready after {timeout}s: {[n.node_id for n in missing]}")
 
 
 def remove_sockets(nodes: list[NodeInfo]) -> None:
-    for n in nodes:
+    for node in nodes:
         try:
-            os.unlink(n.unix_socket)
+            os.unlink(node.unix_socket)
         except OSError:
             pass
 
@@ -234,6 +235,7 @@ def register_process(proc: subprocess.Popen) -> None:
 
 # signal a process group (nodes are setsid() so they are each in their own process group)
 def _signal_process(proc: subprocess.Popen, sig: int) -> None:
+
     try:
         os.killpg(os.getpgid(proc.pid), sig)
     except (ProcessLookupError, PermissionError):
@@ -246,7 +248,7 @@ def _signal_process(proc: subprocess.Popen, sig: int) -> None:
 
 # send SIGTERM and escalate to SIGKILL if node does not shut down
 def stop_processes(procs: dict[int, subprocess.Popen], grace: float = 8.0) -> list[int]:
- 
+
     for proc in procs.values():
         if proc.poll() is None:
             _signal_process(proc, signal.SIGTERM)
@@ -268,11 +270,11 @@ def stop_processes(procs: dict[int, subprocess.Popen], grace: float = 8.0) -> li
     return killed
 
 
-def stop_all_launched() -> int:
+def stop_all_launched(grace: float = 3.0) -> int:
 
     alive = {pid: proc for pid, proc in LAUNCHED_PROCESSES.items() if proc.poll() is None}
     if alive:
-        stop_processes({pid: proc for pid, proc in alive.items()}, grace=3.0)
+        stop_processes(dict(alive), grace=grace)
     LAUNCHED_PROCESSES.clear()
     return len(alive)
 

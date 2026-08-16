@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{
+    io::{IsTerminal, stdin},
+    net::SocketAddr,
+    time::Duration,
+};
 
 use tokio::sync::mpsc;
 
@@ -75,8 +79,11 @@ pub async fn run(config: NodeConfig) {
         },
     );
 
+    if stdin().is_terminal() {
+        crate::app::cli::spawn_cli(state.clone());
+    }
+
     crate::app::tcp_listener::spawn_conformance_network_listener(state.clone());
-    crate::app::cli::spawn_cli(state.clone());
     crate::app::event_listener::spawn_event_listener(state.clone());
     crate::app::event_q_processor::spawn_event_processor(state.clone(), event_q_rx);
     crate::app::loopback_q_processor::spawn_loopback_q_processor(state.clone(), loopback_q_rx);

@@ -47,6 +47,20 @@ from helpers import (
 LOCKFILE = Path("/tmp/cc-sim.lock")
 
 
+# check if the process that owns the LOCKFILE is still alive
+def _process_alive(pid: str) -> bool:
+
+    if not pid.isdigit():
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
+
+
 # load experiments.toml
 def load_plan(path: Path) -> dict:
     import tomllib
@@ -265,7 +279,8 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
             stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
             proc = subprocess.Popen(
                 [str(node_bin), "-c", node.path, "-l", str(log_dir)],
-                cwd=str(repo), env={**os.environ, **env}, stdout=subprocess.DEVNULL,
+                cwd=str(repo), env={**os.environ, **env},
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=stderr_file, start_new_session=True)
             procs[node.node_id] = proc
             register_process(proc)
@@ -439,7 +454,7 @@ def main() -> int:
     ap.add_argument("--only", action="append", default=[], help="experiment id glob (repeatable)")
     ap.add_argument("--run", action="append", default=[], help="run id glob (repeatable)")
     ap.add_argument("--list", action="store_true", help="print the expanded run list and exit")
-    ap.add_argument("--kill-stale", action="store_true", help="SIGKILL any leftover node processes of this binary before starting")
+    ap.add_argument("--kill-stale", action="store_true", help="SIGKILL any leftover node processes of this binary before starting. refused while another simulation holds the lock file")
     ap.add_argument("--force", action="store_true", help="re-run runs that already have a run.json")
     args = ap.parse_args()
 
@@ -464,13 +479,16 @@ def main() -> int:
         print(f"\n{len(runs)} run(s)")
         return 0
 
-    # check if another simulation is already running
+   # check if another simulation is still running
     if LOCKFILE.exists():
-        print(f"another simulation seems to be running ({LOCKFILE} exists). "
-              f"the nodes use fixed /tmp socket paths and fixed ports, so runs cannot overlap. "
-              f"remove the lock file if this is stale.", file=sys.stderr)
-        return 2
-    
+        holder = LOCKFILE.read_text().strip()
+        if _process_alive(holder):
+            print(f"another simulation is running (pid {holder}, lock file {LOCKFILE}). "
+                  "the nodes use fixed /tmp socket paths and fixed ports, so runs cannot overlap.", file=sys.stderr)
+            return 2
+        log(f"removing stale lock file {LOCKFILE} (pid {holder or '?'} is no longer running)")
+        LOCKFILE.unlink(missing_ok=True)
+
     if args.kill_stale:
         node_bin = repo / defaults.get("node_bin", "target/release/node")
         killed = kill_stale_nodes(node_bin)
@@ -484,6 +502,14 @@ def main() -> int:
         if signum is not None:
             raise KeyboardInterrupt
 
+    # handle ctrl+c to stop the script
+    def interrupt(_signum, _frame):
+        log("interrupted - stopping all node processes")
+        stop_all_launched(grace=1.0)
+        LOCKFILE.unlink(missing_ok=True)
+        os._exit(130)
+
+    signal.signal(signal.SIGINT, interrupt)
     atexit.register(stop_all_launched)
     for catch in (signal.SIGTERM, signal.SIGHUP):
         try:
@@ -497,7 +523,6 @@ def main() -> int:
         for i, run in enumerate(runs, 1):
             log(f"[{i}/{len(runs)}] {run['experiment']}/{run['run_id']}")
             execute_run(plan, repo, results_dir, run, args.force)
-
     except BaseException as error:
         log(f"aborting: {type(error).__name__}: {error}")
         stop_all_launched()
