@@ -23,11 +23,13 @@ what one run does
 from __future__ import annotations
 
 import argparse
+import atexit
 import fnmatch
 import itertools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -35,9 +37,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
-    NodeInfo, ProcSampler, binary_cmd, db_progress, load_expected, load_system_configs,
-    log, netem_apply, netem_clear, now_us, read_jsonl, remove_sockets, run_logged,
-    stable_key, stop_processes, wait_until_ready, write_toml,
+    NodeInfo, ProcSampler, assert_addresses_free, binary_cmd, db_progress, kill_stale_nodes,
+    load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
+    register_process, remove_sockets, run_logged, stable_key, stop_all_launched,
+    stop_processes, wait_until_ready, write_toml,
 )
 
 # used to detect if another simulation is currently running
@@ -234,6 +237,7 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     nodes = load_system_configs(paths.configs(system))
     if not nodes:
         raise RuntimeError(f"no configs for {system} in {paths.configs(system)}")
+    assert_addresses_free(nodes)
     remove_sockets(nodes)
     for suffix in ("", "-wal", "-shm"):
         Path(str(paths.db(system)) + suffix).unlink(missing_ok=True)
@@ -256,19 +260,24 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     procs: dict[int, subprocess.Popen] = {}
     log_dir = paths.logs(system).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
-    for node in nodes:
-        stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
-        proc = subprocess.Popen(
-            [str(node_bin), "-c", node.path, "-l", str(log_dir)],
-            cwd=str(repo), env={**os.environ, **env}, stdout=subprocess.DEVNULL,
-            stderr=stderr_file, start_new_session=True)
-        procs[node.node_id] = proc
-        time.sleep(float(plan["defaults"].get("node_start_stagger_s", 0.05)))
+    try:
+        for node in nodes:
+            stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
+            proc = subprocess.Popen(
+                [str(node_bin), "-c", node.path, "-l", str(log_dir)],
+                cwd=str(repo), env={**os.environ, **env}, stdout=subprocess.DEVNULL,
+                stderr=stderr_file, start_new_session=True)
+            procs[node.node_id] = proc
+            register_process(proc)
+            time.sleep(float(plan["defaults"].get("node_start_stagger_s", 0.05)))
+    except BaseException:
+        stop_processes(procs)
+        raise
     return procs, nodes
 
 
 def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict) -> dict:
-    sender = repo / plan["defaults"].get("sender", "send_event_stream.py")
+    sender = repo / plan["defaults"].get("send_script", "send_event_stream.py")
     send_stream_cmd = [plan["defaults"].get("python", "python3.11"), str(sender),
            "--config-dir", str(paths.configs(system).resolve()),
            "--log", str((paths.send / f"{system}.log").resolve()),
@@ -329,7 +338,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
     sampler = None
     try:
         timeline["launch_us"] = now_us()
-        ready_s = wait_until_ready(nodes, timeout=float(plan["defaults"].get("ready_timeout_s", 90)))
+        ready_s = wait_until_ready(nodes, procs, timeout=float(plan["defaults"].get("ready_timeout_s", 90)))
         timeline["ready_us"] = now_us()
         timeline["ready_seconds"] = ready_s
 
@@ -348,9 +357,12 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         timeline.update(send_stream(plan, repo, paths, system, params, stream))
         timeline.update(wait_for_system_settlement(paths, system, stream.get("expected_pairs"), params))
     finally:
-        if sampler:
-            sampler.stop()
-            sampler.join(timeout=5)
+        try:
+            if sampler:
+                sampler.stop()
+                sampler.join(timeout=5)
+        except Exception as error:
+            log(f"  !! resource sampler did not shut down cleanly: {error!r}")
         timeline["hard_killed_nodes"] = stop_processes(procs)
         timeline["stopped_us"] = now_us()
         if timeline["hard_killed_nodes"]:
@@ -368,7 +380,7 @@ def compare(plan: dict, repo: Path, paths: RunPaths, stream: dict, systems: list
     if not all(paths.db(s).exists() for s in ("decentralized", "central")) or len(systems) < 2:
         return (None, None)
     compare_results_cmd = [plan["defaults"].get("python", "python3.11"),
-           str(repo / plan["defaults"].get("comparer", "compare_results.py")),
+           str(repo / plan["defaults"].get("compare_script", "compare_results.py")),
            "--decentralized", str(paths.db("decentralized").resolve()),
            "--central", str(paths.db("central").resolve()),
            "--expected", stream["expected"],
@@ -427,6 +439,7 @@ def main() -> int:
     ap.add_argument("--only", action="append", default=[], help="experiment id glob (repeatable)")
     ap.add_argument("--run", action="append", default=[], help="run id glob (repeatable)")
     ap.add_argument("--list", action="store_true", help="print the expanded run list and exit")
+    ap.add_argument("--kill-stale", action="store_true", help="SIGKILL any leftover node processes of this binary before starting")
     ap.add_argument("--force", action="store_true", help="re-run runs that already have a run.json")
     args = ap.parse_args()
 
@@ -457,14 +470,38 @@ def main() -> int:
               f"the nodes use fixed /tmp socket paths and fixed ports, so runs cannot overlap. "
               f"remove the lock file if this is stale.", file=sys.stderr)
         return 2
+    
+    if args.kill_stale:
+        node_bin = repo / defaults.get("node_bin", "target/release/node")
+        killed = kill_stale_nodes(node_bin)
+        log(f"killed {killed} stale node process(es) matching {node_bin}")
+
+    def emergency_stop(signum=None, _frame=None):
+        alive = stop_all_launched()
+        if alive:
+            log(f"stopped {alive} node process(es) during shutdown")
+        LOCKFILE.unlink(missing_ok=True)
+        if signum is not None:
+            raise KeyboardInterrupt
+
+    atexit.register(stop_all_launched)
+    for catch in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(catch, emergency_stop)
+        except (ValueError, OSError):
+            pass
+
     LOCKFILE.write_text(str(os.getpid()))
     started = time.time()
     try:
         for i, run in enumerate(runs, 1):
             log(f"[{i}/{len(runs)}] {run['experiment']}/{run['run_id']}")
             execute_run(plan, repo, results_dir, run, args.force)
-    except KeyboardInterrupt:
-        log("interrupted")
+
+    except BaseException as error:
+        log(f"aborting: {type(error).__name__}: {error}")
+        stop_all_launched()
+        raise
         return 130
     finally:
         LOCKFILE.unlink(missing_ok=True)

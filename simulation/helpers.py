@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import re
 import socket
 import sqlite3
@@ -183,19 +184,37 @@ def tcp_ready(address: str, timeout: float = 0.25) -> bool:
         return False
 
 
-# blocks until every node listens on its unix socket and its tcp port and is ready
-def wait_until_ready(nodes: list[NodeInfo], timeout: float = 60.0) -> float:
+# refuse to launch into addresses that are already taken
+def assert_addresses_free(nodes: list[NodeInfo]) -> None:
+    taken = []
+    for node in nodes:
+        for address in (node.tcp, node.overlay):
+            if address and tcp_ready(address):
+                taken.append(f"node {node.node_id} {address}")
+    if taken:
+        raise RuntimeError(
+            f"these addresses are already in use, most likely by node processes of an earlier run that were never stopped: {taken}. "
+            "check with `pgrep -a target/release/node` and kill them before retrying")
+
+
+# blocks until every node listens on its unix socket and its tcp port and is ready and give up if one of them dies
+def wait_until_ready(nodes: list[NodeInfo], procs: dict[int, subprocess.Popen] | None = None, timeout: float = 60.0) -> float:
     deadline = time.monotonic() + timeout
     started = time.monotonic()
     while time.monotonic() < deadline:
-        missing = [n for n in nodes
-                   if not (os.path.exists(n.unix_socket) and tcp_ready(n.tcp)
-                           and (n.overlay is None or tcp_ready(n.overlay)))]
+        if procs:
+            dead = {node_id: process.returncode for node_id, process in procs.items()
+                    if process.poll() is not None}
+            if dead:
+                raise RuntimeError(
+                    f"node process(es) exited during startup: {dead}. see the .stderr files next to the node logs "
+                    "(a panic at tcp_listener.rs with AddrInUse means the port was still held)")
+        missing = [node for node in nodes
+                   if not (os.path.exists(node.unix_socket) and tcp_ready(node.tcp) and (node.overlay is None or tcp_ready(node.overlay)))]
         if not missing:
             return time.monotonic() - started
         time.sleep(0.2)
-    raise TimeoutError(f"nodes not ready after {timeout}s: "
-                       f"{[n.node_id for n in nodes if not os.path.exists(n.unix_socket)]}")
+    raise TimeoutError(f"nodes not ready after {timeout}s: {[missing_node.node_id for missing_node in missing]}")
 
 
 def remove_sockets(nodes: list[NodeInfo]) -> None:
@@ -206,25 +225,73 @@ def remove_sockets(nodes: list[NodeInfo]) -> None:
             pass
 
 
-# send SIGTERM and excalate to SIGKILL if node does not shut down
-def stop_processes(procs: dict[int, subprocess.Popen], grace: float = 8.0) -> list[int]: 
+LAUNCHED_PROCESSES: dict[int, subprocess.Popen] = {}
+
+
+def register_process(proc: subprocess.Popen) -> None:
+    LAUNCHED_PROCESSES[proc.pid] = proc
+
+
+# signal a process group (nodes are setsid() so they are each in their own process group)
+def _signal_process(proc: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError):
+        # fall back to regular process signal if the group is already gone
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, OSError):
+            pass
+
+
+# send SIGTERM and escalate to SIGKILL if node does not shut down
+def stop_processes(procs: dict[int, subprocess.Popen], grace: float = 8.0) -> list[int]:
+ 
     for proc in procs.values():
         if proc.poll() is None:
-            proc.terminate()
+            _signal_process(proc, signal.SIGTERM)
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline and any(p.poll() is None for p in procs.values()):
         time.sleep(0.1)
+
     killed = []
     for node_id, proc in procs.items():
         if proc.poll() is None:
             killed.append(node_id)
-            proc.kill()
+            _signal_process(proc, signal.SIGKILL)
     for proc in procs.values():
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+        LAUNCHED_PROCESSES.pop(proc.pid, None)
     return killed
+
+
+def stop_all_launched() -> int:
+
+    alive = {pid: proc for pid, proc in LAUNCHED_PROCESSES.items() if proc.poll() is None}
+    if alive:
+        stop_processes({pid: proc for pid, proc in alive.items()}, grace=3.0)
+    LAUNCHED_PROCESSES.clear()
+    return len(alive)
+
+
+# kills all processes started by the node binary that are still running
+def kill_stale_nodes(node_bin: str | Path) -> int:
+
+    pattern = str(node_bin)
+    found = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True)
+    pids = [int(pid) for pid in found.stdout.split()]
+    for pid in pids:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return len(pids)
 
 
 # samples /proc periodically and writes it to a jsonl file
@@ -235,10 +302,10 @@ class ProcSampler(threading.Thread):
         self.targets = targets          # pid -> (node id, role)
         self.out_path = out_path
         self.interval = interval
-        self._stop = threading.Event()
+        self._shutdown = threading.Event()
 
     def stop(self) -> None:
-        self._stop.set()
+        self._shutdown.set()
 
     @staticmethod
     def _read_proc(pid: int) -> dict | None:
@@ -271,7 +338,7 @@ class ProcSampler(threading.Thread):
     def run(self) -> None:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.out_path, "w") as fh:
-            while not self._stop.is_set():
+            while not self._shutdown.is_set():
                 t = now_us()
                 host = self._read_host()
                 if host:
@@ -282,7 +349,7 @@ class ProcSampler(threading.Thread):
                         continue
                     fh.write(json.dumps({"t_us": t, "kind": "proc", "pid": pid, **meta, **sample}) + "\n")
                 fh.flush()
-                self._stop.wait(self.interval)
+                self._shutdown.wait(self.interval)
 
 
 def sqlite_ro(db_path: str | Path) -> sqlite3.Connection:
