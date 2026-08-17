@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::measurement::api::{event_input, timed};
+use crate::measurement;
 use crate::network::message_types::PeerMessage;
 use crate::network::tcp_router::send_to_conformance_peer;
 use crate::state::app_state::AppState;
@@ -16,7 +16,50 @@ use process_mining::core::event_data::case_centric::{
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use tokio::time::sleep;
+
+/// framed mode uses a length prefix of this size (bytes)
+const LENGTH_PREFIX: usize = 4;
+
+/// cap max accepted fram at 16 MiB
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// set once per connection if the input is framed (multiple XES files per connection) or of its a oneshot connection
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireMode {
+    /// one xes document per connection - raw XES
+    Raw,
+    /// many xes documents per connection, each preceded by a 4 byte (big endian) length
+    Framed,
+}
+
+impl Display for WireMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireMode::Raw => write!(f, "Raw"),
+            WireMode::Framed => write!(f, "Framed"),
+        }
+    }
+}
+
+/// decide the wire mode from the first bytes of a connection
+///
+/// returns 'None' while there are not enough bytes to decide yet
+fn detect_wire_mode(buffer: &[u8]) -> Option<WireMode> {
+    if buffer.len() < LENGTH_PREFIX {
+        return None;
+    }
+    if buffer[0] == 0 {
+        let length = u32::from_be_bytes(
+            buffer[..LENGTH_PREFIX]
+                .try_into()
+                .expect("slice is LENGTH_PREFIX long"),
+        ) as usize;
+        if length > 0 && length <= MAX_FRAME_BYTES {
+            return Some(WireMode::Framed);
+        }
+    }
+    Some(WireMode::Raw)
+}
 
 pub async fn handle_event(
     mut stream: UnixStream,
@@ -25,129 +68,230 @@ pub async fn handle_event(
     configured_events: Arc<HashSet<EventId>>,
     state: AppState,
 ) {
-    let mut read_buf = BytesMut::with_capacity(8 * 1024);
+    let mut read_buf = BytesMut::with_capacity(64 * 1024);
 
-    loop {
-        let bytes_read = match stream.read_buf(&mut read_buf).await {
-            Ok(bytes_read) => bytes_read,
+    // read until the wire mode can be decided
+    let mode = loop {
+        if let Some(mode) = detect_wire_mode(&read_buf) {
+            break mode;
+        }
+        match stream.read_buf(&mut read_buf).await {
+            Ok(0) => {
+                // closed before four bytes arrived
+                if !read_buf.is_empty() {
+                    process_document(
+                        &read_buf,
+                        &event_q,
+                        &configured_attributes,
+                        &configured_events,
+                        state.clone(),
+                    )
+                    .await;
+                }
+                return;
+            }
+            Ok(_) => continue,
             Err(e) => {
                 log::error!("event input handler: error reading from unix socket: {}", e);
-                sleep(Duration::from_millis(5)).await;
-                continue;
+                return;
             }
-        };
-        if bytes_read == 0 {
-            // full document received, or connection closed
-            break;
+        }
+    };
+    log::debug!("event input handler: connection using {} mode", mode);
+
+    match mode {
+        WireMode::Raw => {
+            // one document per connection: read to EOF, then parse once
+            loop {
+                match stream.read_buf(&mut read_buf).await {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("event input handler: error reading from unix socket: {}", e);
+                        return;
+                    }
+                }
+            }
+            process_document(
+                &read_buf,
+                &event_q,
+                &configured_attributes,
+                &configured_events,
+                state.clone(),
+            )
+            .await;
         }
 
-        let import_options: XESImportOptions = XESImportOptions {
-            // list contains event name, timestamp (and the sensor constraint attributes if configured)
-            ignore_event_attributes_except: Some((*configured_attributes).clone()),
-            // auto-sort events within each trace by timestamp
-            sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
-            // silence parse warnings in production
-            verbose: false,
-            ..XESImportOptions::default()
-        };
+        WireMode::Framed => loop {
+            // pull exactly one complete frame out of the buffer
+            let document = loop {
+                if read_buf.len() >= LENGTH_PREFIX {
+                    let length = u32::from_be_bytes(
+                        read_buf[..LENGTH_PREFIX]
+                            .try_into()
+                            .expect("slice is LENGTH_PREFIX long"),
+                    ) as usize;
 
-        let (parsed, parse_us) = timed(|| import_xes_slice(&read_buf, false, import_options));
-        let event_log = match parsed {
-            Ok(event_log) => event_log,
-            Err(e) => {
-                log::error!("handle_event: error importing xes slice: {}", e);
-                break;
-            }
-        };
-        for trace in event_log.traces {
-            let trace_id: CaseId = match get_trace_id(&trace) {
-                Some(id) => id,
-                None => {
-                    log::error!(
-                        "received xes event input, but trace/case id is missing. ignoring trace ({:?})",
-                        trace
-                    );
-                    continue;
+                    if length > MAX_FRAME_BYTES {
+                        log::error!(
+                            "event input handler: frame of {} bytes exceeds the {} byte limit. closing connection",
+                            length,
+                            MAX_FRAME_BYTES
+                        );
+                        return;
+                    }
+                    if read_buf.len() >= LENGTH_PREFIX + length {
+                        let _ = read_buf.split_to(LENGTH_PREFIX);
+                        break read_buf.split_to(length);
+                    }
+                }
+                match stream.read_buf(&mut read_buf).await {
+                    Ok(0) => {
+                        if !read_buf.is_empty() {
+                            log::warn!(
+                                "event input handler: connection closed mid frame, discarding {} buffered bytes",
+                                read_buf.len()
+                            );
+                        }
+                        return;
+                    }
+                    Ok(_) => continue,
+                    Err(e) => {
+                        log::error!("event input handler: error reading from unix socket: {}", e);
+                        return;
+                    }
                 }
             };
 
-            for event in trace.events {
-                if let Some(event_id) = get_event_id(&event) {
-                    if configured_events.contains(&event_id) {
-                        // build traced event
-                        let timestamp = match get_timestamp_utc(&event) {
-                            Some(event_time) => event_time,
-                            None => {
-                                log::warn!(
-                                    "XES event did not contain a timestamp - using current time as event time"
-                                );
-                                Utc::now()
-                            }
-                        };
-                        let attributes = get_attributes(&event);
+            process_document(
+                &document,
+                &event_q,
+                &configured_attributes,
+                &configured_events,
+                state.clone(),
+            )
+            .await;
+        },
+    }
+}
 
-                        let traced_event = TracedEvent::new(
-                            trace_id.clone(),
-                            event_id.clone(),
-                            timestamp,
-                            attributes,
+/// parse one complete xes document and process it
+async fn process_document(
+    document: &[u8],
+    event_q: &mpsc::Sender<TracedEvent>,
+    configured_attributes: &HashSet<String>,
+    configured_events: &HashSet<EventId>,
+    state: AppState,
+) {
+    if document.is_empty() {
+        return;
+    }
+
+    let import_options: XESImportOptions = XESImportOptions {
+        // list contains event name, timestamp (and the sensor constraint attributes if configured)
+        ignore_event_attributes_except: Some(configured_attributes.clone()),
+        // auto-sort events within each trace by timestamp
+        sort_events_with_timestamp_key: Some("time:timestamp".to_string()),
+        // silence parse warnings in production
+        verbose: false,
+        ..XESImportOptions::default()
+    };
+
+    let (parsed, parse_us) =
+        measurement::api::timed(|| import_xes_slice(document, false, import_options));
+    let event_log = match parsed {
+        Ok(event_log) => event_log,
+        Err(e) => {
+            log::error!("process_document: error importing xes slice: {}", e);
+            return;
+        }
+    };
+
+    for trace in event_log.traces {
+        let trace_id: CaseId = match get_trace_id(&trace) {
+            Some(id) => id,
+            None => {
+                log::error!(
+                    "received xes event input, but trace/case id is missing. ignoring trace ({:?})",
+                    trace
+                );
+                continue;
+            }
+        };
+
+        for event in trace.events {
+            let Some(event_id) = get_event_id(&event) else {
+                log::warn!(
+                    "received event does not contain an event_id (concept:name). ignoring event {:?}",
+                    event
+                );
+                continue;
+            };
+
+            if !configured_events.contains(&event_id) {
+                log::warn!(
+                    "no constraint was configured for '{}'. ignoring event",
+                    event_id
+                );
+                continue;
+            }
+
+            let timestamp = match get_timestamp_utc(&event) {
+                Some(event_time) => event_time,
+                None => {
+                    log::warn!(
+                        "XES event did not contain a timestamp - using current time as event time"
+                    );
+                    Utc::now()
+                }
+            };
+            let attributes = get_attributes(&event);
+
+            let traced_event =
+                TracedEvent::new(trace_id.clone(), event_id.clone(), timestamp, attributes);
+            log::debug!("process_document: received event {}", traced_event);
+
+            // record event
+            measurement::api::event_input(
+                &traced_event.case_id,
+                &traced_event.event_id,
+                traced_event.instance_id,
+                parse_us,
+                state.config.forwarder.is_some(),
+            );
+
+            if let Some(forwarder_config) = &state.config.forwarder {
+                // forward the event to the central node
+                let message = PeerMessage::event(traced_event);
+                match send_to_conformance_peer(
+                    forwarder_config.central_node_address,
+                    message,
+                    state.clone(),
+                )
+                .await
+                {
+                    Err(e) => {
+                        log::error!(
+                            "process_document: error sending the event to the central node: {}",
+                            e
                         );
-                        log::debug!("handle_event: received event {:?}", traced_event);
-
-                        // record event
-                        event_input(
-                            &traced_event.case_id,
-                            &traced_event.event_id,
-                            traced_event.instance_id,
-                            parse_us,
-                            state.config.forwarder.is_some(),
-                        );
-
-                        if let Some(forwarder_config) = &state.config.forwarder {
-                            // forward the event to the central node
-                            let message = PeerMessage::event(traced_event);
-                            match send_to_conformance_peer(
-                                forwarder_config.central_node_address,
-                                message,
-                                state.clone(),
-                            )
-                            .await
-                            {
-                                Err(e) => {
-                                    log::error!(
-                                        "handle_event: error sending the event to the central node: {}",
-                                        e
-                                    );
-                                    continue;
-                                }
-                                Ok(_) => {
-                                    log::info!(
-                                        "handle_event: forwarded event '{}' to central node",
-                                        event_id
-                                    );
-                                }
-                            }
-                        } else {
-                            // put the event directly in the event q
-                            if let Err(e) = event_q.send(traced_event).await {
-                                log::error!(
-                                    "handle_event: unable to send event into event queue: {}",
-                                    e
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "no constraint was configured for '{}'. ignoring event",
+                        continue;
+                    }
+                    Ok(_) => {
+                        log::info!(
+                            "process_document: forwarded event '{}' to central node",
                             event_id
                         );
                     }
-                } else {
-                    log::warn!(
-                        "received event does not contain an event_id (concept:name). ignoring event {:?}",
-                        event
+                }
+            } else {
+                // put the event directly in the event q
+                if let Err(e) = event_q.send(traced_event).await {
+                    log::error!(
+                        "process_document: unable to send event into event queue: {}",
+                        e
                     );
+                    continue;
                 }
             }
         }
@@ -192,9 +336,19 @@ mod tests {
     use std::sync::Arc;
     use tokio::{io::AsyncWriteExt, net::UnixListener, sync::mpsc};
 
-    use crate::conformance_checking::event_input_handler::handle_event;
+    use crate::conformance_checking::event_input_handler::{
+        WireMode, detect_wire_mode, handle_event,
+    };
     use crate::types::EventId;
     use crate::util::test_tools::{make_state, minimal_xes};
+
+    /// prefix a document the way a framed sender does
+    fn frame(document: &str) -> Vec<u8> {
+        let bytes = document.as_bytes();
+        let mut out = (bytes.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(bytes);
+        out
+    }
 
     fn no_filters() -> (Arc<HashSet<String>>, Arc<HashSet<EventId>>) {
         (Arc::new(HashSet::new()), Arc::new(HashSet::new()))
@@ -210,6 +364,29 @@ mod tests {
             "concept:name".to_string(),
             "time:timestamp".to_string(),
         ]))
+    }
+
+    #[test]
+    fn sniff_needs_four_bytes() {
+        assert_eq!(detect_wire_mode(b"<?x"), None);
+    }
+
+    #[test]
+    fn sniff_detects_raw_xes() {
+        assert_eq!(detect_wire_mode(b"<?xml version"), Some(WireMode::Raw));
+        assert_eq!(detect_wire_mode(b"<log></log>"), Some(WireMode::Raw));
+    }
+
+    #[test]
+    fn sniff_detects_a_length_prefix() {
+        assert_eq!(detect_wire_mode(&frame("<log/>")), Some(WireMode::Framed));
+    }
+
+    #[test]
+    fn sniff_rejects_an_implausible_length() {
+        // zero high byte but an absurd length: not a frame we would ever send
+        let bogus = [0x00u8, 0xFF, 0xFF, 0xFF];
+        assert_eq!(detect_wire_mode(&bogus), Some(WireMode::Raw));
     }
 
     /// A valid XES document produces a TracedEvent on the queue.
@@ -243,6 +420,111 @@ mod tests {
         assert_eq!(event.case_id, "case-xes");
         assert_eq!(event.event_id, "event-a");
 
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    /// A raw document that arrives in several chunks is still parsed once, as a whole.
+    #[tokio::test]
+    async fn split_raw_document_is_reassembled() {
+        let state = make_state(11002);
+        let socket_path = "/tmp/test_eih_split.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (filter_attributes, filter_events) = with_event_filter(&["event-a"]);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
+        });
+
+        let document = minimal_xes("case-split", "event-a");
+        let (head, tail) = document.split_at(document.len() / 2);
+
+        let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        client.write_all(head.as_bytes()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        client.write_all(tail.as_bytes()).await.unwrap();
+        drop(client);
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!(event.case_id, "case-split");
+
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    /// Several framed documents on ONE connection produce one event each, in order.
+    #[tokio::test]
+    async fn framed_documents_are_read_in_order() {
+        let state = make_state(11003);
+        let socket_path = "/tmp/test_eih_framed.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (filter_attributes, filter_events) = with_event_filter(&["event-a"]);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
+        });
+
+        let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        for case in ["case-1", "case-2", "case-3"] {
+            client
+                .write_all(&frame(&minimal_xes(case, "event-a")))
+                .await
+                .unwrap();
+        }
+
+        for expected in ["case-1", "case-2", "case-3"] {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
+                    .await
+                    .expect("timed out")
+                    .expect("channel closed");
+            assert_eq!(event.case_id, expected);
+        }
+
+        drop(client);
+        let _ = std::fs::remove_file(socket_path);
+    }
+
+    /// A frame split across two writes is reassembled.
+    #[tokio::test]
+    async fn split_frame_is_reassembled() {
+        let state = make_state(11004);
+        let socket_path = "/tmp/test_eih_split_frame.sock";
+        let _ = std::fs::remove_file(socket_path);
+
+        let listener = UnixListener::bind(socket_path).unwrap();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (filter_attributes, filter_events) = with_event_filter(&["event-a"]);
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_event(stream, event_tx, filter_attributes, filter_events, state).await;
+        });
+
+        let framed = frame(&minimal_xes("case-partial", "event-a"));
+        let (head, tail) = framed.split_at(6);
+
+        let mut client = tokio::net::UnixStream::connect(socket_path).await.unwrap();
+        client.write_all(head).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        client.write_all(tail).await.unwrap();
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+        assert_eq!(event.case_id, "case-partial");
+
+        drop(client);
         let _ = std::fs::remove_file(socket_path);
     }
 

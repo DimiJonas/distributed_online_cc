@@ -2,8 +2,7 @@
 """
 !!! needs at least python 3.11 for tomllib !!!
 
-send a generated event stream to the right node sockets in a local deployment and log every delivery 
-
+send a generated event stream to the right node sockets in a local deployment and log every delivery
 
 reads the configs to work out routing
 reads the manifest from gen-events.rs
@@ -18,13 +17,17 @@ usage:
   send_stream.py --config-dir run/decentralized --print-routes
   send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl --rate 50
   send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl --rate 200 --burst 10 --jitter 0.1
+  send_stream.py --config-dir run/decentralized --stream events_gen/manifest.jsonl --rate 8000 --wire framed
 
 """
 import argparse
+import atexit
 import json
 import os
 import random
+import signal
 import socket
+import struct
 import sys
 import time
 import tomllib
@@ -36,41 +39,37 @@ from glob import glob
 def load_nodes(config_dir):
     nodes = []
     for path in sorted(glob(os.path.join(config_dir, "*-config.toml"))):
-        with open(path, "rb") as fh:
-            cfg = tomllib.load(fh)
-        mode = cfg.get("mode", "decentralized")
-        cons = [
+        with open(path, "rb") as config_file:
+            config = tomllib.load(config_file)
+        mode = config.get("mode", "decentralized")
+        constraints = [
             {
-                "role": c["constraint_role"],
-                "constraint_id": c["constraint_id"],
-                "event_id": c["event_id"],
+                "role": constraint["constraint_role"],
+                "constraint_id": constraint["constraint_id"],
+                "event_id": constraint["event_id"],
             }
-            for c in cfg.get("constraints", [])
+            for constraint in config.get("constraints", [])
         ]
-        if mode == "central" and "forwarder" in cfg:
+        if mode == "central" and "forwarder" in config:
             kind = "forwarder"
         elif mode == "central":
             kind = "central"
-        elif cons:
+        elif constraints:
             kind = "constraint-node"
         else:
             kind = "sink"
-        # events this node accepts on its unix socket:
-        #   constraint nodes -> the event ids of their constraints
-        #   forwarders       -> their include_event_ids filter list
-        #   central / sink   -> never a direct delivery target
         if kind == "forwarder":
-            events = list(cfg.get("forwarder", {}).get("include_event_ids") or [])
+            events = list(config.get("forwarder", {}).get("include_event_ids") or [])
         elif kind == "constraint-node":
-            events = list({c["event_id"] for c in cons})
+            events = list({constraint["event_id"] for constraint in constraints})
         else:
             events = []
         nodes.append({
-            "node_id": int(cfg.get("node_id", -1)),
+            "node_id": int(config.get("node_id", -1)),
             "kind": kind, "mode": mode,
-            "tcp": str(cfg.get("tcp_listen_address", "")),
-            "socket": str(cfg.get("unix_socket", "")),
-            "constraints": cons,
+            "tcp": str(config.get("tcp_listen_address", "")),
+            "socket": str(config.get("unix_socket", "")),
+            "constraints": constraints,
             "events": events,
         })
     return nodes
@@ -91,34 +90,26 @@ def build_routing(nodes):
 
 
 # ---- pacing ----
- 
+
+# paces the send loop at a fixed rate
+#   interval <= 0 means no pacing, send as fast as possible
 class Pacer:
-    """paces the send loop at a fixed rate without drifting
- 
-    interval <= 0 : no pacing, send as fast as possible
-    burst n       : release n events back to back, then wait n * interval
-    jitter f      : add uniform noise of +/- f * interval to each wake-up
- 
-    the schedule is absolute (next_t += interval), not "sleep(interval) after
-    each send", so the time spent building payloads and writing to sockets does
-    not accumulate into a growing drift
-    """
- 
+
     def __init__(self, interval, burst=1, jitter=0.0):
         self.interval = max(0.0, interval)
         self.burst = max(1, burst)
         self.jitter = max(0.0, jitter)
-        self.n = 0
-        self.t0 = time.monotonic()
-        self.next_t = self.t0
+        self.count = 0
+        self.starttime = time.monotonic()
+        self.next_t = self.starttime
         self.max_lag = 0.0
         self.late = 0
         self.resyncs = 0
- 
+
     def wait(self):
         # block until the next event is due, return seconds since start
         now = time.monotonic()
-        if self.interval > 0 and self.n and self.n % self.burst == 0:
+        if self.interval > 0 and self.count and self.count % self.burst == 0:
             self.next_t += self.interval * self.burst
             target = self.next_t
             if self.jitter:
@@ -136,36 +127,36 @@ class Pacer:
                     # too far behind to catch up, restart the schedule from here
                     self.next_t = now
                     self.resyncs += 1
-        self.n += 1
-        return now - self.t0
- 
+        self.count += 1
+        return now - self.starttime
+
     def summary(self):
+        elapsed = time.monotonic() - self.starttime
+        eff = self.count / elapsed if elapsed > 0 else 0.0
         if self.interval <= 0:
-            return "rate=unlimited"
-        elapsed = time.monotonic() - self.t0
-        eff = self.n / elapsed if elapsed > 0 else 0.0
-        s = (f"rate={1.0 / self.interval:.3g}/s (target) "
+            return f"rate=unlimited {eff:.3g}/s (effective) elapsed={elapsed:.2f}s"
+        summary = (f"rate={1.0 / self.interval:.3g}/s (target) "
              f"{eff:.3g}/s (effective) elapsed={elapsed:.2f}s")
         if self.late:
-            s += f"  late={self.late} max_lag={self.max_lag * 1000:.1f}ms"
+            summary += f"  late={self.late} max_lag={self.max_lag * 1000:.1f}ms"
         if self.resyncs:
-            s += f" resyncs={self.resyncs}"
-        return s
+            summary += f" resyncs={self.resyncs}"
+        return summary
 
 
 # ---- progress ----
 
 def count_events(path):
     # number of non-blank lines in the stream, for the x/N denominator
-    n = 0
-    with open(path) as fh:
-        for line in fh:
+    num_events = 0
+    with open(path) as manifest:
+        for line in manifest:
             if line.strip():
-                n += 1
-    return n
+                num_events += 1
+    return num_events
 
 
-def fmt_dur(sec):
+def fmt_duration(sec):
     if sec < 60:
         return f"{sec:.0f}s"
     if sec < 3600:
@@ -182,17 +173,8 @@ def progress_enabled(when, stream=sys.stderr):
     return hasattr(stream, "isatty") and stream.isatty()
 
 
+# the progress of the send in one line in stderr and redrawn in place
 class Progress:
-    """one-line send progress on stderr, redrawn in place
-
-    goes to stderr so stdout stays clean
-
-    on a terminal the line is rewritten with \\r
-    when forced on with --progress on
-    while output is redirected, it falls back to one line every few seconds so the
-    log does not fill up with control characters
-    """
-
     BAR = 24
 
     def __init__(self, total, enabled=True, stream=sys.stderr):
@@ -201,49 +183,49 @@ class Progress:
         self.enabled = enabled
         self.tty = hasattr(stream, "isatty") and stream.isatty()
         self.every = 0.1 if self.tty else 2.0
-        self.n = 0
-        self.t0 = time.monotonic()
+        self.send_count = 0
+        self.starttime = time.monotonic()
         self.last = -1.0
         self.width = 0
         self.drawn = 0
 
     def _render(self, counts):
-        elapsed = time.monotonic() - self.t0
-        rate = self.n / elapsed if elapsed > 0 else 0.0
+        elapsed = time.monotonic() - self.starttime
+        rate = self.send_count / elapsed if elapsed > 0 else 0.0
         if self.total:
-            done = int(self.BAR * self.n / self.total)
+            done = int(self.BAR * self.send_count / self.total)
             bar = "#" * done + "." * (self.BAR - done)
-            s = (f"event {self.n}/{self.total} [{bar}] "
-                 f"{100.0 * self.n / self.total:3.0f}%")
+            progress_bar = (f"event {self.send_count}/{self.total} [{bar}] "
+                 f"{100.0 * self.send_count / self.total:3.0f}%")
         else:
-            s = f"event {self.n}"
+            progress_bar = f"event {self.send_count}"
         if elapsed >= 0.5:  # before that the measured rate is meaningless
-            s += f"  {rate:.0f}/s" if rate >= 1000 else f"  {rate:.3g}/s"
-            if self.total and self.n < self.total:
-                s += f"  eta {fmt_dur((self.total - self.n) / rate)}"
+            progress_bar += f"  {rate:.0f}/s" if rate >= 1000 else f"  {rate:.3g}/s"
+            if self.total and self.send_count < self.total:
+                progress_bar += f"  eta {fmt_duration((self.total - self.send_count) / rate)}"
         extra = " ".join(f"{k}={v}" for k, v in counts.items() if v)
         if extra:
-            s += f"  {extra}"
-        return s
+            progress_bar += f"  {extra}"
+        return progress_bar
 
-    def _draw(self, s):
+    def _draw(self, progress_bar):
         if self.tty:
-            pad = " " * max(0, self.width - len(s))
-            self.width = len(s)
-            self.stream.write("\r" + s + pad)
+            pad = " " * max(0, self.width - len(progress_bar))
+            self.width = len(progress_bar)
+            self.stream.write("\r" + progress_bar + pad)
         else:
-            self.stream.write(s + "\n")
+            self.stream.write(progress_bar + "\n")
         self.stream.flush()
 
     def advance(self, counts):
-        self.n += 1
+        self.send_count += 1
         if not self.enabled:
             return
         now = time.monotonic()
-        if now - self.last < self.every and self.n != self.total:
+        if now - self.last < self.every and self.send_count != self.total:
             return
         self.last = now
-        self.drawn = self.n
+        self.drawn = self.send_count
         self._draw(self._render(counts))
 
     def note(self, msg):
@@ -255,9 +237,9 @@ class Progress:
         self.stream.flush()
 
     def close(self, counts):
-        if not self.enabled or not self.n:
+        if not self.enabled or not self.send_count:
             return
-        if self.drawn != self.n:
+        if self.drawn != self.send_count:
             self._draw(self._render(counts))
         if self.tty:
             self.stream.write("\n")
@@ -265,16 +247,175 @@ class Progress:
         self.stream.flush()
 
 
+# ---- send log ----
+
+# buffered jsonl writer to buffer the send log and write it later (for maximum send rate set the buffer bigger than the whole stream)
+class SendLog:
+
+    def __init__(self, path, flush_every=4096):
+        self.path = path
+        self.flush_every = max(1, flush_every)
+        self.buffer = []
+        self.written = 0
+        self.send_log_file = open(path, "w")
+        self.closed = False
+
+    def write(self, record):
+        self.buffer.append(json.dumps(record))
+        if len(self.buffer) >= self.flush_every:
+            self.flush()
+
+    def flush(self):
+        if not self.buffer or self.closed:
+            return
+        self.send_log_file.write("\n".join(self.buffer) + "\n")
+        self.send_log_file.flush()
+        self.written += len(self.buffer)
+        self.buffer.clear()
+
+    def close(self):
+        if self.closed:
+            return
+        try:
+            self.flush()
+            os.fsync(self.send_log_file.fileno())
+        finally:
+            self.closed = True
+            self.send_log_file.close()
+
+
 # ---- delivery ----
 
-def deliver_event(sock_path, payload):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(5.0)
-    s.connect(sock_path)
-    try:
-        s.sendall(payload)
-    finally:
-        s.close()
+# add a 4 byte big endian length prefix to a payload to be able to send multiple XES files in one unix socket connection
+# this matches the 'framed' mode that the event_input_handler expects
+def frame(payload):
+    return struct.pack(">I", len(payload)) + payload
+
+
+# keep one persistent unix socket connection for a node
+class NodeConnection:
+
+    def __init__(self, sock_path, connect_timeout, send_timeout):
+        self.sock_path = sock_path
+        self.connect_timeout = connect_timeout
+        self.send_timeout = send_timeout
+        self.sock = None
+        self.reconnects = 0
+
+    def _connect(self):
+        new_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        new_socket.settimeout(self.connect_timeout)
+        new_socket.connect(self.sock_path)
+        # this timeout is needed so if a node stops reading events for a while that can be recorded as pacer lag
+        new_socket.settimeout(self.send_timeout)
+        self.sock = new_socket
+
+    def send(self, payload):
+        if self.sock is None:
+            self._connect()
+        framed_payload = frame(payload)
+        try:
+            self.sock.sendall(framed_payload)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close()
+            self.reconnects += 1
+            self._connect()
+            self.sock.sendall(framed_payload)
+
+    def close(self):
+        if self.sock is not None:
+            try:
+                self.sock.close()
+            finally:
+                self.sock = None
+
+
+# contains the unix socket connections (one persistent connection per node)
+class ConnectionPool:
+
+    def __init__(self, wire_mode, connect_timeout=5.0, send_timeout=60.0):
+        # see src/conformance_checking/event_input_handler.rs
+        self.wire_mode = wire_mode
+        self.connect_timeout = connect_timeout
+        self.send_timeout = send_timeout
+        self.connections = {}
+
+    # create the persistent connections up front
+    def connect_all(self, sock_paths):
+        if self.wire_mode != "framed":
+            return
+        for path in sock_paths:
+            connection = NodeConnection(path, self.connect_timeout, self.send_timeout)
+            connection._connect()
+            self.connections[path] = connection
+
+    def send(self, sock_path, payload):
+        if self.wire_mode == "framed":
+            persistent_connection = self.connections.get(sock_path)
+            if persistent_connection is None:
+                persistent_connection = NodeConnection(sock_path, self.connect_timeout, self.send_timeout)
+                self.connections[sock_path] = persistent_connection
+            persistent_connection.send(payload)
+        else:
+            oneshot_connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            oneshot_connection.settimeout(self.send_timeout)
+            oneshot_connection.connect(sock_path)
+            try:
+                oneshot_connection.sendall(payload)
+            finally:
+                oneshot_connection.close()
+
+    def reconnects(self):
+        return sum(connection.reconnects for connection in self.connections.values())
+
+    def close_all(self):
+        for connection in self.connections.values():
+            connection.close()
+        self.connections.clear()
+
+
+# ---- stream loading ----
+
+# read the payloads into memory before sending starts
+# returns (seq, case_id, event_id, payload) tuples
+def load_stream(stream_path, stream_dir, preload, max_preload_bytes, notify):
+
+    entries = []
+    total_bytes = 0
+    with open(stream_path) as manifest_file:
+        for line in manifest_file:
+            line = line.strip()
+            if not line:
+                continue
+            manifest_event = json.loads(line)
+            event_file_path = None
+            if manifest_event.get("file"):
+                event_file_path = manifest_event["file"] if os.path.isabs(manifest_event["file"]) \
+                    else os.path.join(stream_dir, manifest_event["file"])
+            if preload:
+                payload = manifest_event["xes"].encode() if manifest_event.get("xes") is not None \
+                    else (open(event_file_path, "rb").read() if event_file_path else b"")
+                total_bytes += len(payload)
+                if total_bytes > max_preload_bytes:
+                    notify(f"preload exceeded {max_preload_bytes} bytes, falling back to reading payloads during the run")
+                    return load_stream(stream_path, stream_dir, False, max_preload_bytes, notify)
+            else:
+                payload = ("inline", manifest_event["xes"]) if manifest_event.get("xes") is not None \
+                    else ("file", event_file_path)
+            entries.append((manifest_event["seq"], manifest_event["case_id"], manifest_event["event_id"], payload))
+
+    if preload:
+        notify(f"preloaded {len(entries)} payloads ({total_bytes / 1e6:.1f} MB)")
+    return entries, preload
+
+
+def resolve_payload(payload, preloaded):
+    if preloaded:
+        return payload
+    kind, value = payload
+    if kind == "inline":
+        return value.encode()
+    return open(value, "rb").read() if value else b""
 
 
 # ---- main ----
@@ -292,9 +433,15 @@ def main():
     ap.add_argument("--print-routes", action="store_true", help="print event_id -> node/socket and exit")
     ap.add_argument("--progress", choices=["auto", "on", "off"], default="auto",
                     help="show send progress on stderr (auto = only when stderr is a terminal)")
+    ap.add_argument("--wire", choices=["framed", "raw"], default="framed",
+                    help="framed = one persistent length-prefixed connection per node (default), raw = one connection per event delimited by EOF")
+    ap.add_argument("--preload", choices=["on", "off"], default="on", help="read every xes payload into memory before the pacing loop (default on)")
+    ap.add_argument("--max-preload-bytes", type=int, default=2 * 1024 ** 3, help="give up on preloading above this many bytes (default 2 GiB)")
+    ap.add_argument("--log-flush-every", type=int, default=4096, help="buffer this many send log lines between writes (default 4096)")
+    ap.add_argument("--send-timeout", type=float, default=60.0,
+                    help="socket timeout for a single send. long on purpose: blocking here is backpressure, not an error (default 60s)")
     ap.add_argument("--log", default="send_log.jsonl")
     args = ap.parse_args()
-
 
     nodes = load_nodes(args.config_dir)
     kind = system_kind(nodes)
@@ -304,9 +451,9 @@ def main():
     if args.print_routes:
         print(f"system: {kind}")
         print("event routing:")
-        for ev in sorted(by_event):
-            where = "  ".join(f"node {n['node_id']} ({n['socket']})" for n in by_event[ev])
-            print(f"  {ev:<40} -> {where}")
+        for event_id in sorted(by_event):
+            where = "  ".join(f"node {node['node_id']} ({node['socket']})" for node in by_event[event_id])
+            print(f"  {event_id:<40} -> {where}")
         return
 
     if not args.stream:
@@ -323,66 +470,110 @@ def main():
         interval = 0.0
     if args.dry_run and not args.pace_dry_run:
         interval = 0.0
-    pacer = Pacer(interval, burst=args.burst, jitter=args.jitter)
 
     show_progress = progress_enabled(args.progress)
     total = count_events(args.stream) if show_progress else 0
     prog = Progress(total, enabled=show_progress)
 
+    entries, preloaded = load_stream(
+        args.stream, stream_dir,
+        preload=(args.preload == "on"),
+        max_preload_bytes=args.max_preload_bytes,
+        notify=prog.note,
+    )
+
+    log = SendLog(args.log, flush_every=args.log_flush_every)
+    pool = ConnectionPool(args.wire, send_timeout=args.send_timeout)
+
+    def _terminate(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _terminate)
+        except (ValueError, AttributeError):
+            pass  # not on the main thread, or not a unix platform
+    atexit.register(log.close)
+    atexit.register(pool.close_all)
+
     counts = {"sent": 0, "dry-run": 0, "no_route": 0, "error": 0}
-    with open(args.log, "w") as logf, open(args.stream) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            ev = json.loads(line)
-            event_id = ev["event_id"]
+    interrupted = False
+    slow_sends = 0
+    max_send_us = 0
 
-            # payload + file (embedded xes or a referenced file)
-            file_path = None
-            if ev.get("file"):
-                file_path = ev["file"] if os.path.isabs(ev["file"]) \
-                    else os.path.join(stream_dir, ev["file"])
-            payload = ev["xes"].encode() if ev.get("xes") is not None \
-                else (open(file_path, "rb").read() if file_path else b"")
+    if not args.dry_run:
+        try:
+            pool.connect_all(sorted({node["socket"] for nodes in by_event.values() for node in nodes}))
+        except OSError as e:
+            sys.exit(f"cannot connect to a node socket: {e}\n"
+                     f"are the nodes running? check --config-dir {args.config_dir}")
 
-            # wait for this event's slot
-            t = pacer.wait()
+    pacer = Pacer(interval, burst=args.burst, jitter=args.jitter)
 
-            targets = by_event.get(event_id, [])
+    try:
+        for seq, case_id, event_id, raw_payload in entries:
+            payload = resolve_payload(raw_payload, preloaded)
 
-            if not targets:
+            # wait for this events slot
+            send_slot = pacer.wait()
+
+            target_nodes = by_event.get(event_id, [])
+
+            if not target_nodes:
                 counts["no_route"] += 1
-                logf.write(json.dumps({"seq": ev["seq"], "case_id": ev["case_id"],
-                    "event_id": event_id,
-                    "node_id": None, "socket": None, "status": "no_route"}) + "\n")
-                prog.note(f"no route for '{event_id}' (seq {ev['seq']})")
+                log.write({"seq": seq, "case_id": case_id, "event_id": event_id, "node_id": None, "socket": None, "status": "no_route"})
+                prog.note(f"no route for '{event_id}' (seq {seq})")
                 prog.advance(counts)
                 continue
 
-            for n in targets:
+            for node in target_nodes:
                 status = "dry-run"
+                send_us = 0
                 if not args.dry_run:
+                    started = time.perf_counter()
                     try:
-                        deliver_event(n["socket"], payload)
+                        pool.send(node["socket"], payload)
                         status = "sent"
                     except OSError as e:
                         status = f"error:{e}"
+                    send_us = int((time.perf_counter() - started) * 1e6)
+                    if send_us > 1000:
+                        slow_sends += 1
+                    max_send_us = max(max_send_us, send_us)
                 counts["sent" if status == "sent" else
                        "dry-run" if status == "dry-run" else "error"] += 1
-                logf.write(json.dumps({"seq": ev["seq"], "case_id": ev["case_id"],
-                    "event_id": event_id,
-                    "node_id": n["node_id"], "socket": n["socket"],
-                    "bytes": len(payload), "status": status,
-                    "t": round(t, 6)}) + "\n")
+                log.write({"seq": seq, "case_id": case_id, "event_id": event_id,
+                           "node_id": node["node_id"], "socket": node["socket"],
+                           "bytes": len(payload), "status": status,
+                           "send_us": send_us,
+                           "t": round(send_slot, 6)})
 
             prog.advance(counts)
 
-    prog.close(counts)
-    print(f"system={kind}  sent={counts['sent']} dry-run={counts['dry-run']} "
-          f"no_route={counts['no_route']} error={counts['error']}")
-    print(pacer.summary())
-    print(f"log -> {args.log}")
+    except KeyboardInterrupt:
+        interrupted = True
+        prog.note("interrupted, flushing the send log")
+    except SystemExit:
+        interrupted = True
+        prog.note("terminated, flushing the send log")
+        raise
+    finally:
+        prog.close(counts)
+        log.close()
+        pool.close_all()
+
+        print(f"system={kind}  sent={counts['sent']} dry-run={counts['dry-run']} "
+              f"no_route={counts['no_route']} error={counts['error']}"
+              + ("  INTERRUPTED" if interrupted else ""))
+        print(pacer.summary())
+        if not args.dry_run:
+            print(f"wire={args.wire} preload={'on' if preloaded else 'off'} "
+                  f"blocked_sends(>1ms)={slow_sends} max_send={max_send_us / 1000:.1f}ms "
+                  f"reconnects={pool.reconnects()}")
+        print(f"log -> {args.log} ({log.written} lines)")
+
+    if interrupted:
+        sys.exit(130)
 
 
 if __name__ == "__main__":

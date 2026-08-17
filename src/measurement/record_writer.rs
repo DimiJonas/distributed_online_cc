@@ -32,7 +32,7 @@ struct Line {
 }
 
 enum WriterMessage {
-    Line(Line),
+    Line(Box<Line>),
     Shutdown(SyncSender<()>),
 }
 
@@ -187,5 +187,7 @@ pub fn record(record: Record) {
         timestamp_wallclock_us: Utc::now().timestamp_micros(),
         record,
     };
-    let _ = recorder.record_queue.send(WriterMessage::Line(line));
+    let _ = recorder
+        .record_queue
+        .send(WriterMessage::Line(Box::new(line)));
 }
