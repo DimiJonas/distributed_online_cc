@@ -40,13 +40,14 @@ pub enum CaseEndSource {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct QueueDepths {
-    pub event_q: [usize; 2],
-    pub loopback_q: [usize; 2],
-    pub result_sink_q: [usize; 2],
+    /// [depth_now, max_since_last_report, capacity]
+    pub event_q: [usize; 3],
+    pub loopback_q: [usize; 3],
+    pub result_sink_q: [usize; 3],
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gossip_out_q: Option<[usize; 2]>,
+    pub gossip_out_q: Option<[usize; 3]>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gossip_in_q: Option<[usize; 2]>,
+    pub gossip_in_q: Option<[usize; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -175,4 +176,7 @@ pub enum Record {
         source: CaseEndSource,
         source_peer: Option<SocketAddr>,
     },
+
+    /// last record in the record writer file. its presence proves the file is complete (nothing was left in the write buffer)
+    WriterShutdown,
 }

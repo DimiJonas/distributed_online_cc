@@ -77,16 +77,16 @@ def load_nodes(config_dir):
 
 
 def system_kind(nodes):
-    modes = {n["mode"] for n in nodes}
+    modes = {node["mode"] for node in nodes}
     return "central" if "central" in modes else "decentralized"
 
 
 def build_routing(nodes):
     # event_id -> nodes that accept it on their unix socket
     by_event = {}
-    for n in nodes:
-        for event_id in n["events"]:
-            by_event.setdefault(event_id, []).append(n)
+    for node in nodes:
+        for event_id in node["events"]:
+            by_event.setdefault(event_id, []).append(node)
     return by_event
 
 

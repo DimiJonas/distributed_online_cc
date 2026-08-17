@@ -24,6 +24,11 @@ pub struct NodeConfig {
     pub loopback_queue_size: usize,
     #[serde(with = "humantime_serde", default = "default_case_end_grace_period")]
     pub case_end_grace_period: Duration,
+    #[serde(
+        with = "humantime_serde",
+        default = "default_case_janitor_cleanup_interval"
+    )]
+    pub case_janitor_cleanup_interval: Duration,
     /// how long a case end keeps being gossiped
     /// also used to derive how long a closed case is kept in memory
     /// (should be sized against gossip convergence in decentralized system)
@@ -46,11 +51,8 @@ pub struct NodeConfig {
     pub default_result_buffer: ResultBufferConfig,
     #[serde(default)]
     pub result_buffers: HashMap<ConstraintId, ResultBufferConfig>,
-    #[serde(
-        with = "humantime_serde",
-        default = "default_case_janitor_cleanup_interval"
-    )]
-    pub case_janitor_cleanup_interval: Duration,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -283,6 +285,26 @@ pub struct ForwarderConfig {
     #[serde(default)]
     pub include_event_ids: Option<Vec<EventId>>,
     pub central_node_address: SocketAddr,
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// how often a queue depth record is written
+    #[serde(with = "humantime_serde", default = "default_queue_report_interval")]
+    pub queue_report_interval: Duration,
+    /// how often the depths are read between two records (to track peak depths better)
+    #[serde(with = "humantime_serde", default = "default_queue_sample_resolution")]
+    pub queue_sample_resolution: Duration,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            queue_report_interval: default_queue_report_interval(),
+            queue_sample_resolution: default_queue_sample_resolution(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -687,6 +709,14 @@ fn default_anti_entropy_fanout() -> usize {
 
 fn default_case_janitor_cleanup_interval() -> Duration {
     Duration::from_secs(1)
+}
+
+fn default_queue_report_interval() -> Duration {
+    Duration::from_millis(100)
+}
+
+fn default_queue_sample_resolution() -> Duration {
+    Duration::from_millis(5)
 }
 
 // deserialize a value that can be int or float

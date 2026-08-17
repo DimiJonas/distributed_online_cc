@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::sleep};
 
 use crate::{
     config::node_config::{ConfigMode, NodeConfig},
@@ -110,14 +110,15 @@ pub async fn run(config: NodeConfig) {
     );
 
     // periodically record queue depth (if enabled)
-    crate::measurement::queue_depth_sampler::spawn_queue_depth_sampler(
-        state.clone(),
-        Duration::from_millis(100),
-    );
+    crate::measurement::queue_depth_sampler::spawn_queue_depth_sampler(state.clone());
 
     // keeps main alive until i shut it down
     let signal = wait_for_shutdown().await;
     log::warn!("received {}, shutting down main", signal);
+
+    // let results in transit reach the sink and then flush the metrics file
+    sleep(Duration::from_millis(500)).await;
+    crate::measurement::record_writer::shutdown_record_writer();
 }
 
 async fn setup_tcp_channels(state: AppState) {

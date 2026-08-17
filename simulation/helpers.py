@@ -197,6 +197,27 @@ def assert_addresses_free(nodes: list[NodeInfo]) -> None:
             "check with `pgrep -a target/release/node` and kill them before retrying")
 
 
+# mae sure that every metrics file is complete by checking the shutdown marker from the record writer
+def assert_records_complete(records_dir: Path) -> list[str]:
+
+    incomplete = []
+    for path in sorted(records_dir.glob("node-*.jsonl")):
+        last = None
+        with open(path, "rb") as records_file:
+            for line in records_file:
+                if line.strip():
+                    last = line
+        if last is None:
+            incomplete.append(f"{path.name}: empty")
+            continue
+        try:
+            if json.loads(last).get("type") != "writer_shutdown":
+                incomplete.append(f"{path.name}: no shutdown marker")
+        except json.JSONDecodeError:
+            incomplete.append(f"{path.name}: truncated last line")
+    return incomplete
+
+
 # blocks until every node listens on its unix socket and its tcp port and is ready and give up if one of them dies
 def wait_until_ready(nodes: list[NodeInfo], procs: dict[int, subprocess.Popen] | None = None, timeout: float = 60.0) -> float:
  

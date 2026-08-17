@@ -7,8 +7,8 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::node_config::{
-        ConfigMode, ConstraintConfig, ForwarderConfig, GossipConfig, NodeConfig, OverlayConfig,
-        ResultBufferConfig, ResultSinkConfig, TcpChannelConfig,
+        ConfigMode, ConstraintConfig, ForwarderConfig, GossipConfig, MetricsConfig, NodeConfig,
+        OverlayConfig, ResultBufferConfig, ResultSinkConfig, TcpChannelConfig,
     },
     network::message_types,
     types::PeerId,
@@ -194,6 +194,21 @@ impl NodeConfigBuilder {
         self
     }
 
+    pub fn metrics(mut self, m: MetricsConfig) -> Self {
+        self.config.metrics = m;
+        self
+    }
+
+    pub fn queue_report_interval(mut self, d: Duration) -> Self {
+        self.config.metrics.queue_report_interval = d;
+        self
+    }
+
+    pub fn queue_sample_resolution(mut self, d: Duration) -> Self {
+        self.config.metrics.queue_sample_resolution = d;
+        self
+    }
+
     pub fn build(self) -> NodeConfig {
         self.config.validate();
         self.config
@@ -256,6 +271,7 @@ pub fn make_base_config(mode: ConfigMode) -> NodeConfig {
         overlay,
         gossip,
         forwarder: None,
+        metrics: MetricsConfig::default(),
     };
     message_types::init(config.clone());
     config

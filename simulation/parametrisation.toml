@@ -88,6 +88,9 @@ push_fanout = 5                             # fanout of the push gossip (decentr
 gossip_outbound_mpsc_channel_size = 1024    # internal mpsc channel to pass gossip information to the gossip sending app component
 gossip_inbound_mpsc_channel_size = 1024     # internal mpsc channel to pass incoming gossip information to the app component that manages gossip
 
+[baseline.metrics]
+queue_report_interval = "20ms"      # how often queue depth records are written
+queue_sample_resolution = "2ms"     # how often queue depth are sampled (the peak depth is recorded for each report interval)
 
 ####################################################################################################
 # scalability

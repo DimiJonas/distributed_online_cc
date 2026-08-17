@@ -1,7 +1,7 @@
 //! set `CC_METRICS_DIR=<dir>` before starting the node
 //!
 //! one file per node is written to `<dir>/node-<node_id>.jsonl`
-//!   
+//!
 //! optionally set `CC_METRICS_MSGTRACE=0` to disable the per-message trace (the highest volume record type) while keeping everything else
 
 use crate::{measurement::record::Record, types::PeerId};
@@ -11,8 +11,14 @@ use std::fs::{File, create_dir_all};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::mpsc::{Sender, channel};
-use std::time::Instant;
+use std::sync::mpsc::{RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
+use std::time::{Duration, Instant};
+
+/// how long the writer may sit on buffered bytes before flushing them to disk
+const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// how long 'shutdown_record_writer' signal waits for the writer to confirm
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 struct Line {
@@ -25,10 +31,15 @@ struct Line {
     record: Record,
 }
 
+enum WriterMessage {
+    Line(Line),
+    Shutdown(SyncSender<()>),
+}
+
 struct Recorder {
     node_id: PeerId,
     start_time: Instant,
-    record_queue: Sender<Line>,
+    record_queue: Sender<WriterMessage>,
     message_trace: bool,
 }
 
@@ -62,7 +73,7 @@ pub fn spawn_record_writer(node_id: PeerId) {
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
 
-    let (record_queue_sender, record_queue_receiver) = channel::<Line>();
+    let (record_queue_sender, record_queue_receiver) = channel::<WriterMessage>();
 
     // os thread (not a tokio task) so file writes dont occupy a runtime worker and a slow disk does not stall the application
     // also writing still continues even if the application is overloaded
@@ -70,26 +81,44 @@ pub fn spawn_record_writer(node_id: PeerId) {
         .name(format!("metrics-writer-{node_id}"))
         .spawn(move || {
             let mut writer = BufWriter::with_capacity(256 * 1024, file);
-            let mut since_flush = 0usize;
-            while let Ok(line) = record_queue_receiver.recv() {
-                match serde_json::to_writer(&mut writer, &line) {
-                    Ok(()) => {
-                        let _ = writer.write_all(b"\n");
+            // true when there are buffered bytes that have not been written to file yet
+            let mut dirty = false;
+
+            loop {
+                match record_queue_receiver.recv_timeout(FLUSH_INTERVAL) {
+                    Ok(WriterMessage::Line(line)) => {
+                        match serde_json::to_writer(&mut writer, &line) {
+                            Ok(()) => {
+                                let _ = writer.write_all(b"\n");
+                                dirty = true;
+                            }
+                            Err(e) => {
+                                log::error!("measurement: serialize failed: {e}");
+                                continue;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        log::error!("measurement: serialize failed: {e}");
-                        continue;
+                    Ok(WriterMessage::Shutdown(ack)) => {
+                        if let Err(e) = writer.flush() {
+                            log::error!("measurement: final flush failed: {e}");
+                        }
+                        // fsync so the file survives a container teardown
+                        let _ = writer.get_ref().sync_all();
+                        let _ = ack.send(());
+                        return;
                     }
-                }
-                since_flush += 1;
-                // buffering 512 lines until flush
-                if since_flush >= 512 {
-                    let _ = writer.flush();
-                    since_flush = 0;
+                    Err(RecvTimeoutError::Timeout) => {
+                        if dirty {
+                            let _ = writer.flush();
+                            dirty = false;
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
-            // process is shutting down so write everything to disk
+
             let _ = writer.flush();
+            let _ = writer.get_ref().sync_all();
         })
         .expect("measurement: failed to spawn writer thread");
 
@@ -109,6 +138,31 @@ pub fn spawn_record_writer(node_id: PeerId) {
         path.display(),
         message_trace
     );
+}
+
+/// flush every buffered record and stop the writer thread
+pub fn shutdown_record_writer() {
+    let Some(recorder) = RECORDER.get() else {
+        return;
+    };
+
+    // record the shutdown so the analysis can verify the file is complete
+    record(Record::WriterShutdown);
+
+    let (ack_sender, ack_receiver) = sync_channel::<()>(1);
+    if recorder
+        .record_queue
+        .send(WriterMessage::Shutdown(ack_sender))
+        .is_err()
+    {
+        log::warn!("measurement: writer thread already gone, records may be incomplete");
+        return;
+    }
+
+    match ack_receiver.recv_timeout(SHUTDOWN_TIMEOUT) {
+        Ok(()) => log::info!("measurement: records flushed"),
+        Err(e) => log::error!("measurement: writer did not confirm the final flush: {e}"),
+    }
 }
 
 #[inline]
@@ -133,5 +187,5 @@ pub fn record(record: Record) {
         timestamp_wallclock_us: Utc::now().timestamp_micros(),
         record,
     };
-    let _ = recorder.record_queue.send(line);
+    let _ = recorder.record_queue.send(WriterMessage::Line(line));
 }

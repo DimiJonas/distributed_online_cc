@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
-    NodeInfo, ProcSampler, assert_addresses_free, binary_cmd, db_progress, kill_stale_nodes,
+    NodeInfo, ProcSampler, assert_addresses_free, assert_records_complete, binary_cmd, db_progress, kill_stale_nodes,
     load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
     register_process, remove_sockets, run_logged, stable_key, stop_all_launched,
     stop_processes, wait_until_ready, write_toml,
@@ -380,6 +380,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
             log(f"  !! resource sampler did not shut down cleanly: {error!r}")
         timeline["hard_killed_nodes"] = stop_processes(procs)
         timeline["stopped_us"] = now_us()
+        assert_records_complete(paths.records)
         if timeline["hard_killed_nodes"]:
             log(f"  !! nodes {timeline['hard_killed_nodes']} ignored SIGTERM and were killed; their last records may be incomplete")
         remove_sockets(nodes)
