@@ -1,27 +1,5 @@
 //! gen-config — generate node configuration files for both decentralized and central system
 //!
-//! Two orthogonal axes:
-//!
-//!   * Addressing (`--addressing`)
-//!       - `local`: every node on one host, ports offset by node id
-//!       - `remote`: one host per node, fixed ports (one IP per node)
-//!
-//!   * MODE (how conformance is checked)
-//!       - decentralized: constraints are checked on the nodes that receive the events; nodes form a gossip/overlay ring
-//!         node 0 is the dedicated result sink, nodes 1..N have the constraints
-//!       - central: forwarders receive events and forward them to a single central node (node 0) that has all constraints
-//!         forwarder f mirrors decentralized node f: it accepts exactly the event ids placed on that node
-//!
-//!   * ROLE ASSIGNMENT (how constraint roles are assigned to nodes)
-//!       - `round-robin` (default): roles are handed out one at a time, so the roles of one constraint spread out
-//!       - `by-event`: every role observing the same event id lands on the same node, so a node monitors exactly
-//!         one activity and holds all constraint roles configured for it
-//!         by default one constraint node is generated per role (round-robin) or per distinct event id (by-event), plus the result sink
-//!         `--nodes` overrides that and the roles wrap around if there are fewer nodes
-//!
-//! `--catalog` picks the constraint catalog: `default` (built-in test catalog) or `sepsis` (sepsis event log)
-//! the sepsis catalog reuses event ids across constraints, so it has to be combined with `--role-assignment by-event`
-//!
 //! A single invocation always emits both a decentralized system and a central system built from the same set of constraints
 //! Each system is self contained under its own directory:
 //!
@@ -49,6 +27,120 @@ use std::fs::{create_dir_all, read_to_string};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+#[derive(Parser)]
+#[command(about = "Generate comparable decentralized + central node configs")]
+struct Args {
+    /// total nodes in the decentralized system (constraint nodes + 1 sink)
+    /// default: one constraint node per role assignment unit + 1 sink
+    /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
+    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)
+    #[arg(short, long)]
+    nodes: Option<u64>,
+
+    /// how constraint roles are assigned to nodes: `round-robin` one role at a time, or
+    /// `by-event` to give each node one event with all the constraint roles configured for it
+    #[arg(long, value_enum, default_value_t = RoleAssignment::RoundRobin)]
+    role_assignment: RoleAssignment,
+
+    /// which constraint catalog to instantiate: `default` for the built-in test catalog, or
+    /// `sepsis` for the sepsis event log catalog (reuses event ids across constraints so it needs `--role-assignment by-event`)
+    #[arg(long, value_enum, default_value_t = CatalogKind::Default)]
+    catalog: CatalogKind,
+
+    /// print which events and constraint roles each node ends up with
+    #[arg(long, action = ArgAction::SetTrue)]
+    show_assignment: bool,
+
+    /// instantiate the whole constraint catalog this many times (spreads more constraints across the system)
+    #[arg(long, default_value_t = 1)]
+    repeat: u64,
+
+    /// forwarders in the central system
+    /// default: match the decentralized constraint node count so both systems have the same node count and forwarder f mirrors decentralized node f
+    #[arg(long)]
+    forwarders: Option<u64>,
+
+    /// put the result sink of the central system in its own node process instead of hosting it in the central node
+    #[arg(long, action = ArgAction::SetTrue)]
+    external_central_sink: bool,
+
+    /// node addressing: `local` (one host, port = base+id) or `remote` (one host per node from --hosts).
+    #[arg(long, default_value = "local")]
+    addressing: String,
+
+    /// remote: one ip per node (max(decentralized_nodes, central_nodes) entries).
+    #[arg(long, value_delimiter = ',')]
+    hosts: Vec<IpAddr>,
+
+    /// port base for overlay communication (decentralized only)
+    #[arg(long, default_value_t = 9000)]
+    overlay_port: u16,
+
+    /// tcp port base for conformance checking communication for the decentralized system
+    #[arg(long, default_value_t = 19000)]
+    conformance_port: u16,
+
+    /// tcp port base for conformance checking communication for the central system
+    #[arg(long, default_value_t = 18000)]
+    central_port: u16,
+
+    /// remote addressing: bind each node to its routable host ip instead of 0.0.0.0
+    #[arg(long, action = ArgAction::SetTrue)]
+    no_bind_all: bool,
+
+    /// partial node config merged into every generated config to avoid having to expose all rarely used config values
+    #[arg(long)]
+    baseline: Option<PathBuf>,
+
+    /// base output dir for both systems
+    #[arg(long, default_value = "run")]
+    out_dir: PathBuf,
+
+    /// override for the result sqlite dbs (relative to the launch cwd)
+    /// default: <out-dir>/<mode>/cc-results.db, with the override they become <db-dir>/{decentralized,central}-cc-results.db
+    #[arg(long)]
+    db_dir: Option<PathBuf>,
+
+    /// how long a case end keeps being gossiped (in seconds)
+    /// also used to derive how long a completed case is being remembered
+    #[arg(long)]
+    case_end_ttl: Option<u64>,
+
+    /// overlay (cyclon): shuffle interval (decentralized only)
+    #[arg(long)]
+    shuffle_secs: Option<u64>,
+
+    /// overlay (cyclon): shuffle list length (decentralized only)
+    #[arg(long)]
+    shuffle_length: Option<usize>,
+
+    /// overlay (cyclon): peer cache size (how many peers will be kept at most) (decentralized only)
+    #[arg(long)]
+    cache_size: Option<usize>,
+
+    /// overlay: how many neighbors a node knows from the start (e.g. ring degree = 2 -> node knows 2 successors and 2 predecessors + fingers) (decentralized only)
+    /// chord like structure to bootstrap the overlay and ensure sufficient connectivity
+    #[arg(long)]
+    ring_degree: Option<u64>,
+
+    /// overlay: timeout for idling connections (decentralized only)
+    #[arg(long)]
+    idle_timeout_secs: Option<u64>,
+
+    /// case end gossip: interval for the anti entropy mechanism (decentralized only) (default: 1)
+    /// nodes ask neighbors periodically for a hash of their case end knowledge
+    #[arg(long)]
+    anti_entropy_secs: Option<u64>,
+
+    /// case end gossip: fanout of the anti entropy mechanism (decentralized only) (default: 1)
+    #[arg(long)]
+    anti_entropy_fanout: Option<usize>,
+
+    /// case end gossip: fanout of the push gossip (decentralized only) (default: 4)
+    #[arg(long)]
+    push_fanout: Option<usize>,
+}
 
 // ------------------------------
 // overlay / gossip tuning knobs
@@ -1552,103 +1644,6 @@ fn emit_central(
             baseline,
         );
     }
-}
-
-// -----
-// CLI
-// -----
-
-#[derive(Parser)]
-#[command(about = "Generate comparable decentralized + central conformance-checker configs")]
-struct Args {
-    /// total nodes in the decentralized system (constraint nodes + 1 sink)
-    /// default: one constraint node per role assignment unit + 1 sink
-    /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
-    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)
-    #[arg(short, long)]
-    nodes: Option<u64>,
-
-    /// how constraint roles are assigned to nodes: `round-robin` one role at a time, or
-    /// `by-event` to give each node one event with all the constraint roles configured for it
-    #[arg(long, value_enum, default_value_t = RoleAssignment::RoundRobin)]
-    role_assignment: RoleAssignment,
-
-    /// which constraint catalog to instantiate: `default` for the built-in test catalog, or
-    /// `sepsis` for the sepsis event log catalog (reuses event ids across constraints so it needs `--role-assignment by-event`)
-    #[arg(long, value_enum, default_value_t = CatalogKind::Default)]
-    catalog: CatalogKind,
-
-    /// print which events and constraint roles each node ends up with
-    #[arg(long, action = ArgAction::SetTrue)]
-    show_assignment: bool,
-
-    // instantiate the whole constraint catalog this many times (spreads more constraints across the system)
-    #[arg(long, default_value_t = 1)]
-    repeat: u64,
-
-    // forwarders in the central system
-    // default: match the decentralized constraint node count so both systems have the same node count and forwarder f mirrors decentralized node f
-    #[arg(long)]
-    forwarders: Option<u64>,
-
-    /// put the result sink of the central system in its own node process instead of hosting it in the central node
-    #[arg(long, action = ArgAction::SetTrue)]
-    external_central_sink: bool,
-
-    // node addressing: `local` (one host, port = base+id) or `remote` (one host per node from --hosts).
-    #[arg(long, default_value = "local")]
-    addressing: String,
-
-    // remote: one ip per node (max(decentralized_nodes, central_nodes) entries).
-    #[arg(long, value_delimiter = ',')]
-    hosts: Vec<IpAddr>,
-
-    #[arg(long, default_value_t = 9000)]
-    overlay_port: u16,
-    // conformance tcp port base for the decentralized system
-    #[arg(long, default_value_t = 19000)]
-    conformance_port: u16,
-    // conformance tcp port base for the central system
-    #[arg(long, default_value_t = 18000)]
-    central_port: u16,
-    // remote: bind each node to its routable host ip instead of 0.0.0.0
-    #[arg(long, action = ArgAction::SetTrue)]
-    no_bind_all: bool,
-
-    /// partial node config merged into every generated config to avoid having to expose all rarely used config values
-    #[arg(long)]
-    baseline: Option<PathBuf>,
-
-    // base output dir for both systems
-    #[arg(long, default_value = "run")]
-    out_dir: PathBuf,
-
-    // override for the result sqlite dbs (relative to the launch cwd)
-    // default: <out-dir>/<mode>/results.db, with the override they become
-    // <db-dir>/{decentralized,central}-results.db
-    #[arg(long)]
-    db_dir: Option<PathBuf>,
-
-    /// how long a case end keeps being gossiped (in seconds)
-    #[arg(long)]
-    case_end_ttl: Option<u64>,
-
-    #[arg(long)]
-    shuffle_secs: Option<u64>,
-    #[arg(long)]
-    shuffle_length: Option<usize>,
-    #[arg(long)]
-    cache_size: Option<usize>,
-    #[arg(long)]
-    ring_degree: Option<u64>,
-    #[arg(long)]
-    idle_timeout_secs: Option<u64>,
-    #[arg(long)]
-    anti_entropy_secs: Option<u64>,
-    #[arg(long)]
-    anti_entropy_fanout: Option<usize>,
-    #[arg(long)]
-    push_fanout: Option<usize>,
 }
 
 fn main() {

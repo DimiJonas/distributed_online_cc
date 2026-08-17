@@ -16,8 +16,7 @@
 //! output (into --out-dir):
 //!   * one .xes file per event
 //!   * manifest.jsonl - one line per event (seq, case_id, event_id, file,
-//!     attributes, timestamp); the global stream order interleaves cases by
-//!     timestamp
+//!     attributes, timestamp); the global stream order (by timestamp)
 //!   * expected_results.jsonl - {case_id, constraint_id, expected} ground
 //!     truth for comparing result databases against
 //!   * cases.jsonl - which deviations were applied to which case
@@ -37,7 +36,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(about = "Generate a realistic XES event stream from a systems node configs")]
+#[command(about = "Generate an XES event stream from a systems node configs")]
 struct Args {
     /// directory of *-config.toml files (decentralized or central - only the constraint definitions are read)
     #[arg(long)]
@@ -85,6 +84,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_jitter: bool,
 
+    /// file name for the manifest file that will be written
+    /// the manifest file fixes the order of the event stream and provides metadata for routing the events to the nodes that expect them
     #[arg(long, default_value = "manifest.jsonl")]
     manifest: String,
 }

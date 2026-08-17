@@ -27,7 +27,7 @@ repo_root = "."
 results_dir = "results"
 bin_dir = "target/release"
 node_bin = "target/release/node"
-python = "python3.11"                   # python3.11 needed for tomllib
+python = "python3.11"                   # at least python3.11 needed for tomllib
 send_script = "send_event_stream.py"
 compare_script = "compare_results.py"
 
