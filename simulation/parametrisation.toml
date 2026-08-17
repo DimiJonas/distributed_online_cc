@@ -60,7 +60,7 @@ external_central_sink = true      # give the central system its own sink node in
 [baseline]
 event_queue_size = 8192               # events are enqueued here after parsing
 loopback_queue_size = 8192            # used to skip tcp if the destination is the nodes own address (predominantly used by the central node)
-case_end_grace_period = "10s"         # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
+case_end_grace_period = "1s"          # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
 case_end_ttl = "60s"                  # how long a case end is gossiped -> should be bigger than gossip convergence time
 case_janitor_cleanup_interval = "1s"  # prunes completed cases from the node state
 
@@ -81,16 +81,41 @@ retry_buffer_size = 32768       # the retry buffer buffers results while the con
 max_batch_size = 512            # batch size for writing results to the database
 flush_interval = "100ms"        # max time until a batch is flushed to the database (if max batch size is not reached)
 
+[baseline.gossip]             
+anti_entropy_interval = "2s"                # interval for the anti entropy mechanism (decentralized only) (default: 1)
+anti_entropy_fanout = 1                     # fanout of the anti entropy mechanism (decentralized only) (default: 1)
+push_fanout = 5                             # fanout of the push gossip (decentralized only) (default: 4)
+gossip_outbound_mpsc_channel_size = 1024    # internal mpsc channel to pass gossip information to the gossip sending app component
+gossip_inbound_mpsc_channel_size = 1024     # internal mpsc channel to pass incoming gossip information to the app component that manages gossip
+
+
 ####################################################################################################
 # scalability
 ####################################################################################################
 
-# 1) the rate ladder -> sustainable throughput, latency vs load, correctness under load
+# 1) find some saturation signals
 [[experiment]]
-id = "throughput_ladder"
+id = "find_saturation"
 kind = "scalability"
 seeds = [29]
 systems = ["decentralized", "central"]
   [experiment.grid]
   rate = [200, 1000, 1600, 2000, 2200]
-  #rate = [10, 100, 1000, 1600, 2000, 2200]
+
+
+#####################################################################################################
+# privacy
+#####################################################################################################
+
+# 2) this could be a privacy evaluation run
+#[[experiment]] 
+#id = "use_sepsis"
+#kind = "privacy"
+#seeds = [29]
+#systems = ["decentralized", "central"]
+#  [experiment.grid] 
+#  rate = [100]   
+#  [experiment.params]
+#  catalog = "sepsis"
+#  role_assignment = "by-event"
+#  stream_dir = "sepsis/events/"

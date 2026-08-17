@@ -55,12 +55,12 @@ pub fn spawn_case_end_gossip_manager(
                     }
                 }
 
-                // receive gossip to spread from the application
+                // the local node wants to spread gossip
                 Some(data) = outbound_gossip_q.recv() => {
                     initiate_push_gossip(data, state.clone()).await;
                 }
 
-                // message from another peer
+                // receive gossip from another peer
                 Some(msg) = inbound_gossip_q.recv() => {
                     handle_inbound_message(msg, state.clone()).await;
                 }
