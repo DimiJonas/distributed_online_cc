@@ -404,8 +404,7 @@ def load_expected(path: str | Path) -> dict[tuple[str, str], str]:
 
 # add a netem RTT to the tcp messages through the local network stack (define a qdisc)
 def netem_apply(delay_ms: float, jitter_ms: float = 0.0, dev: str = "lo", sudo: bool = True) -> None:
-    cmd = (["sudo"] if sudo else []) + ["tc", "qdisc", "replace", "dev", dev, "root", "netem",
-                                        "delay", f"{delay_ms}ms"]
+    cmd = (["sudo", "-n"] if sudo else []) + ["tc", "qdisc", "replace", "dev", dev, "root", "netem", "delay", f"{delay_ms}ms", "limit", "100000"]
     if jitter_ms:
         cmd += [f"{jitter_ms}ms", "distribution", "normal"]
     subprocess.run(cmd, check=True)
@@ -413,5 +412,5 @@ def netem_apply(delay_ms: float, jitter_ms: float = 0.0, dev: str = "lo", sudo: 
 
 # remove the netem RTT qdisc
 def netem_clear(dev: str = "lo", sudo: bool = True) -> None:
-    cmd = (["sudo"] if sudo else []) + ["tc", "qdisc", "del", "dev", dev, "root"]
+    cmd = (["sudo", "-n"] if sudo else []) + ["tc", "qdisc", "del", "dev", dev, "root"]
     subprocess.run(cmd, check=False, capture_output=True)

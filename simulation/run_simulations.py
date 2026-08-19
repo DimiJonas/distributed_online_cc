@@ -77,7 +77,7 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
     grid = exp.get("grid") or {}
     if grid:
         keys = sorted(grid)
-        for combo in itertools.product(*(grid[k] for k in keys)):
+        for combo in itertools.product(*(grid[key] for key in keys)):
             points.append({**base, **dict(zip(keys, combo))})
 
     sensitivity = exp.get("sensitivity") or {}
@@ -100,18 +100,18 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
     label_keys = _varying_keys(points)
     for point in points:
         for seed in seeds:
-            for rep in range(replicates):
+            for replicate in range(replicates):
                 params = dict(point)
                 params["seed"] = seed
-                label = "_".join(f"{k}{_fmt(v)}" for k, v in sorted(point.items())
-                             if k in label_keys)
+                label = "_".join(f"{key}{_fmt(value)}" for key, value in sorted(point.items())
+                             if key in label_keys)
                 run_id = f"{label or 'base'}__seed{seed}"
                 if replicates > 1:
-                    run_id += f"__r{rep}"
+                    run_id += f"__r{replicate}"
                 runs.append({
                     "experiment": exp["id"],
                     "run_id": run_id,
-                    "replicate": rep,
+                    "replicate": replicate,
                     "kind": exp.get("kind", "scalability"),
                     "systems": exp.get("systems", ["decentralized", "central"]),
                     "params": params,
@@ -129,9 +129,9 @@ def _varying_keys(points: list[dict]) -> list[str]:
     keys = set()
     first = points[0]
     for point in points[1:]:
-        for k, v in point.items():
-            if first.get(k) != v:
-                keys.add(k)
+        for key, value in point.items():
+            if first.get(key) != value:
+                keys.add(key)
     return sorted(keys)
 
 
@@ -304,10 +304,10 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
         send_stream_cmd += ["--burst", str(params["burst"])]
     if params.get("send_jitter"):
         send_stream_cmd += ["--jitter", str(params["send_jitter"])]
-    t0 = now_us() # command start time
+    stream_start_time = now_us()
     proc = run_logged(send_stream_cmd, repo, paths.send / f"{system}.stdout.txt", check=False, timeout=float(plan["defaults"].get("send_timeout_s", 7200)))
-    t1 = now_us() # command end time
-    return {"send_start_us": t0, "send_end_us": t1, "sender_returncode": proc.returncode, "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
+    stream_stop_time = now_us()
+    return {"send_start_us": stream_start_time, "send_end_us": stream_stop_time, "sender_returncode": proc.returncode, "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
 
 
 # wait for the system to settle (it stops producing results for a configured amount of time) or time out
@@ -391,19 +391,37 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
 
 
 # run compare_results.py
-def compare(plan: dict, repo: Path, paths: RunPaths, stream: dict, systems: list[str]) -> tuple[str | None, int | None]:
+def compare(plan: dict, repo: Path, paths: RunPaths, stream: dict, systems: list[str]) -> dict:
 
-    if not all(paths.db(s).exists() for s in ("decentralized", "central")) or len(systems) < 2:
-        return (None, None)
-    compare_results_cmd = [plan["defaults"].get("python", "python3.11"),
-           str(repo / plan["defaults"].get("compare_script", "compare_results.py")),
-           "--decentralized", str(paths.db("decentralized").resolve()),
-           "--central", str(paths.db("central").resolve()),
-           "--expected", stream["expected"],
-           "--rank-by", "revision", "--rank-report"]
+    wanted = [system for system in ("decentralized", "central") if system in systems]
+    present = [system for system in wanted if paths.db(system).exists()]
+    missing = [system for system in wanted if system not in present]
+    result: dict = {"systems": present, "missing_dbs": missing, "out": None, "returncode": None, "summary": None}
+    if not present:
+        return result
+
+    compare_results_cmd = [plan["defaults"].get("python", "python3.11"), str(repo / plan["defaults"].get("compare_script", "compare_results.py"))]
+    for system in present:
+        compare_results_cmd += [f"--{system}", str(paths.db(system).resolve())]
+    summary_path = paths.root / "compare_results.json"
+    # drop a stale summary from an earlier (force=true) run of the same run_id
+    summary_path.unlink(missing_ok=True)
+    compare_results_cmd += ["--expected", stream["expected"], "--rank-by", "revision", "--rank-report", "--json", str(summary_path.resolve())]
+
     out = paths.root / "compare_results.out"
-    proc = run_logged(compare_results_cmd, repo, out, check=False) # exit code 1 just means "found differences"
-    return (str(out), proc.returncode)
+    proc = run_logged(compare_results_cmd, repo, out, check=False)
+    result["out"] = str(out)
+    result["returncode"] = proc.returncode
+    # 0 and 1 both mean the comparison ran (1 = it found discrepancies, which is the measurement result and is
+    # expected on nearly every loaded run). only 2 means it could not be performed, and only that is a failure
+    result["ok"] = proc.returncode in (0, 1)
+    # inline the counts into run.json so a batch can be aggregated from the run records alone
+    if summary_path.exists():
+        try:
+            result["summary"] = json.loads(summary_path.read_text())
+        except json.JSONDecodeError:
+            pass
+    return result
 
 
 def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: bool) -> None:
@@ -432,8 +450,15 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
             run_record["systems_timeline"].append(
                 run_one_system(plan, repo, paths, system, params, stream))
             time.sleep(float(plan["defaults"].get("between_systems_s", 5)))
-        run_record["compare"], run_record["compare_returncode"] = compare(
-            plan, repo, paths, stream, run["systems"])
+        comparison = compare(plan, repo, paths, stream, run["systems"])
+        run_record["compare"] = comparison["out"]
+        run_record["compare_returncode"] = comparison["returncode"]
+        run_record["compare_ok"] = comparison["ok"]
+        run_record["compare_summary"] = comparison["summary"]
+        if comparison["missing_dbs"]:
+            log(f"  !! no result database for: {', '.join(comparison['missing_dbs'])}")
+        if not comparison["ok"]:
+            log(f"  !! compare_results.py could not run (exit {comparison['returncode']}), see {comparison['out']}")
         run_record["status"] = "ok"
     except Exception as exc:
         run_record["status"] = "failed"

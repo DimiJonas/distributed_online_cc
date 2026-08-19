@@ -31,8 +31,8 @@ from glob import glob
 from xml.sax.saxutils import quoteattr
 
 XES_NS = "{http://www.xes-standard.org/}"
-ATTR_TAGS = ("string", "date", "int", "float", "boolean", "id")
-CORE = ("concept:name", "time:timestamp")
+ATTRIBUTE_TAGS = ("string", "date", "int", "float", "boolean", "id")
+CORE_KEYS = ("concept:name", "time:timestamp")
 FAR_FUTURE = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
 
 
@@ -46,32 +46,32 @@ def _strip(tag):
     return tag[len(XES_NS):] if tag.startswith(XES_NS) else tag
 
 
-def _attrs(elem):
-    out = {}
-    for child in elem:
-        t = _strip(child.tag)
-        if t in ATTR_TAGS:
-            k = child.get("key")
-            if k is not None:
-                out[k] = (t, child.get("value", ""))
-    return out
+def _attributes(element):
+    attributes = {}
+    for child in element:
+        tag = _strip(child.tag)
+        if tag in ATTRIBUTE_TAGS:
+            key = child.get("key")
+            if key is not None:
+                attributes[key] = (tag, child.get("value", ""))
+    return attributes
 
 
 def read_log(path):
-    # yield (case_id, trace_attrs, event_attrs) for every event in the log
-    with _open(path) as fh:
-        for _, trace in ET.iterparse(fh, events=("end",)):
+    # yield (case_id, trace_attributes, event_attributes) for every event in the log
+    with _open(path) as log_file:
+        for _, trace in ET.iterparse(log_file, events=("end",)):
             if _strip(trace.tag) != "trace":
                 continue
-            tattrs = _attrs(trace)
-            case_id = tattrs.get("concept:name", ("string", "?"))[1]
-            for ev in trace:
-                if _strip(ev.tag) == "event":
-                    yield case_id, tattrs, _attrs(ev)
+            trace_attributes = _attributes(trace)
+            case_id = trace_attributes.get("concept:name", ("string", "?"))[1]
+            for event in trace:
+                if _strip(event.tag) == "event":
+                    yield case_id, trace_attributes, _attributes(event)
             trace.clear()
 
 
-def parse_ts(s):
+def parse_timestamp(s):
     # sort key - sepsis mixes +01:00 and +02:00 offsets, so compare instants rather than strings
     try:
         return datetime.datetime.fromisoformat(s)
@@ -81,41 +81,41 @@ def parse_ts(s):
 
 # ---- output ----
 
-def safe(name):
+def safe_name(name):
     # filename-safe fragment because the event_ids have spaces
     return re.sub(r"_+", "_", re.sub(r"[^0-9A-Za-z]+", "_", str(name))).strip("_") or "x"
 
 
-def render_event_xes(case_id, trace_attrs, event_attrs):
-    def line(indent, t, k, v):
-        return f'{indent}<{t} key={quoteattr(k)} value={quoteattr(v)}/>'
+def render_event_xes(case_id, trace_attributes, event_attributes):
+    def line(indent, tag, key, value):
+        return f'{indent}<{tag} key={quoteattr(key)} value={quoteattr(value)}/>'
 
-    out = ['<?xml version="1.0" encoding="UTF-8"?>',
+    xes = ['<?xml version="1.0" encoding="UTF-8"?>',
            '<log xes.version="1.0" xmlns="http://www.xes-standard.org/">',
            '  <trace>',
            line('    ', 'string', 'concept:name', case_id)]
-    for k, (t, v) in trace_attrs.items():
-        if k != "concept:name":
-            out.append(line('    ', t, k, v))
-    out.append('    <event>')
-    for k, (t, v) in event_attrs.items():
-        out.append(line('      ', t, k, v))
-    out += ['    </event>', '  </trace>', '</log>', '']
-    return "\n".join(out)
+    for key, (tag, value) in trace_attributes.items():
+        if key != "concept:name":
+            xes.append(line('    ', tag, key, value))
+    xes.append('    <event>')
+    for key, (tag, value) in event_attributes.items():
+        xes.append(line('      ', tag, key, value))
+    xes += ['    </event>', '  </trace>', '</log>', '']
+    return "\n".join(xes)
 
 
-def typed(t, v):
+def typed(attribute_type, value):
     # xes attribute value -> json value
     try:
-        if t == "float":
-            return float(v)
-        if t == "int":
-            return int(v)
-        if t == "boolean":
-            return v.strip().lower() == "true"
+        if attribute_type == "float":
+            return float(value)
+        if attribute_type == "int":
+            return int(value)
+        if attribute_type == "boolean":
+            return value.strip().lower() == "true"
     except ValueError:
         pass
-    return v
+    return value
 
 
 # ---- what the deployment listens for ----
@@ -123,34 +123,33 @@ def typed(t, v):
 def routable_event_ids(config_dir):
     # route by constraint event_ids + forwarder include_event_ids"""
     import tomllib
-    ids = set()
+    event_ids = set()
     for path in sorted(glob(os.path.join(config_dir, "*-config.toml"))):
-        with open(path, "rb") as fh:
-            cfg = tomllib.load(fh)
-        for c in cfg.get("constraints", []):
-            ids.add(c["event_id"])
-        ids.update(cfg.get("forwarder", {}).get("include_event_ids") or [])
-    return ids
+        with open(path, "rb") as config_file:
+            config = tomllib.load(config_file)
+        for constraint in config.get("constraints", []):
+            event_ids.add(constraint["event_id"])
+        event_ids.update(config.get("forwarder", {}).get("include_event_ids") or [])
+    return event_ids
 
 
 # ---- records ----
 
-def close_cases(records, end_activity):
+def add_case_ends(records, end_activity):
     # append one end event per case
     # timestamp is taken from cases last event and is_end = 1 breaks the tie so the end event follows the real event
-    last = {}
-    for r in records:
-        case_id = r[3]
-        if case_id not in last or r[0] > last[case_id][0]:
-            last[case_id] = r
-    out = []
-    for case_id, (sort_ts, _, ts, _, tattrs, eattrs, _) in last.items():
-        end_attrs = {"concept:name": ("string", end_activity),
-                     "time:timestamp": ("date", ts)}
-        if "lifecycle:transition" in eattrs:
-            end_attrs["lifecycle:transition"] = eattrs["lifecycle:transition"]
-        out.append((sort_ts, 1, ts, case_id, tattrs, end_attrs, end_activity))
-    return out
+    last_events_per_case = {}
+    for record in records:
+        case_id = record[3]
+        if case_id not in last_events_per_case or record[0] > last_events_per_case[case_id][0]:
+            last_events_per_case[case_id] = record
+    case_with_end = []
+    for case_id, (sort_timestamp, _, timestamp, _, trace_attributes, event_attributes, _) in last_events_per_case.items():
+        end_attributes = {"concept:name": ("string", end_activity), "time:timestamp": ("date", timestamp)}
+        if "lifecycle:transition" in event_attributes:
+            end_attributes["lifecycle:transition"] = event_attributes["lifecycle:transition"]
+        case_with_end.append((sort_timestamp, 1, timestamp, case_id, trace_attributes, end_attributes, end_activity))
+    return case_with_end
 
 
 # ---- main ----
@@ -169,74 +168,74 @@ def main():
 
     # collect and order by timestamp
     records = []
-    for case_id, tattrs, eattrs in read_log(args.xes):
-        event_id = eattrs.get("concept:name", ("string", "unknown"))[1]
-        ts = eattrs.get("time:timestamp", ("date", ""))[1]
-        records.append((parse_ts(ts), 0, ts, case_id, tattrs, eattrs, event_id))
-    records.sort(key=lambda r: (r[0], r[1]))
+    for case_id, trace_attributes, event_attributes in read_log(args.xes):
+        event_id = event_attributes.get("concept:name", ("string", "unknown"))[1]
+        timestamp = event_attributes.get("time:timestamp", ("date", ""))[1]
+        records.append((parse_timestamp(timestamp), 0, timestamp, case_id, trace_attributes, event_attributes, event_id))
+    records.sort(key=lambda record: (record[0], record[1]))
 
-    # keep the first N cases to appear in the stream
+    # keep only the first n cases to appear in the stream if configured
     if args.cases:
-        kept = {}
-        for r in records:
-            if r[3] not in kept:
-                if len(kept) >= args.cases:
+        kept_cases = {}
+        for record in records:
+            if record[3] not in kept_cases:
+                if len(kept_cases) >= args.cases:
                     continue
-                kept[r[3]] = True
-        records = [r for r in records if r[3] in kept]
+                kept_cases[record[3]] = True
+        records = [record for record in records if record[3] in kept_cases]
 
-    # close every case, then re-sort so the end events land in place
+    # close every case, then re-sort so the end events land in place (at the end of each case)
     if args.end_activity:
-        records += close_cases(records, args.end_activity)
-        records.sort(key=lambda r: (r[0], r[1]))
+        records += add_case_ends(records, args.end_activity)
+        records.sort(key=lambda record: (record[0], record[1]))
 
-    known = routable_event_ids(args.config_dir) if args.config_dir else None
+    known_event_ids = routable_event_ids(args.config_dir) if args.config_dir else None
 
     if args.activities:
-        seen = {}
-        for r in records:
-            seen[r[6]] = seen.get(r[6], 0) + 1
+        seen_event_ids = {}
+        for record in records:
+            seen_event_ids[record[6]] = seen_event_ids.get(record[6], 0) + 1
         print(f"{'event_id (= activity)':<28} {'count':>6}  routed")
-        for a in sorted(seen, key=lambda x: -seen[x]):
-            mark = "-" if known is None else ("yes" if a in known else "no")
-            print(f"{a:<28} {seen[a]:>6}  {mark}")
-        print(f"\n{len(seen)} activities, {len(records)} events, "
-              f"{len({r[3] for r in records})} cases")
+        for event_id in sorted(seen_event_ids, key=lambda x: -seen_event_ids[x]):
+            mark = "-" if known_event_ids is None else ("yes" if event_id in known_event_ids else "no")
+            print(f"{event_id:<28} {seen_event_ids[event_id]:>6}  {mark}")
+        print(f"\n{len(seen_event_ids)} activities, {len(records)} events, "
+              f"{len({record[3] for record in records})} cases")
         return
 
     os.makedirs(args.out, exist_ok=True)
     seq, ends, unrouted = 0, 0, set()
 
-    with open(os.path.join(args.out, "manifest.jsonl"), "w") as mf:
-        for sort_ts, is_end, ts, case_id, tattrs, eattrs, event_id in records:
-            if known is not None and event_id not in known:
+    with open(os.path.join(args.out, "manifest.jsonl"), "w") as manifest_file:
+        for sort_ts, is_end, timestamp, case_id, trace_attributes, event_attributes, event_id in records:
+            if known_event_ids is not None and event_id not in known_event_ids:
                 unrouted.add(event_id)
 
-            fname = f"{seq:05d}_{safe(case_id)}_{safe(event_id)}.xes"
-            with open(os.path.join(args.out, fname), "w") as fh:
-                fh.write(render_event_xes(case_id, tattrs, eattrs))
+            file_name = f"{seq:05d}_{safe_name(case_id)}_{safe_name(event_id)}.xes"
+            with open(os.path.join(args.out, file_name), "w") as event_file:
+                event_file.write(render_event_xes(case_id, trace_attributes, event_attributes))
 
-            row = {"attributes": {k: typed(t, v) for k, (t, v) in eattrs.items()
-                                  if k not in CORE},
+            row = {"attributes": {attribute_key: typed(attribute_type, value) for attribute_key, (attribute_type, value) in event_attributes.items()
+                                  if attribute_key not in CORE_KEYS},
                    "case_id": case_id, "constraint_id": None,
-                   "event_id": event_id, "file": fname, "seq": seq,
-                   "timestamp": ts}
+                   "event_id": event_id, "file": file_name, "seq": seq,
+                   "timestamp": timestamp}
             if is_end:
                 row["synthetic"] = True
                 ends += 1
-            mf.write(json.dumps(row) + "\n")
+            manifest_file.write(json.dumps(row) + "\n")
             seq += 1
             if args.max_events and seq >= args.max_events:
                 break
 
-    cases = len({r[3] for r in records})
+    cases = len({record[3] for record in records})
     print(f"wrote {seq} events -> {os.path.join(args.out, 'manifest.jsonl')}")
     if args.end_activity:
         print(f"cases: {cases}, '{args.end_activity}' events written: {ends}")
         if ends < cases:
             print(f"warning: --max-events cut the stream short, {cases - ends} "
                   f"case(s) have no end event")
-    if known is not None:
+    if known_event_ids is not None:
         if unrouted:
             print(f"{len(unrouted)} event_id(s) no node listens for, they will be "
                   f"logged as no_route: {', '.join(sorted(unrouted))}")
