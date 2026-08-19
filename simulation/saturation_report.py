@@ -126,7 +126,11 @@ def parse_send_log(run_dir: Path, system: str) -> dict:
     buckets = sorted(per_second)[:-1]
     rates = [per_second[b] for b in buckets] or [0]
     rates_sorted = sorted(rates)
+    span = times[-1] - times[0]
     return {
+        "effective_rate_log": (len(times) / span) if span > 0 else None,
+        "send_log_events": len(times),
+        "send_log_span_s": span,
         "gap_p50_us": quantile(gaps, 0.50),
         "gap_p95_us": quantile(gaps, 0.95),
         "gap_p99_us": quantile(gaps, 0.99),
@@ -295,6 +299,25 @@ def collect_point(run_dir: Path, system: str, x_param: str) -> dict | None:
     point.update(parse_send_log(run_dir, system))
     point.update(parse_resources(run_dir, system, window))
     point.update(parse_records(run_dir, system, window))
+
+    sources = []
+    target = run_file.get("params", {}).get("rate")
+    if target is not None:
+        sources.append("target: run.json params.rate")
+    else:
+        target = point.get("target_rate")
+        sources.append("target: pacer summary line (rounded)")
+    effective = point.get("effective_rate_log")
+    if effective is not None:
+        sources.append("effective: send log")
+    else:
+        effective = point.get("effective_rate")
+        sources.append("effective: pacer summary line (rounded)")
+    point["target_rate"] = float(target) if target is not None else None
+    point["effective_rate"] = effective
+    point["achieved_ratio"] = (effective / target) if (effective and target) else None
+    point["rate_source"] = "; ".join(sources)
+    point["rate_source_exact"] = "rounded" not in point["rate_source"]
 
     # correctness of the final verdicts, from compare_results.json
     summary_path = run_dir / "compare_results.json"
@@ -556,6 +579,26 @@ def main() -> int:
           f">{args.queue_fill:.0%} of capacity OR busiest process >{args.cpu_threshold}% of a core")
     if not any(point.get("records_present") for point in all_points):
         print("note: no records/ found - queue depth and message drop signals are UNAVAILABLE, the verdicts below rest on the pacer and cpu signals only")
+
+    rounded_points = [point["run_id"] for point in all_points if not point.get("rate_source_exact", True)]
+    if rounded_points:
+        print(f"note: {len(rounded_points)} point(s) had no send log, so their achieved ratio comes from the "
+              f"pacer summary line and is only accurate to a few significant digits")
+
+    points_without_x = [point["run_id"] for point in all_points if point.get("x") is None]
+    distinct_x_values = sorted({point["x"] for point in all_points if point.get("x") is not None})
+    if points_without_x:
+        available_params = sorted({key for run_directory in run_directories[:1]
+                                   for key in (json.loads((run_directory / "run.json").read_text()).get("params") or {})})
+        print(f"\n  !! --x-param {args.x_param!r} is not in params for {len(points_without_x)} of "
+              f"{len(all_points)} point(s) - those points cannot be placed on the x axis and are "
+              f"dropped from the saturation search.")
+        print(f"     available params in this experiment: {', '.join(available_params)}")
+    elif len(distinct_x_values) < 2:
+        print(f"\n  !! --x-param {args.x_param!r} is constant at "
+              f"{distinct_x_values[0] if distinct_x_values else '?'} across every run - there is no "
+              f"sweep to find a knee in.")
+        print(f"     pick the parameter that varies in [experiment.grid], e.g. --x-param rate.")
 
     for system in args.systems:
         if points_by_system[system]:

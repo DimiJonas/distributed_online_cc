@@ -130,13 +130,21 @@ class Pacer:
         self.count += 1
         return now - self.starttime
 
+    @staticmethod
+    def _rate_str(rate):
+        if rate >= 1000:
+            return f"{rate:.0f}"
+        if rate >= 1:
+            return f"{rate:.1f}".rstrip("0").rstrip(".")
+        return f"{rate:.3g}"
+
     def summary(self):
         elapsed = time.monotonic() - self.starttime
         eff = self.count / elapsed if elapsed > 0 else 0.0
         if self.interval <= 0:
-            return f"rate=unlimited {eff:.3g}/s (effective) elapsed={elapsed:.2f}s"
-        summary = (f"rate={1.0 / self.interval:.3g}/s (target) "
-             f"{eff:.3g}/s (effective) elapsed={elapsed:.2f}s")
+            return f"rate=unlimited {self._rate_str(eff)}/s (effective) elapsed={elapsed:.2f}s"
+        summary = (f"rate={self._rate_str(1.0 / self.interval)}/s (target) "
+             f"{self._rate_str(eff)}/s (effective) elapsed={elapsed:.2f}s")
         if self.late:
             summary += f"  late={self.late} max_lag={self.max_lag * 1000:.1f}ms"
         if self.resyncs:
@@ -199,8 +207,8 @@ class Progress:
                  f"{100.0 * self.send_count / self.total:3.0f}%")
         else:
             progress_bar = f"event {self.send_count}"
-        if elapsed >= 0.5:  # before that the measured rate is meaningless
-            progress_bar += f"  {rate:.0f}/s" if rate >= 1000 else f"  {rate:.3g}/s"
+        if elapsed >= 0.5:
+            progress_bar += f"  {Pacer._rate_str(rate)}/s"
             if self.total and self.send_count < self.total:
                 progress_bar += f"  eta {fmt_duration((self.total - self.send_count) / rate)}"
         extra = " ".join(f"{k}={v}" for k, v in counts.items() if v)
@@ -558,6 +566,7 @@ def main():
         prog.note("terminated, flushing the send log")
         raise
     finally:
+        pacer_summary = pacer.summary()
         prog.close(counts)
         log.close()
         pool.close_all()
@@ -565,7 +574,7 @@ def main():
         print(f"system={kind}  sent={counts['sent']} dry-run={counts['dry-run']} "
               f"no_route={counts['no_route']} error={counts['error']}"
               + ("  INTERRUPTED" if interrupted else ""))
-        print(pacer.summary())
+        print(pacer_summary)
         if not args.dry_run:
             print(f"wire={args.wire} preload={'on' if preloaded else 'off'} "
                   f"blocked_sends(>1ms)={slow_sends} max_send={max_send_us / 1000:.1f}ms "
