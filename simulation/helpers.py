@@ -160,18 +160,32 @@ def binary_cmd(repo_root: Path, bin_dir: str | None, name: str, use_cargo: bool 
 
 # run a command with logging stdout and stderr to a file
 def run_logged(cmd: list[str], cwd: Path, out_path: Path | None = None,
-               env: dict | None = None, check: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
+               env: dict | None = None, check: bool = True, timeout: float | None = None,
+               on_start=None) -> subprocess.CompletedProcess:
     log(f"  $ {' '.join(str(c) for c in cmd)}")
     full_env = {**os.environ, **(env or {})}
-    proc = subprocess.run([str(c) for c in cmd], cwd=str(cwd), env=full_env,
-                          capture_output=True, text=True, timeout=timeout)
+    popen = subprocess.Popen([str(c) for c in cmd], cwd=str(cwd), env=full_env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    if on_start is not None:
+        try:
+            on_start(popen)
+        except Exception as error:
+            log(f"  !! on_start hook failed: {error!r}")
+    try:
+        stdout, stderr = popen.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        popen.kill()
+        stdout, stderr = popen.communicate()
+        raise
+    proc = subprocess.CompletedProcess(cmd, popen.returncode, stdout, stderr)
     if out_path is not None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(f"$ {' '.join(str(c) for c in cmd)}\n"
+        out_path.write_text(f"$ {' '.join(str(substring) for substring in cmd)}\n"
                             f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}\n")
     if check and proc.returncode != 0:
         sys.stderr.write(proc.stdout[-4000:] + "\n" + proc.stderr[-4000:] + "\n")
-        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(str(c) for c in cmd)}")
+        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(str(substring) for substring in cmd)}")
     return proc
 
 
@@ -197,25 +211,39 @@ def assert_addresses_free(nodes: list[NodeInfo]) -> None:
             "check with `pgrep -a target/release/node` and kill them before retrying")
 
 
-# mae sure that every metrics file is complete by checking the shutdown marker from the record writer
-def assert_records_complete(records_dir: Path) -> list[str]:
+# make sure that every metrics file is complete by checking the shutdown marker from the record writer
+def check_records_complete(records_dir: Path) -> list[str]:
 
     incomplete = []
-    for path in sorted(records_dir.glob("node-*.jsonl")):
+    records_dir = Path(records_dir)
+    if not records_dir.exists():
+        return [f"{records_dir}: records directory does not exist"]
+    files = sorted(records_dir.glob("**/node-*.jsonl"))
+    if not files:
+        # metrics disabled
+        return []
+    for path in files:
+        name = f"{path.parent.name}/{path.name}"
         last = None
         with open(path, "rb") as records_file:
             for line in records_file:
                 if line.strip():
                     last = line
         if last is None:
-            incomplete.append(f"{path.name}: empty")
+            incomplete.append(f"{name}: empty")
             continue
         try:
             if json.loads(last).get("type") != "writer_shutdown":
-                incomplete.append(f"{path.name}: no shutdown marker")
+                incomplete.append(f"{name}: no shutdown marker (file is truncated)")
         except json.JSONDecodeError:
-            incomplete.append(f"{path.name}: truncated last line")
+            incomplete.append(f"{name}: truncated last line")
     return incomplete
+
+
+def assert_records_complete(records_dir: Path) -> None:
+    incomplete = check_records_complete(records_dir)
+    if incomplete:
+        raise RuntimeError(f"incomplete metric record files in {records_dir}: {incomplete}")
 
 
 # blocks until every node listens on its unix socket and its tcp port and is ready and give up if one of them dies
@@ -267,8 +295,13 @@ def _signal_process(proc: subprocess.Popen, sig: int) -> None:
             pass
 
 
+# the shutdown of a node is 'sleep(500ms)' + SHUTDOWN_TIMEOUT (10s - see record_writer.rs)
+# the stop grace has to cover that period
+DEFAULT_STOP_GRACE_S = 15.0
+
+
 # send SIGTERM and escalate to SIGKILL if node does not shut down
-def stop_processes(procs: dict[int, subprocess.Popen], grace: float = 8.0) -> list[int]:
+def stop_processes(procs: dict[int, subprocess.Popen], grace: float = DEFAULT_STOP_GRACE_S) -> list[int]:
 
     for proc in procs.values():
         if proc.poll() is None:
@@ -317,15 +350,36 @@ def kill_stale_nodes(node_bin: str | Path) -> int:
     return len(pids)
 
 
-# samples /proc periodically and writes it to a jsonl file
+# separate \proc stats of conformance checking system and simulation tooling (mainly send_event_stream.py)
+GROUP_SYSTEM = "system"
+GROUP_TOOLING = "tooling"
+
+
+# samples /proc periodically and writes it to a jsonl file.
 class ProcSampler(threading.Thread):
 
     def __init__(self, targets: dict[int, dict], out_path: Path, interval: float = 0.25):
         super().__init__(daemon=True)
-        self.targets = targets          # pid -> (node id, role)
+        self._lock = threading.Lock()
+        self.targets = {pid: {"group": GROUP_SYSTEM, **meta} for pid, meta in targets.items()}
         self.out_path = out_path
         self.interval = interval
         self._shutdown = threading.Event()
+
+    # register an extra process (e.g. the send script) after the sampler already started
+    def add_target(self, pid: int, group: str = GROUP_TOOLING, **meta) -> None:
+        with self._lock:
+            self.targets[pid] = {"group": group, **meta}
+
+    # stop sampling a process
+    def remove_target(self, pid: int) -> None:
+        with self._lock:
+            self.targets.pop(pid, None)
+
+    # return a snapshot of the current list of sampling targets
+    def _snapshot_targets(self) -> list[tuple[int, dict]]:
+        with self._lock:
+            return list(self.targets.items())
 
     def stop(self) -> None:
         self._shutdown.set()
@@ -366,7 +420,7 @@ class ProcSampler(threading.Thread):
                 host = self._read_host()
                 if host:
                     fh.write(json.dumps({"t_us": t, "kind": "host", **host, "clk_tck": CLK_TCK}) + "\n")
-                for pid, meta in self.targets.items():
+                for pid, meta in self._snapshot_targets():
                     sample = self._read_proc(pid)
                     if sample is None:
                         continue
@@ -377,6 +431,28 @@ class ProcSampler(threading.Thread):
 
 def sqlite_ro(db_path: str | Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=10)
+
+
+# create a checkpoint to fold the WAL into the database
+def checkpoint_wal(db_path: str | Path) -> dict:
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {"checkpointed": False, "reason": "no database file"}
+    wal_filepath = Path(str(db_path) + "-wal")
+    wal_bytes = wal_filepath.stat().st_size if wal_filepath.exists() else 0
+    try:
+        db_connection = sqlite3.connect(str(db_path), timeout=30)
+        try:
+            # 'TRUNCATE' blocks until every frame is in the main db and then empties the wal
+            busy, moved, checkpointed = db_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            rows = db_connection.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+        finally:
+            db_connection.close()
+        return {"checkpointed": busy == 0, "wal_bytes_before": wal_bytes,
+                "wal_frames": moved, "wal_frames_checkpointed": checkpointed, "rows_after": rows}
+    except sqlite3.Error as error:
+        return {"checkpointed": False, "wal_bytes_before": wal_bytes, "error": str(error)}
 
 
 # check how many (case, constraint) pairs are in the db

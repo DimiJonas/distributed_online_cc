@@ -28,6 +28,7 @@ import fnmatch
 import itertools
 import json
 import os
+import random
 import shutil
 import signal
 import subprocess
@@ -37,7 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
-    NodeInfo, ProcSampler, assert_addresses_free, assert_records_complete, binary_cmd, db_progress, kill_stale_nodes,
+    DEFAULT_STOP_GRACE_S, GROUP_TOOLING, GROUP_SYSTEM, NodeInfo, ProcSampler, assert_addresses_free,
+    binary_cmd, check_records_complete, checkpoint_wal, db_progress, kill_stale_nodes,
     load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
     register_process, remove_sockets, run_logged, stable_key, stop_all_launched,
     stop_processes, wait_until_ready, write_toml,
@@ -116,6 +118,41 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
                     "systems": exp.get("systems", ["decentralized", "central"]),
                     "params": params,
                 })
+    return runs
+
+
+def shuffle_run_order(runs: list[dict], run_order: str, system_order: str, order_seed: int) -> list[dict]:
+
+    rng = random.Random(order_seed)
+
+    if run_order == "shuffle":
+        rng.shuffle(runs)
+    elif run_order == "shuffle-within-experiment":
+        by_experiment: dict[str, list[dict]] = {}
+        for run in runs:
+            by_experiment.setdefault(run["experiment"], []).append(run)
+        runs = []
+        for experiment in by_experiment:
+            block = by_experiment[experiment]
+            rng.shuffle(block)
+            runs += block
+    elif run_order != "as-listed":
+        raise ValueError(f"unknown run_order {run_order!r} "
+                         "(expected as-listed | shuffle | shuffle-within-experiment)")
+
+    if system_order == "shuffle":
+        for run in runs:
+            systems = list(run["systems"])
+            rng.shuffle(systems)
+            run["systems"] = systems
+    elif system_order != "as-listed":
+        raise ValueError(f"unknown system_order {system_order!r} (expected as-listed | shuffle)")
+
+    for index, run in enumerate(runs):
+        run["order_index"] = index
+        run["order_seed"] = order_seed
+        run["run_order"] = run_order
+        run["system_order"] = system_order
     return runs
 
 
@@ -257,16 +294,15 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
         Path(str(paths.db(system)) + suffix).unlink(missing_ok=True)
     paths.logs(system).mkdir(parents=True, exist_ok=True)
 
-    records_dir = (paths.records / system).resolve()
-    records_dir.mkdir(parents=True, exist_ok=True)
-
-    # set env variables to turn on measurements and set log level
     env = {
-        "CC_METRICS_DIR": str(records_dir),
-        "CC_METRICS_MSGTRACE": "1" if params.get("msgtrace", True) else "0",
         "RUST_LOG": params.get("rust_log", plan["defaults"].get("rust_log", "warn")),
         "RUST_LOG_FILE": params.get("rust_log_file", plan["defaults"].get("rust_log_file", "warn")),
     }
+    if params.get("metrics", True):
+        records_dir = (paths.records / system).resolve()
+        records_dir.mkdir(parents=True, exist_ok=True)
+        env["CC_METRICS_DIR"] = str(records_dir)
+        env["CC_METRICS_MSGTRACE"] = "1" if params.get("msgtrace", True) else "0"
     node_bin = repo / plan["defaults"].get("node_bin", "target/release/node")
     if not node_bin.exists():
         raise RuntimeError(f"node binary {node_bin} not found - build with `cargo build --release`")
@@ -291,7 +327,7 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     return procs, nodes
 
 
-def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict) -> dict:
+def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict, sampler: ProcSampler | None = None) -> dict:
     sender = repo / plan["defaults"].get("send_script", "send_event_stream.py")
     send_stream_cmd = [plan["defaults"].get("python", "python3.11"), str(sender),
            "--config-dir", str(paths.configs(system).resolve()),
@@ -304,10 +340,25 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
         send_stream_cmd += ["--burst", str(params["burst"])]
     if params.get("send_jitter"):
         send_stream_cmd += ["--jitter", str(params["send_jitter"])]
+
+    sender_pid: dict = {}
+
+    def on_start(popen: subprocess.Popen) -> None:
+        sender_pid["pid"] = popen.pid
+        if sampler is not None:
+            sampler.add_target(popen.pid, group=GROUP_TOOLING, node_id=-1, role="sender")
+
     stream_start_time = now_us()
-    proc = run_logged(send_stream_cmd, repo, paths.send / f"{system}.stdout.txt", check=False, timeout=float(plan["defaults"].get("send_timeout_s", 7200)))
+    try:
+        proc = run_logged(send_stream_cmd, repo, paths.send / f"{system}.stdout.txt", check=False, timeout=float(plan["defaults"].get("send_timeout_s", 7200)),
+                          on_start=on_start)
+    finally:
+        if sampler is not None and "pid" in sender_pid:
+            sampler.remove_target(sender_pid["pid"])
     stream_stop_time = now_us()
-    return {"send_start_us": stream_start_time, "send_end_us": stream_stop_time, "sender_returncode": proc.returncode, "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
+    return {"send_start_us": stream_start_time, "send_end_us": stream_stop_time,
+            "sender_pid": sender_pid.get("pid"), "sender_returncode": proc.returncode,
+            "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
 
 
 # wait for the system to settle (it stops producing results for a configured amount of time) or time out
@@ -358,7 +409,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         timeline["ready_seconds"] = ready_s
 
         sampler = ProcSampler(
-            targets={process.pid: {"node_id": node.node_id, "role": node.role} for node, process in ((node, procs[node.node_id]) for node in nodes)},
+            targets={process.pid: {"node_id": node.node_id, "role": node.role, "group": GROUP_SYSTEM} for node, process in ((node, procs[node.node_id]) for node in nodes)},
             out_path=paths.resources / f"{system}.jsonl",
             interval=float(plan["defaults"].get("resource_interval_s", 0.25)))
         sampler.start()
@@ -369,23 +420,41 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         time.sleep(idle)
         timeline["idle_end_us"] = now_us()
 
-        timeline.update(send_stream(plan, repo, paths, system, params, stream))
+        timeline.update(send_stream(plan, repo, paths, system, params, stream, sampler=sampler))
         timeline.update(wait_for_system_settlement(paths, system, stream.get("expected_pairs"), params))
     finally:
+        problems: list[str] = []
         try:
             if sampler:
                 sampler.stop()
                 sampler.join(timeout=5)
         except Exception as error:
             log(f"  !! resource sampler did not shut down cleanly: {error!r}")
-        timeline["hard_killed_nodes"] = stop_processes(procs)
+
+        grace = float(plan["defaults"].get("stop_grace_s", DEFAULT_STOP_GRACE_S))
+        timeline["hard_killed_nodes"] = stop_processes(procs, grace=grace)
         timeline["stopped_us"] = now_us()
-        assert_records_complete(paths.records)
+
+        # trigger writing wal to db (before grace runs out)
+        timeline["wal_checkpoint"] = checkpoint_wal(paths.db(system))
+        if not timeline["wal_checkpoint"].get("checkpointed", False):
+            problems.append(f"{system}: wal checkpoint incomplete: {timeline['wal_checkpoint']}")
+
         if timeline["hard_killed_nodes"]:
-            log(f"  !! nodes {timeline['hard_killed_nodes']} ignored SIGTERM and were killed; their last records may be incomplete")
+            problems.append(f"{system}: {len(timeline['hard_killed_nodes'])} node(s) ignored SIGTERM for {grace}s and were SIGKILLed: {timeline['hard_killed_nodes']}")
+            log(f"  !! nodes {timeline['hard_killed_nodes']} ignored SIGTERM and were killed; records and result rows of this system may be incomplete")
+
+        if params.get("metrics", True):
+            incomplete = check_records_complete(paths.records / system)
+            timeline["incomplete_records"] = incomplete
+            if incomplete:
+                problems.append(f"{system}: {len(incomplete)} incomplete record file(s): {incomplete[:5]}")
+                log(f"  !! {len(incomplete)} incomplete record file(s) in {paths.records / system}")
+
         remove_sockets(nodes)
         for suffix in ("-wal", "-shm"):
             Path(str(paths.db(system)) + suffix).unlink(missing_ok=True)
+        timeline["problems"] = problems
     timeline["nodes"] = [{"node_id": n.node_id, "role": n.role, "events": n.event_ids, "constraints": len(n.constraints)} for n in nodes]
     return timeline
 
@@ -436,7 +505,7 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
 
     params = run["params"]
     run_record = {**run, "started_at_us": now_us(), "host": os.uname().nodename, "cpu_count": os.cpu_count(), "systems_timeline": [],
-              "baseline": plan.get("baseline", {})}
+              "problems": [], "baseline": plan.get("baseline", {})}
 
     netem = params.get("netem_ms")
     try:
@@ -459,7 +528,29 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
             log(f"  !! no result database for: {', '.join(comparison['missing_dbs'])}")
         if not comparison["ok"]:
             log(f"  !! compare_results.py could not run (exit {comparison['returncode']}), see {comparison['out']}")
-        run_record["status"] = "ok"
+
+        problems: list[str] = []
+        for timeline in run_record["systems_timeline"]:
+            problems += timeline.get("problems", [])
+            expected = timeline.get("expected_pairs")
+            pairs = timeline.get("pairs_in_db")
+            if expected and pairs is not None and pairs < expected:
+                problems.append(f"{timeline['system']}: only {pairs}/{expected} pairs in the db at settlement (reason: {timeline.get('system_settlement_reason')})")
+            if timeline.get("system_settlement_reason") == "timeout":
+                problems.append(f"{timeline['system']}: settlement timed out, the system never went quiet")
+            if timeline.get("sender_returncode") not in (0, None):
+                problems.append(f"{timeline['system']}: sender exited with {timeline['sender_returncode']}")
+        if comparison["missing_dbs"]:
+            problems.append(f"no result database for: {', '.join(comparison['missing_dbs'])}")
+        if not comparison["ok"]:
+            problems.append(f"compare_results.py failed with exit {comparison['returncode']}")
+
+        run_record["problems"] = problems
+        run_record["status"] = "invalid" if problems else "ok"
+        if problems:
+            log(f"  !! run marked INVALID ({len(problems)} problem(s)):")
+            for problem in problems:
+                log(f"       - {problem}")
     except Exception as exc:
         run_record["status"] = "failed"
         run_record["error"] = f"{type(exc).__name__}: {exc}"
@@ -482,6 +573,13 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="print the expanded run list and exit")
     ap.add_argument("--kill-stale", action="store_true", help="SIGKILL any leftover node processes of this binary before starting. refused while another simulation holds the lock file")
     ap.add_argument("--force", action="store_true", help="re-run runs that already have a run.json")
+    ap.add_argument("--run-order", choices=["as-listed", "shuffle", "shuffle-within-experiment"],
+                    default=None, help="execution order of the runs (default: from the plan, else as-listed)")
+    ap.add_argument("--system-order", choices=["as-listed", "shuffle"], default=None,
+                    help="order of decentralized/central within one run (default: from the plan, else as-listed)")
+    ap.add_argument("--order-seed", type=int, default=None,
+                    help="seed for the order randomization (default: from the plan, else 0). "
+                         "the same seed always reproduces the same order")
     args = ap.parse_args()
 
     plan = load_plan(args.plan)
@@ -499,10 +597,18 @@ def main() -> int:
     if args.run:
         runs = [run for run in runs if any(fnmatch.fnmatch(run["run_id"], run_id_pattern) for run_id_pattern in args.run)]
 
+    run_order = args.run_order or defaults.get("run_order", "as-listed")
+    system_order = args.system_order or defaults.get("system_order", "as-listed")
+    order_seed = args.order_seed if args.order_seed is not None else int(defaults.get("order_seed", 0))
+    runs = shuffle_run_order(runs, run_order, system_order, order_seed)
+    if run_order != "as-listed" or system_order != "as-listed":
+        log(f"run_order={run_order} system_order={system_order} order_seed={order_seed}")
+
     if args.list or not runs:
         for run in runs:
-            print(f"{run['experiment']:<24} {run['run_id']:<40} {json.dumps(run['params'], sort_keys=True)}")
-        print(f"\n{len(runs)} run(s)")
+            print(f"{run['order_index']:>4} {run['experiment']:<24} {run['run_id']:<40} "
+                  f"{'+'.join(run['systems']):<28} {json.dumps(run['params'], sort_keys=True)}")
+        print(f"\n{len(runs)} run(s)  [run_order={run_order} system_order={system_order} order_seed={order_seed}]")
         return 0
 
    # check if another simulation is still running

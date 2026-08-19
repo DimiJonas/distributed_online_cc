@@ -30,17 +30,19 @@ node_bin = "target/release/node"
 python = "python3.11"                   # at least python3.11 needed for tomllib
 send_script = "send_event_stream.py"
 compare_script = "compare_results.py"
-
-rust_log = "warn"         # log level for stdout for the node process
-rust_log_file = "warn"    # log level for the log file written by the node process
-
-resource_interval_s = 0.25    # /proc sampling interval
-netem_dev = "lo"              # which network device the netem qdisc is applied to
-netem_sudo = true             # applies a artificial RTT. make it work with with passwordless sudo for tc: sudo visudo -f /etc/sudoers.d/cc-netem << "username ALL=(root) NOPASSWD: /usr/sbin/tc"
-node_start_stagger_s = 0.05   # time between the start of the nodes to avoid a huge load of tcp channel setups at once
-ready_timeout_s = 30          # wait for this period until starting the simulation run (wait for system startup)
-between_systems_s = 5         # wait for this period between system change (tear down first and bring up second) (dcentralized and central one after another)
-send_timeout_s = 7200         # max time the send_event_stream.py script is allowed to run (7200s=120m=2h)
+rust_log = "warn"                       # log level for stdout for the node process
+rust_log_file = "warn"                  # log level for the log file written by the node process
+resource_interval_s = 0.25              # /proc sampling interval
+netem_dev = "lo"                        # which network device the netem qdisc is applied to
+netem_sudo = true                       # applies a artificial RTT. make it work with with passwordless sudo for tc: sudo visudo -f /etc/sudoers.d/cc-netem << "username ALL=(root) NOPASSWD: /usr/sbin/tc"
+node_start_stagger_s = 0.05             # time between the start of the nodes to avoid a huge load of tcp channel setups at once
+ready_timeout_s = 30                    # wait for this period until starting the simulation run (wait for system startup)
+stop_grace_s = 15                       # SIGTERM grace period before SIGKILL - should exceed (500ms + SHUTDOWN_TIMEOUT(10s))
+between_systems_s = 5                   # wait for this period between system change (tear down first and bring up second) (dcentralized and central one after another)
+send_timeout_s = 7200                   # max time the send_event_stream.py script is allowed to run (7200s=120m=2h)
+run_order = "shuffle"                   # shuffle the order of the runs to rule out order based differences
+system_order = "shuffle"                # shuffle the order in which the 2 systems are simulated to rule out order based differences/advantages
+order_seed = 29                         # seed for the order shuffle to make it reproducible
 
 [defaults.params]
 catalog = "default"               # the default catalog is the synthetic catalog for the scalability runs (see gen-config.rs)
