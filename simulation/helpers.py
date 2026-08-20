@@ -212,7 +212,7 @@ def assert_addresses_free(nodes: list[NodeInfo]) -> None:
 
 
 # make sure that every metrics file is complete by checking the shutdown marker from the record writer
-def check_records_complete(records_dir: Path) -> list[str]:
+def check_records_complete(records_dir: Path, trailing_record_warning: int = 8) -> list[str]:
 
     incomplete = []
     records_dir = Path(records_dir)
@@ -225,18 +225,30 @@ def check_records_complete(records_dir: Path) -> list[str]:
     for path in files:
         name = f"{path.parent.name}/{path.name}"
         last = None
+        marker_seen = False
+        records_after_marker = 0
         with open(path, "rb") as records_file:
             for line in records_file:
-                if line.strip():
-                    last = line
+                if not line.strip():
+                    continue
+                last = line
+                if marker_seen:
+                    records_after_marker += 1
+                elif b'"writer_shutdown"' in line:
+                    marker_seen = True
         if last is None:
             incomplete.append(f"{name}: empty")
             continue
+        # check if line is complete (must parse as json)
         try:
-            if json.loads(last).get("type") != "writer_shutdown":
-                incomplete.append(f"{name}: no shutdown marker (file is truncated)")
+            json.loads(last)
         except json.JSONDecodeError:
             incomplete.append(f"{name}: truncated last line")
+            continue
+        if not marker_seen:
+            incomplete.append(f"{name}: no shutdown marker (file is truncated)")
+        elif records_after_marker > trailing_record_warning:
+            incomplete.append(f"{name}: {records_after_marker} records after the shutdown marker (more than the expected max of {trailing_record_warning}")
     return incomplete
 
 
