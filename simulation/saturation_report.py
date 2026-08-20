@@ -41,6 +41,14 @@ from pathlib import Path
 
 SYSTEMS = ("decentralized", "central")
 
+# sink should be excluded from cpu
+INFRA_ROLES = ("sink",)
+
+# sink queue depth should be excluded from system saturation
+INFRA_QUEUES = ("result_sink_q",)
+
+ALL_QUEUES = ("event_q", "loopback_q", "result_sink_q", "gossip_out_q", "gossip_in_q")
+
 # the pacer summary line: "rate=8e+03/s (target) 7.75e+03/s (effective) elapsed=9.91s late=4417 max_lag=2.5ms resyncs=626"
 RE_TARGET = re.compile(r"rate=([\d.e+-]+)/s \(target\)")
 RE_EFFECTIVE = re.compile(r"([\d.e+-]+)/s \(effective\)")
@@ -144,8 +152,8 @@ def parse_send_log(run_dir: Path, system: str) -> dict:
     }
 
 
-# parse /proc samples from resources/<system>.json
-def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None) -> dict:
+# parse /proc samples from resources/<system>.jsonl
+def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None, infra_roles: tuple[str, ...] = INFRA_ROLES) -> dict:
 
     path = run_dir / "resources" / f"{system}.jsonl"
     if not path.exists():
@@ -170,8 +178,7 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None) 
         return {}
     total_ticks = host[-1]["cpu_total_ticks"] - host[0]["cpu_total_ticks"]
     idle_ticks = host[-1]["cpu_idle_ticks"] - host[0]["cpu_idle_ticks"]
-    resource_stats: dict = {"host_busy_pct": 100 * (1 - idle_ticks / total_ticks) if total_ticks else None,
-                 "window_s": wallclock_time}
+    resource_stats: dict = {"host_busy_pct": 100 * (1 - idle_ticks / total_ticks) if total_ticks else None, "window_s": wallclock_time}
 
     per_group: dict[str, list[tuple[float, int, dict]]] = defaultdict(list)
     for pid, samples in procs.items():
@@ -180,85 +187,135 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None) 
         used = ((samples[-1]["utime_ticks"] + samples[-1]["stime_ticks"])
                 - (samples[0]["utime_ticks"] + samples[0]["stime_ticks"]))
         cpu = 100 * (used / clock_tick) / wallclock_time
-        rss = max(s.get("rss_kb", 0) for s in samples)
-        per_group[meta[pid]["group"]].append((cpu, rss, meta[pid]))
+        rss = max(sample.get("rss_kb", 0) for sample in samples)
+        group = meta[pid]["group"]
+        if group == "system" and meta[pid]["role"] in infra_roles:
+            group = "infra"
+        per_group[group].append((cpu, rss, meta[pid]))
 
     system_procs = per_group.get("system", [])
     if system_procs:
-        system_procs.sort(key=lambda x: -x[0])
+        system_procs.sort(key=lambda entry: -entry[0])
         busiest = system_procs[0]
         resource_stats["sys_cpu_sum_pct"] = sum(cpu_pct for cpu_pct, _, _ in system_procs)
         resource_stats["sys_cpu_max_pct"] = busiest[0]
         resource_stats["sys_cpu_max_node"] = f"{busiest[2]['role']}/{busiest[2]['node_id']}"
-        resource_stats["sys_rss_sum_mb"] = sum(rss_mb for _, rss_mb, _ in system_procs) / 1024
-        resource_stats["sys_rss_max_mb"] = max(rss_mb for _, rss_mb, _ in system_procs) / 1024
+        resource_stats["sys_rss_sum_mb"] = sum(rss_kb for _, rss_kb, _ in system_procs) / 1024
+        resource_stats["sys_rss_max_mb"] = max(rss_kb for _, rss_kb, _ in system_procs) / 1024
         resource_stats["sys_processes"] = len(system_procs)
 
-    harness = per_group.get("harness", [])
-    if harness:
-        sender = max(harness, key=lambda x: x[0])
+    infra_procs = per_group.get("infra", [])
+    if infra_procs:
+        busiest_infra = max(infra_procs, key=lambda entry: entry[0])
+        resource_stats["infra_cpu_sum_pct"] = sum(cpu_pct for cpu_pct, _, _ in infra_procs)
+        resource_stats["infra_cpu_max_pct"] = busiest_infra[0]
+        resource_stats["infra_cpu_max_node"] = f"{busiest_infra[2]['role']}/{busiest_infra[2]['node_id']}"
+        resource_stats["infra_rss_sum_mb"] = sum(rss_kb for _, rss_kb, _ in infra_procs) / 1024
+
+    tooling = per_group.get("tooling", [])
+    if tooling:
+        sender = max(tooling, key=lambda entry: entry[0])
         resource_stats["sender_cpu_pct"] = sender[0]
         resource_stats["sender_rss_mb"] = sender[1] / 1024
     return resource_stats
 
 
 # parse written records (queue depths, message drops) from records/<system>/node-*.jsonl
-def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None) -> dict:
+def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, roles_by_node: dict[int, str] | None = None, 
+                  infra_roles: tuple[str, ...] = INFRA_ROLES, infra_queues: tuple[str, ...] = INFRA_QUEUES) -> dict:
 
     records_dir = run_dir / "records" / system
     record_files = sorted(records_dir.glob("node-*.jsonl")) if records_dir.exists() else []
     if not record_files:
         return {"records_present": False}
+    roles_by_node = roles_by_node or {}
 
-    queues = ("event_q", "loopback_q", "result_sink_q", "gossip_out_q", "gossip_in_q")
-    peak: dict[str, float] = {}
-    capacity: dict[str, int] = {}
-    worst_node: dict[str, str] = {}
+    # (node_id, queue) -> peak depth / capacity
+    peak: dict[tuple[int, str], int] = {}
+    capacity: dict[tuple[int, str], int] = {}
     drops: dict[str, int] = defaultdict(int)
     incomplete: list[str] = []
+    dequeue_depths: list[int] = []
 
     for path in record_files:
-        last_type = None
+        try:
+            node_id = int(path.stem.split("-")[-1])
+        except ValueError:
+            node_id = -1
+        marker_seen = False
         for row in read_jsonl(path):
-            last_type = row.get("type")
+            if row.get("type") == "writer_shutdown":
+                marker_seen = True
             wallclock_time = row.get("timestamp_wallclock_us")
             if window and wallclock_time is not None and not (window[0] <= wallclock_time <= window[1]):
                 continue
             kind = row.get("type")
             if kind == "queues":
-                for queue in queues:
+                for queue in ALL_QUEUES:
                     value = row.get(queue)
                     if not value:
                         continue
                     # [current fill, max since last report, max capacity]
-                    if value[1] > peak.get(queue, -1):
-                        peak[queue] = value[1]
-                        worst_node[queue] = path.stem
-                    capacity[queue] = value[2]
+                    key = (node_id, queue)
+                    if value[1] > peak.get(key, -1):
+                        peak[key] = value[1]
+                    capacity[key] = value[2]
+            elif kind == "event_dequeue":
+                depth = row.get("q_length")
+                if depth is not None:
+                    dequeue_depths.append(depth)
             elif kind == "message_drop":
                 drops[row.get("reason") or "unknown"] += 1
-        if last_type != "writer_shutdown":
+        if not marker_seen:
             incomplete.append(path.name)
 
-    records_stats: dict = {"records_present": True, "record_files": len(record_files), "incomplete_record_files": incomplete, 
+    records_stats: dict = {"records_present": True, "record_files": len(record_files),
+                           "incomplete_record_files": incomplete,
                            "message_drops": sum(drops.values()), "drop_reasons": dict(drops)}
-    worst_fill = 0.0
-    for queue in queues:
-        if queue not in peak:
+
+    # worst fill per queue across nodes, and the overall worst that counts as a saturation signal
+    signal_fill = 0.0
+    signal_queue = None
+    signal_node = None
+    for queue in ALL_QUEUES:
+        entries = [(node_id, peak[(node_id, queue)], capacity[(node_id, queue)])
+                   for (node_id, q) in peak if q == queue]
+        if not entries:
             continue
-        cap = capacity.get(queue) or 0
-        fill = peak[queue] / cap if cap else 0.0
-        records_stats[f"{queue}_peak"] = peak[queue]
-        records_stats[f"{queue}_capacity"] = cap
-        records_stats[f"{queue}_fill"] = fill
-        records_stats[f"{queue}_worst_node"] = worst_node[queue]
-        worst_fill = max(worst_fill, fill)
-    records_stats["queue_fill_max"] = worst_fill
+        fills = [(depth / cap if cap else 0.0, node_id, depth, cap) for node_id, depth, cap in entries]
+        worst = max(fills)
+        records_stats[f"{queue}_peak"] = worst[2]
+        records_stats[f"{queue}_capacity"] = worst[3]
+        records_stats[f"{queue}_fill"] = worst[0]
+        records_stats[f"{queue}_worst_node"] = f"node-{worst[1]}"
+        # infra queues and infra nodes are measured but never used as a saturation signal
+        if queue in infra_queues:
+            continue
+        signal_fills = [entry for entry in fills
+                        if roles_by_node.get(entry[1]) not in infra_roles]
+        if not signal_fills:
+            continue
+        worst_signal = max(signal_fills)
+        if worst_signal[0] > signal_fill:
+            signal_fill, signal_queue, signal_node = worst_signal[0], queue, f"node-{worst_signal[1]}"
+    records_stats["queue_fill_max"] = signal_fill
+    records_stats["queue_fill_max_queue"] = signal_queue
+    records_stats["queue_fill_max_node"] = signal_node
+    records_stats["queue_signal_excludes"] = {"roles": list(infra_roles), "queues": list(infra_queues)}
+
+    if dequeue_depths:
+        dequeue_depths.sort()
+        records_stats["dequeue_events"] = len(dequeue_depths)
+        records_stats["dequeue_depth_p50"] = quantile(dequeue_depths, 0.50)
+        records_stats["dequeue_depth_p95"] = quantile(dequeue_depths, 0.95)
+        records_stats["dequeue_depth_p99"] = quantile(dequeue_depths, 0.99)
+        records_stats["dequeue_depth_max"] = dequeue_depths[-1]
+        records_stats["dequeue_backlog_frac"] = sum(1 for d in dequeue_depths if d > 0) / len(dequeue_depths)
     return records_stats
 
 
 # collect stats for a specific systems run
-def collect_point(run_dir: Path, system: str, x_param: str) -> dict | None:
+def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[str, ...] = INFRA_ROLES, infra_queues: tuple[str, ...] = INFRA_QUEUES) -> dict | None:
     run_file_path = run_dir / "run.json"
     if not run_file_path.exists():
         return None
@@ -297,8 +354,9 @@ def collect_point(run_dir: Path, system: str, x_param: str) -> dict | None:
     }
     point.update(parse_sender(run_dir, system))
     point.update(parse_send_log(run_dir, system))
-    point.update(parse_resources(run_dir, system, window))
-    point.update(parse_records(run_dir, system, window))
+    point.update(parse_resources(run_dir, system, window, infra_roles))
+    roles_by_node = {node["node_id"]: node.get("role") for node in (timeline.get("nodes") or []) if node.get("node_id") is not None}
+    point.update(parse_records(run_dir, system, window, roles_by_node, infra_roles, infra_queues))
 
     sources = []
     target = run_file.get("params", {}).get("rate")
@@ -357,9 +415,9 @@ def classify(point: dict, thresholds: dict) -> dict:
 
     fill = point.get("queue_fill_max")
     if fill is not None and fill > thresholds["queue_fill"]:
-        worst = max(((point.get(f"{queue}_fill") or 0, queue) for queue in
-                     ("event_q", "loopback_q", "result_sink_q", "gossip_out_q", "gossip_in_q")), default=(0, "?"))
-        reasons.append(f"peak {worst[1]} depth at {fill:.0%} of capacity > {thresholds['queue_fill']:.0%}")
+        reasons.append(f"peak {point.get('queue_fill_max_queue')} depth on "
+                       f"{point.get('queue_fill_max_node')} at {fill:.0%} of capacity "
+                       f"> {thresholds['queue_fill']:.0%}")
 
     cpu = point.get("sys_cpu_max_pct")
     if cpu is not None and cpu > thresholds["cpu_pct"]:
@@ -403,8 +461,8 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
     print(f"  {system.upper()}   ({len(points)} point(s), x = {x_param})")
     print("=" * 132)
     header = (f"{x_param:>8} {'eff/tgt':>8} {'eff/s':>8} {'blkd':>5} {'maxsnd':>7} "
-              f"{'late%':>6} {'resync':>7} {'qfill':>6} {'drops':>6} "
-              f"{'cpu_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sender':>7} {'rss_mb':>7} {'acc':>7}  verdict")
+              f"{'late%':>6} {'resync':>7} {'qfill':>6} {'bklog':>6} {'drops':>6} "
+              f"{'cpu_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>7}  verdict")
     print(header)
     print("-" * 132)
     for point in points:
@@ -423,12 +481,13 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
               f"{fmt(100 * point['late_frac'] if point.get('late_frac') is not None else None, '.1f'):>6} "
               f"{fmt(point.get('resyncs')):>7} "
               f"{fmt(point.get('queue_fill_max'), '.0%'):>6} "
+              f"{fmt(point.get('dequeue_backlog_frac'), '.1%'):>6} "
               f"{fmt(point.get('message_drops')):>6} "
               f"{fmt(point.get('sys_cpu_max_pct'), '.1f'):>8} "
               f"{fmt(point.get('sys_cpu_sum_pct'), '.1f'):>8} "
               f"{fmt(point.get('sys_cpu_max_node')):>16} "
+              f"{fmt(point.get('infra_cpu_max_pct'), '.0f'):>6} "
               f"{fmt(point.get('sender_cpu_pct'), '.1f'):>7} "
-              f"{fmt(point.get('sys_rss_sum_mb'), '.0f'):>7} "
               f"{fmt(point.get('accuracy'), '.4f'):>7}  {tag}")
         for reason in verdict["reasons"]:
             print(f"{'':>8}   -> {reason}")
@@ -543,6 +602,12 @@ def main() -> int:
     parser.add_argument("--queue-fill", type=float, default=0.25, help="saturated above this peak queue depth / capacity (default 0.25)")
     parser.add_argument("--blocked-frac", type=float, default=0.001, help="saturated above this fraction of sends blocked >1ms (default 0.001)")
     parser.add_argument("--max-send-ms", type=float, default=50.0, help="saturated above this single worst socket write in ms (default 50)")
+    parser.add_argument("--infra-roles", nargs="*", default=list(INFRA_ROLES),
+                        help="node roles that are evaluation scaffolding, not the system under test. measured and reported but excluded from every saturation signal "
+                             f"(default: {' '.join(INFRA_ROLES)}). pass nothing to include everything")
+    parser.add_argument("--infra-queues", nargs="*", default=list(INFRA_QUEUES),
+                        help="queues excluded from the queue saturation signal because their depth "
+                             f"reflects infrastructure, not load (default: {' '.join(INFRA_QUEUES)})")
     parser.add_argument("--include-invalid", action="store_true", help="keep runs that were SIGKILLed or short on results in the saturation search")
     parser.add_argument("--json", type=Path, default=None, help="write the full per point data here")
     parser.add_argument("--csv", type=Path, default=None, help="write a flat per point table here")
@@ -560,7 +625,7 @@ def main() -> int:
     points_by_system: dict[str, list[dict]] = {system: [] for system in args.systems}
     for run_directory in run_directories:
         for system in args.systems:
-            point = collect_point(run_directory, system, args.x_param)
+            point = collect_point(run_directory, system, args.x_param, tuple(args.infra_roles), tuple(args.infra_queues))
             if point is None:
                 continue
             point["_class"] = classify(point, thresholds)
@@ -577,6 +642,10 @@ def main() -> int:
     print(f"rule: saturated if blocked_sends>{args.blocked_frac:.2%} of sends OR max_send>{args.max_send_ms}ms "
           f"OR achieved/target<{args.achieved_ratio} OR any message_drop OR peak queue "
           f">{args.queue_fill:.0%} of capacity OR busiest process >{args.cpu_threshold}% of a core")
+    if args.infra_roles or args.infra_queues:
+        print(f"excluded from every signal: role(s) {args.infra_roles or 'none'}, "
+              f"queue(s) {args.infra_queues or 'none'} - evaluation scaffolding, still reported "
+              f"in the sink column and the json")
     if not any(point.get("records_present") for point in all_points):
         print("note: no records/ found - queue depth and message drop signals are UNAVAILABLE, the verdicts below rest on the pacer and cpu signals only")
 
