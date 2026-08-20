@@ -161,6 +161,7 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None, 
     host: list[dict] = []
     procs: dict[int, list[dict]] = defaultdict(list)
     meta: dict[int, dict] = {}
+    thread_samples: dict[int, list[dict]] = defaultdict(list)
     for row in read_jsonl(path):
         if window and not (window[0] <= row.get("t_us", 0) <= window[1]):
             continue
@@ -170,6 +171,8 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None, 
             procs[row["pid"]].append(row)
             meta[row["pid"]] = {"node_id": row.get("node_id"), "role": row.get("role"),
                                 "group": row.get("group", "system")}
+        elif row.get("kind") == "threads":
+            thread_samples[row["pid"]].append(row)
     if len(host) < 2:
         return {}
     clock_tick = host[0].get("clk_tck", 100)
@@ -212,12 +215,67 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None, 
         resource_stats["infra_cpu_max_node"] = f"{busiest_infra[2]['role']}/{busiest_infra[2]['node_id']}"
         resource_stats["infra_rss_sum_mb"] = sum(rss_kb for _, rss_kb, _ in infra_procs) / 1024
 
+    thread_stats = _busiest_thread(thread_samples, meta, clock_tick, infra_roles)
+    resource_stats.update(thread_stats)
+
     tooling = per_group.get("tooling", [])
     if tooling:
         sender = max(tooling, key=lambda entry: entry[0])
         resource_stats["sender_cpu_pct"] = sender[0]
         resource_stats["sender_rss_mb"] = sender[1] / 1024
     return resource_stats
+
+
+# cpu of every thread, reduced to the busiest one across the system processes
+def _busiest_thread(thread_samples: dict[int, list[dict]], meta: dict[int, dict], clock_tick: int, infra_roles: tuple[str, ...]) -> dict:
+
+    best = None # (sustained_pct, label, thread_name)
+    peak_samples: list[float] = []
+    peak_thread_count = 0
+    for pid, samples in thread_samples.items():
+        if len(samples) < 2:
+            continue
+        info = meta.get(pid) or {}
+        if info.get("group", "system") != "system" or info.get("role") in infra_roles:
+            continue
+        peak_thread_count = max(peak_thread_count, max(sample.get("thread_count", 0) for sample in samples))
+        label = f"{info.get('role')}/{info.get('node_id')}"
+
+        first_sample: dict[int, tuple[int, int, str]] = {}
+        last_sample: dict[int, tuple[int, int, str]] = {}
+        for sample in samples:
+            for thread_id, name, ticks in sample.get("threads", []):
+                if thread_id not in first_sample:
+                    first_sample[thread_id] = (sample["t_us"], ticks, name)
+                last_sample[thread_id] = (sample["t_us"], ticks, name)
+        for thread_id, (t0, ticks0, name) in first_sample.items():
+            t1, ticks1, _ = last_sample[thread_id]
+            span = (t1 - t0) / 1e6
+            if span <= 0:
+                continue
+            pct = 100 * ((ticks1 - ticks0) / clock_tick) / span
+            if best is None or pct > best[0]:
+                best = (pct, label, name)
+
+        # per interval values to report a peak
+        for earlier, later in zip(samples, samples[1:]):
+            span = (later["t_us"] - earlier["t_us"]) / 1e6
+            if span <= 0:
+                continue
+            before = {thread_id: ticks for thread_id, _, ticks in earlier.get("threads", [])}
+            interval_max = 0.0
+            for thread_id, _, ticks in later.get("threads", []):
+                if thread_id in before:
+                    interval_max = max(interval_max, 100 * ((ticks - before[thread_id]) / clock_tick) / span)
+            peak_samples.append(interval_max)
+
+    if best is None:
+        return {}
+    peak_samples.sort()
+    return {"sys_thread_max_pct": best[0], "sys_thread_max_node": best[1],
+            "sys_thread_max_name": best[2],
+            "sys_thread_peak_p95": quantile(peak_samples, 0.95),
+            "sys_thread_peak_count": peak_thread_count}
 
 
 # parse written records (queue depths, message drops) from records/<system>/node-*.jsonl
@@ -420,10 +478,17 @@ def classify(point: dict, thresholds: dict) -> dict:
                        f"{point.get('queue_fill_max_node')} at {fill:.0%} of capacity "
                        f"> {thresholds['queue_fill']:.0%}")
 
-    cpu = point.get("sys_cpu_max_pct")
-    if cpu is not None and cpu > thresholds["cpu_pct"]:
-        reasons.append(f"busiest process {point.get('sys_cpu_max_node')} at {cpu:.0f}% of a core "
-                       f"> {thresholds['cpu_pct']}%")
+    thread_cpu = point.get("sys_thread_max_pct")
+    process_cpu = point.get("sys_cpu_max_pct")
+    if thread_cpu is not None:
+        if thread_cpu > thresholds["cpu_pct"]:
+            reasons.append(f"busiest thread '{point.get('sys_thread_max_name')}' on "
+                           f"{point.get('sys_thread_max_node')} at {thread_cpu:.0f}% of a core "
+                           f"> {thresholds['cpu_pct']}% - a single task is running out of core")
+    elif process_cpu is not None and process_cpu > thresholds["cpu_pct"]:
+        reasons.append(f"busiest process {point.get('sys_cpu_max_node')} at {process_cpu:.0f}% of a "
+                       f"core > {thresholds['cpu_pct']}% (no per thread samples, so this is a "
+                       f"process total and NOT evidence that one task is saturated)")
 
     # not a saturation signal
     invalid: list[str] = []
@@ -452,6 +517,13 @@ def classify(point: dict, thresholds: dict) -> dict:
                             f"numbers here with care")
     elif sender_cpu is None and point.get("target_rate"):
         warnings.append("sender cpu not sampled (old run) - cannot rule out a load generator limit")
+    if thread_cpu is None and point.get("records_present") is not None:
+        warnings.append("no per thread samples - set resource_per_thread=true to find out whether a "
+                        "single task is the ceiling")
+    elif (thread_cpu is not None and process_cpu is not None
+          and process_cpu > thresholds["cpu_pct"] and thread_cpu < 60):
+        warnings.append(f"process at {process_cpu:.0f}% but busiest thread only {thread_cpu:.0f}% - "
+                        f"the work is spreading across threads, no single task is near its ceiling")
 
     return {"saturated": bool(reasons), "reasons": reasons, "invalid": invalid,
             "warnings": warnings, "tooling_limited": tooling_limited}
@@ -473,7 +545,7 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
     print("=" * 132)
     header = (f"{x_param:>8} {'eff/tgt':>8} {'eff/s':>8} {'blkd':>5} {'maxsnd':>7} "
               f"{'late%':>6} {'resync':>7} {'qfill':>6} {'bklog':>6} {'drops':>6} "
-              f"{'cpu_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>7}  verdict")
+              f"{'cpu_max':>8} {'thr_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>7}  verdict")
     print(header)
     print("-" * 132)
     for point in points:
@@ -497,6 +569,7 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
               f"{fmt(point.get('dequeue_backlog_frac'), '.1%'):>6} "
               f"{fmt(point.get('message_drops')):>6} "
               f"{fmt(point.get('sys_cpu_max_pct'), '.1f'):>8} "
+              f"{fmt(point.get('sys_thread_max_pct'), '.1f'):>8} "
               f"{fmt(point.get('sys_cpu_sum_pct'), '.1f'):>8} "
               f"{fmt(point.get('sys_cpu_max_node')):>16} "
               f"{fmt(point.get('infra_cpu_max_pct'), '.0f'):>6} "
@@ -597,12 +670,17 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         # a rudimentary linear extrapolation of cpu
         fit = extrapolate_cpu(usable)
         if fit:
-            print(f"    linear fit of the busiest process: cpu% = {fit['intercept']:.1f} + "
+            what = ("busiest thread" if fit.get("metric") == "sys_thread_max_pct" else "busiest process")
+            print(f"    linear fit of the {what}: cpu% = {fit['intercept']:.1f} + "
                   f"{fit['slope'] * 1000:.2f} per 1000 {x_parameter}  ->  100% of a core near "
                   f"{x_parameter} = {fit['x_at_100']:,.0f}")
-            print(f"    (extrapolation only, and 100% of one core is NOT the ceiling for a multi "
-                  f"threaded process - if cpu_max already exceeds 100% the work is spreading across "
-                  f"threads and this number means nothing. measure per thread instead)")
+            if fit.get("metric") == "sys_thread_max_pct":
+                print(f"    (extrapolation only, but a thread genuinely cannot exceed one core, so "
+                      f"this is a real ceiling rather than a threshold crossing)")
+            else:
+                print(f"    (extrapolation only, and 100% of one core is NOT the ceiling for a multi "
+                      f"threaded process - if cpu_max already exceeds 100% the work is spreading "
+                      f"across threads and this number means nothing. set resource_per_thread=true)")
             summary["cpu_fit"] = fit
     else:
         print(f"    saturation starts at {x_parameter} = {knee} and holds above it")
@@ -621,8 +699,8 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
 
 
 def extrapolate_cpu(points: list[dict]) -> dict | None:
-    pairs = [(point["x"], point["sys_cpu_max_pct"]) for point in points
-             if point.get("x") is not None and point.get("sys_cpu_max_pct") is not None]
+    key = ("sys_thread_max_pct" if any(point.get("sys_thread_max_pct") is not None for point in points) else "sys_cpu_max_pct")
+    pairs = [(point["x"], point[key]) for point in points if point.get("x") is not None and point.get(key) is not None]
     if len(pairs) < 3:
         return None
     xs = [x for x, _ in pairs]
@@ -635,7 +713,7 @@ def extrapolate_cpu(points: list[dict]) -> dict | None:
     intercept = my - slope * mx
     if slope <= 0:
         return None
-    return {"slope": slope, "intercept": intercept, "x_at_100": (100 - intercept) / slope}
+    return {"slope": slope, "intercept": intercept, "x_at_100": (100 - intercept) / slope, "metric": key}
 
 
 def main() -> int:

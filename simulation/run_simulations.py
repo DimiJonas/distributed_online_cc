@@ -411,7 +411,8 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         sampler = ProcSampler(
             targets={process.pid: {"node_id": node.node_id, "role": node.role, "group": GROUP_SYSTEM} for node, process in ((node, procs[node.node_id]) for node in nodes)},
             out_path=paths.resources / f"{system}.jsonl",
-            interval=float(plan["defaults"].get("resource_interval_s", 0.25)))
+            interval=float(plan["defaults"].get("resource_interval_s", 0.25)),
+            per_thread=bool(plan["defaults"].get("resource_per_thread", True)))
         sampler.start()
 
         # idle window: overlay + gossip run without any workload -> idle cost baseline

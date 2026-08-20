@@ -367,15 +367,15 @@ GROUP_SYSTEM = "system"
 GROUP_TOOLING = "tooling"
 
 
-# samples /proc periodically and writes it to a jsonl file.
 class ProcSampler(threading.Thread):
 
-    def __init__(self, targets: dict[int, dict], out_path: Path, interval: float = 0.25):
+    def __init__(self, targets: dict[int, dict], out_path: Path, interval: float = 0.25, per_thread: bool = True):
         super().__init__(daemon=True)
         self._lock = threading.Lock()
         self.targets = {pid: {"group": GROUP_SYSTEM, **meta} for pid, meta in targets.items()}
         self.out_path = out_path
         self.interval = interval
+        self.per_thread = per_thread
         self._shutdown = threading.Event()
 
     # register an extra process (e.g. the send script) after the sampler already started
@@ -404,7 +404,7 @@ class ProcSampler(threading.Thread):
         except OSError:
             return None
         try:
-            rest = data[data.rindex(")") + 2:].split()
+            rest = data[data.rindex(") ") + 2:].split()
             return {
                 "utime_ticks": int(rest[11]),
                 "stime_ticks": int(rest[12]),
@@ -414,30 +414,68 @@ class ProcSampler(threading.Thread):
         except (ValueError, IndexError):
             return None
 
+    # per thread cpu from /proc/<pid>/task/<tid>/stat because a node is a multi threaded tokio runtime and 
+    # the bottleneck is the single serialized event_q_processor task -> looking for busiest thread
+    @staticmethod
+    def _read_threads(pid: int) -> list[dict] | None:
+        try:
+            thread_ids = os.listdir(f"/proc/{pid}/task")
+        except OSError:
+            return None
+        threads = []
+        for thread_id in thread_ids:
+            try:
+                with open(f"/proc/{pid}/task/{thread_id}/stat") as thread_stat_file:
+                    data = thread_stat_file.read()
+            except OSError:
+                continue
+            try:
+                name = data[data.index("(") + 1:data.rindex(")")]
+                rest = data[data.rindex(") ") + 2:].split()
+                threads.append({"tid": int(thread_id), "name": name,
+                                "utime_ticks": int(rest[11]), "stime_ticks": int(rest[12])})
+            except (ValueError, IndexError):
+                continue
+        return threads or None
+
     @staticmethod
     def _read_host() -> dict | None:
         try:
-            with open("/proc/stat") as fh:
-                parts = fh.readline().split()
+            with open("/proc/stat") as process_stat_file:
+                parts = process_stat_file.readline().split()
         except OSError:
             return None
-        values = [int(v) for v in parts[1:]]
+        values = [int(value) for value in parts[1:]]
         return {"cpu_total_ticks": sum(values), "cpu_idle_ticks": values[3] + (values[4] if len(values) > 4 else 0)}
 
     def run(self) -> None:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.out_path, "w") as fh:
+        with open(self.out_path, "w") as resource_sampling_file:
             while not self._shutdown.is_set():
-                t = now_us()
+                time = now_us()
                 host = self._read_host()
                 if host:
-                    fh.write(json.dumps({"t_us": t, "kind": "host", **host, "clk_tck": CLK_TCK}) + "\n")
+                    resource_sampling_file.write(json.dumps({"t_us": time, "kind": "host", **host, "clk_tck": CLK_TCK}) + "\n")
                 for pid, meta in self._snapshot_targets():
                     sample = self._read_proc(pid)
                     if sample is None:
                         continue
-                    fh.write(json.dumps({"t_us": t, "kind": "proc", "pid": pid, **meta, **sample}) + "\n")
-                fh.flush()
+                    resource_sampling_file.write(json.dumps({"t_us": time, "kind": "proc", "pid": pid, **meta, **sample}) + "\n")
+                    if not self.per_thread:
+                        continue
+                    threads = self._read_threads(pid)
+                    if not threads:
+                        continue
+                    # one line per process (not per thread - would be too much sampling overhead)
+                    resource_sampling_file.write(json.dumps({
+                        "t_us": time, "kind": "threads", "pid": pid,
+                        "node_id": meta.get("node_id"), "role": meta.get("role"),
+                        "group": meta.get("group"), "thread_count": len(threads),
+                        "threads": [[thread["tid"], thread["name"],
+                                     thread["utime_ticks"] + thread["stime_ticks"]]
+                                    for thread in threads],
+                    }) + "\n")
+                resource_sampling_file.flush()
                 self._shutdown.wait(self.interval)
 
 
