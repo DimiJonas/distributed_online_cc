@@ -39,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
     CpuCap, cpu_cap_preexec, cpu_cap_prefix, parse_cpu_cap, ensure_cpu_cap_possible,
-    remove_quota_cgroups,
+    remove_quota_cgroups, worker_threads_for_node, worker_threads_info,
     DEFAULT_STOP_GRACE_S, GROUP_TOOLING, GROUP_SYSTEM, NodeInfo, ProcSampler, assert_addresses_free,
     binary_cmd, check_records_complete, checkpoint_wal, db_progress, kill_stale_nodes,
     load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
@@ -311,6 +311,11 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
 
     cpu_cap = parse_cpu_cap(params, plan["defaults"])
     cpu_cap_info = ensure_cpu_cap_possible(cpu_cap, len(nodes))
+
+    tokio_runtime_sizing = params.get("worker_threads", plan["defaults"].get("worker_threads", "cap"))
+    capped_nodes = sum(1 for node in nodes if node.role not in cpu_cap.exclude_roles)
+    cpu_cap_info.update(worker_threads_info(cpu_cap, tokio_runtime_sizing, capped_nodes))
+
     if cpu_cap.enabled:
         log(f"  cpu cap: {cpu_cap.mode}/{cpu_cap.scope} cores={cpu_cap.cores} "
             f"system_cpus={cpu_cap_info.get('system_cpus', '-')} "
@@ -319,6 +324,12 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
             log(f"    note: {cpu_cap_info['note']}")
         if cpu_cap_info.get("warning"):
             log(f"    !! {cpu_cap_info['warning']}")
+    log(f"  tokio workers: policy={cpu_cap_info['worker_threads_policy']} "
+        f"per_node={cpu_cap_info['worker_threads_per_node']} "
+        f"total={cpu_cap_info.get('worker_threads_total', '-')} "
+        f"over {capped_nodes} capped node(s)")
+    if cpu_cap_info.get("worker_threads_warning"):
+        log(f"    !! {cpu_cap_info['worker_threads_warning']}")
 
     procs: dict[int, subprocess.Popen] = {}
     log_dir = paths.logs(system).resolve()
@@ -326,11 +337,15 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     try:
         for index, node in enumerate(nodes):
             stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
+            node_env = dict(env)
+            workers = worker_threads_for_node(cpu_cap, tokio_runtime_sizing, capped_nodes, node.role)
+            if workers is not None:
+                node_env["CC_WORKER_THREADS"] = str(workers)
             proc = subprocess.Popen(
                 cpu_cap_prefix(cpu_cap, node.role, index)
                 + [str(node_bin), "-c", node.path, "-l", str(log_dir)],
                 preexec_fn=cpu_cap_preexec(cpu_cap, system, node.role, index),
-                cwd=str(repo), env={**os.environ, **env},
+                cwd=str(repo), env={**os.environ, **node_env},
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=stderr_file, start_new_session=True)
             procs[node.node_id] = proc
@@ -345,7 +360,7 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
 def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict,
                 sampler: ProcSampler | None = None, cap: CpuCap | None = None) -> dict:
     sender = repo / plan["defaults"].get("send_script", "send_event_stream.py")
-    sender_prefix = cpu_cap_prefix(cap, "sender", tooling=True) if cap else []
+    sender_prefix = cpu_cap_prefix(cap, "sender", 0, tooling=True) if cap else []
     send_stream_cmd = sender_prefix + [plan["defaults"].get("python", "python3.11"), str(sender),
            "--config-dir", str(paths.configs(system).resolve()),
            "--log", str((paths.send / f"{system}.log").resolve()),

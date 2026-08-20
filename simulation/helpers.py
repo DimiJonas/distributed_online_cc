@@ -375,13 +375,11 @@ def ensure_cpu_cap_possible(cap: CpuCap, node_count: int) -> dict:
         info["system_cpus"] = _cpu_list(system_cpus)
         if cap.scope == "system":
             info["system_cpus"] = _cpu_list(system_cpus)
-            info["tokio_worker_threads"] = len(system_cpus)
         else:
             per_node = int(cap.cores)
             info["node_cpu_pool"] = _cpu_list(system_cpus)
             info["cpus_per_node"] = per_node
             info["tooling_cores_reserved"] = cap.tooling_cores if cap.isolate_tooling else 0
-            info["tokio_worker_threads"] = per_node
             if per_node * node_count > len(system_cpus):
                 info["note"] = (f"{node_count} nodes x {per_node} cpu(s) exceeds the "
                                 f"{len(system_cpus)} in the pool, so node cpusets overlap - a per "
@@ -393,6 +391,58 @@ def ensure_cpu_cap_possible(cap: CpuCap, node_count: int) -> dict:
         info["cgroup_root"] = str(CGROUP_ROOT)
         info["warning"] = ("quota is enforced by freezing the cgroup for the rest of each 100ms "
                            "period once its budget is spent - do not use this for latency experiments")
+    return info
+
+
+# how many tokio worker threads a node process should build its runtime with
+def _usable_cpu_count(cap: "CpuCap") -> int:
+    available = sorted(os.sched_getaffinity(0))
+    if not cap.enabled:
+        return len(available)
+    if cap.mode == "cpuset":
+        if cap.scope == "node":
+            return max(1, int(cap.cores))
+        return len(_resolve_system_cpus(cap, available))
+    return max(1, int(round(cap.cores))) # quota
+
+
+def worker_threads_for_node(cap: "CpuCap", policy, capped_nodes: int, role: str = "") -> int | None:
+    if policy is None:
+        policy = "cap"
+    if isinstance(policy, str):
+        policy = policy.strip().lower()
+
+    if policy == "auto" or policy == "off":
+        return None
+    if isinstance(policy, (int, float)) or (isinstance(policy, str) and policy.isdigit()):
+        return max(1, int(policy))
+    if policy not in ("cap", "share"):
+        raise ValueError(f"worker_threads must be auto | cap | share | <int>, got {policy!r}")
+
+    if cap.enabled and role in cap.exclude_roles:
+        return None
+
+    usable = _usable_cpu_count(cap)
+    if policy == "cap":
+        return max(1, usable)
+    if cap.enabled and cap.scope == "node":
+        return max(1, usable)
+    return max(1, usable // max(1, capped_nodes))
+
+
+# summary for the run metadata (timeline["cpu_cap"])
+def worker_threads_info(cap: "CpuCap", policy, capped_nodes: int) -> dict:
+    resolved = worker_threads_for_node(cap, policy, capped_nodes)
+    info = {"worker_threads_policy": policy if policy is not None else "cap",
+            "worker_threads_per_node": resolved,
+            "capped_nodes": capped_nodes,
+            "usable_cpus_per_node": _usable_cpu_count(cap)}
+    if resolved is not None:
+        info["worker_threads_total"] = resolved * capped_nodes
+    if cap.enabled and cap.mode == "quota" and (policy in (None, "auto", "off")):
+        info["worker_threads_warning"] = (
+            "quota mode with worker_threads=auto: available_parallelism() does not see cpu.max, so "
+            "each node builds a full host sized runtime and is then throttled. use \"cap\" or \"share\"")
     return info
 
 
@@ -497,7 +547,7 @@ def _expand_cpu_list(spec: str) -> list[int]:
 
 
 # command prefix that applies the cap to one process
-def cpu_cap_prefix(cap: CpuCap, role: str, node_index: int, tooling: bool = False) -> list[str]:
+def cpu_cap_prefix(cap: CpuCap, role: str, node_index: int = 0, tooling: bool = False) -> list[str]:
     if not cap.enabled:
         return []
     available = sorted(os.sched_getaffinity(0))
@@ -746,9 +796,11 @@ def load_expected(path: str | Path) -> dict[tuple[str, str], str]:
 
 # add a netem RTT to the tcp messages through the local network stack (define a qdisc)
 def netem_apply(delay_ms: float, jitter_ms: float = 0.0, dev: str = "lo", sudo: bool = True) -> None:
-    cmd = (["sudo", "-n"] if sudo else []) + ["tc", "qdisc", "replace", "dev", dev, "root", "netem", "delay", f"{delay_ms}ms", "limit", "100000"]
+    cmd = (["sudo", "-n"] if sudo else []) + ["tc", "qdisc", "replace", "dev", dev, "root", "netem", "delay", f"{delay_ms}ms"]
     if jitter_ms:
         cmd += [f"{jitter_ms}ms", "distribution", "normal"]
+    # add increase limit of netem packet queue to not drop packets under load here
+    cmd += ["limit", "100000"]
     subprocess.run(cmd, check=True)
 
 
