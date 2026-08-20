@@ -32,7 +32,8 @@ send_script = "send_event_stream.py"
 compare_script = "compare_results.py"
 rust_log = "warn"                       # log level for stdout for the node process
 rust_log_file = "warn"                  # log level for the log file written by the node process
-resource_interval_s = 0.25              # /proc sampling interval
+resource_interval_s = 0.25              # /proc sampling interval (default: true)
+resource_per_thread = true              # includ threads per process in each /proc sample
 netem_dev = "lo"                        # which network device the netem qdisc is applied to
 netem_sudo = true                       # applies a artificial RTT. make it work with with passwordless sudo for tc: sudo visudo -f /etc/sudoers.d/cc-netem << "username ALL=(root) NOPASSWD: /usr/sbin/tc"
 node_start_stagger_s = 0.05             # time between the start of the nodes to avoid a huge load of tcp channel setups at once
@@ -108,6 +109,7 @@ seeds = [29]
 systems = ["decentralized", "central"]
   [experiment.grid]
   rate = [2000, 3000, 4000, 8000]
+  nodes = [2, 200]
   [experiment.params]
   cases = 10000
   violation_rate = 0.4

@@ -257,26 +257,37 @@ class Progress:
 
 # ---- send log ----
 
-# buffered jsonl writer to buffer the send log and write it later (for maximum send rate set the buffer bigger than the whole stream)
+# in memory jsonl writer
 class SendLog:
 
-    def __init__(self, path, flush_every=4096):
+    def __init__(self, path, flush_every=0, max_buffer=500_000):
         self.path = path
-        self.flush_every = max(1, flush_every)
+        self.flush_every = max(0, flush_every)
+        self.max_buffer = max(0, max_buffer)
         self.buffer = []
         self.written = 0
+        self.spills = 0
         self.send_log_file = open(path, "w")
         self.closed = False
 
+    @property
+    def deferred(self):
+        return self.flush_every == 0
+
     def write(self, record):
-        self.buffer.append(json.dumps(record))
-        if len(self.buffer) >= self.flush_every:
+        self.buffer.append(record)
+        if self.flush_every and len(self.buffer) >= self.flush_every:
+            self.flush()
+        elif self.max_buffer and len(self.buffer) >= self.max_buffer:
+            self.spills += 1
             self.flush()
 
-    def flush(self):
+    def flush(self, chunk=8192):
         if not self.buffer or self.closed:
             return
-        self.send_log_file.write("\n".join(self.buffer) + "\n")
+        for start in range(0, len(self.buffer), chunk):
+            part = self.buffer[start:start + chunk]
+            self.send_log_file.write("\n".join(json.dumps(record) for record in part) + "\n")
         self.send_log_file.flush()
         self.written += len(self.buffer)
         self.buffer.clear()
@@ -445,7 +456,10 @@ def main():
                     help="framed = one persistent length-prefixed connection per node (default), raw = one connection per event delimited by EOF")
     ap.add_argument("--preload", choices=["on", "off"], default="on", help="read every xes payload into memory before the pacing loop (default on)")
     ap.add_argument("--max-preload-bytes", type=int, default=2 * 1024 ** 3, help="give up on preloading above this many bytes (default 2 GiB)")
-    ap.add_argument("--log-flush-every", type=int, default=4096, help="buffer this many send log lines between writes (default 4096)")
+    ap.add_argument("--log-flush-every", type=int, default=0,
+                    help="write the send log to disk every N records. 0 (the default) keeps the whole log in memory and writes it once at the end")
+    ap.add_argument("--log-max-buffer", type=int, default=500_000,
+                    help="safety valve for --log-flush-every 0: write to disk if the in memory log exceeds this many records (default 500000). 0 = no limit")
     ap.add_argument("--send-timeout", type=float, default=60.0,
                     help="socket timeout for a single send. long on purpose: blocking here is backpressure, not an error (default 60s)")
     ap.add_argument("--log", default="send_log.jsonl")
@@ -490,7 +504,7 @@ def main():
         notify=prog.note,
     )
 
-    log = SendLog(args.log, flush_every=args.log_flush_every)
+    log = SendLog(args.log, flush_every=args.log_flush_every, max_buffer=args.log_max_buffer)
     pool = ConnectionPool(args.wire, send_timeout=args.send_timeout)
 
     def _terminate(signum, _frame):
@@ -500,7 +514,7 @@ def main():
         try:
             signal.signal(sig, _terminate)
         except (ValueError, AttributeError):
-            pass  # not on the main thread, or not a unix platform
+            pass
     atexit.register(log.close)
     atexit.register(pool.close_all)
 
@@ -579,7 +593,9 @@ def main():
             print(f"wire={args.wire} preload={'on' if preloaded else 'off'} "
                   f"blocked_sends(>1ms)={slow_sends} max_send={max_send_us / 1000:.1f}ms "
                   f"reconnects={pool.reconnects()}")
-        print(f"log -> {args.log} ({log.written} lines)")
+        log_mode = "deferred" if log.deferred else f"streamed every {log.flush_every}"
+        spilled = f", {log.spills} SPILL(S) mid stream - the buffer cap was hit" if log.spills else ""
+        print(f"log -> {args.log} ({log.written} lines, {log_mode}{spilled})")
 
     if interrupted:
         sys.exit(130)
