@@ -87,10 +87,10 @@ wait_for_response_timeout = "60s"       # timeout for when a peer waits for a re
 connect_timeout = "5s"                  # wait this long when trying to connect to a peer
 
 [baseline.result_sink]
-mpsc_channel_size = 8192        # internal mpsc channel to pass a message containing a result to the result sink
+mpsc_channel_size = 32768       # internal mpsc channel to pass a message containing a result to the result sink
 retry_interval = "5s"           # interval in which the sink tries to reconnect to the database
 retry_buffer_size = 32768       # the retry buffer buffers results while the connection to the database is gone
-max_batch_size = 512            # batch size for writing results to the database
+max_batch_size = 2048           # batch size for writing results to the database
 flush_interval = "100ms"        # max time until a batch is flushed to the database (if max batch size is not reached)
 
 [baseline.gossip]             

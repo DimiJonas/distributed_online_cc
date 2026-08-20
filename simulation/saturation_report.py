@@ -364,6 +364,14 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
     records_stats["queue_fill_max_node"] = signal_node
     records_stats["queue_signal_excludes"] = {"roles": list(infra_roles), "queues": list(infra_queues)}
 
+    infra_fills = [(records_stats.get(f"{queue}_fill") or 0.0, queue) for queue in infra_queues
+                   if f"{queue}_fill" in records_stats]
+    if infra_fills:
+        worst_infra = max(infra_fills)
+        records_stats["infra_queue_fill_max"] = worst_infra[0]
+        records_stats["infra_queue_fill_max_queue"] = worst_infra[1]
+        records_stats["infra_queue_fill_max_node"] = records_stats.get(f"{worst_infra[1]}_worst_node")
+
     if dequeue_depths:
         dequeue_depths.sort()
         records_stats["dequeue_events"] = len(dequeue_depths)
@@ -523,7 +531,13 @@ def classify(point: dict, thresholds: dict) -> dict:
     if thread_cpu is None and point.get("records_present") is not None:
         warnings.append("no per thread samples - set resource_per_thread=true to find out whether a "
                         "single task is the ceiling")
-    elif (thread_cpu is not None and process_cpu is not None
+    infra_fill = point.get("infra_queue_fill_max")
+    if infra_fill is not None and infra_fill >= thresholds["infra_queue_fill_warn"]:
+        warnings.append(f"{point.get('infra_queue_fill_max_queue')} on "
+                        f"{point.get('infra_queue_fill_max_node')} reached {infra_fill:.0%} of "
+                        f"capacity - evaluation scaffolding, excluded from the rule, but it can "
+                        f"backpressure into the system and confound everything above it")
+    if (thread_cpu is not None and process_cpu is not None
           and process_cpu > thresholds["cpu_pct"] and thread_cpu < 60):
         warnings.append(f"process at {process_cpu:.0f}% but busiest thread only {thread_cpu:.0f}% - "
                         f"the work is spreading across threads, no single task is near its ceiling")
@@ -613,12 +627,15 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
             knee = level
             break
     knee_index = levels.index(knee) if knee is not None else len(levels)
-    # a level that saturates in only a minority of replicates, on the unstressed side of the knee
-    outliers = [level for index, level in enumerate(levels)
-                if 0 < saturating_frac[level] < knee_frac and index < knee_index]
 
+    early_minority = sorted(level for index, level in enumerate(levels)
+                            if 0 < saturating_frac[level] < knee_frac and index < knee_index)
+    early_majority = sorted(level for index, level in enumerate(levels)
+                            if saturating_frac[level] >= knee_frac and index < knee_index)
+
+    limit_index = min([levels.index(level) for level in early_majority] + [knee_index])
     unsaturated = [level for index, level in enumerate(levels)
-                   if index < knee_index and not is_saturating[level]]
+                   if index < limit_index and not is_saturating[level]]
     sustainable = unsaturated[-1] if unsaturated else None
 
     tested_extreme = (max if x_direction == "increasing" else min)(
@@ -640,7 +657,8 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         "first_sustained_saturating_reasons": (
             sorted({reason for point in by_level[knee] for reason in point["_class"]["reasons"]})
             if knee is not None else []),
-        "isolated_saturating_x": outliers,
+        "isolated_saturating_x": early_minority,
+        "early_majority_saturating_x": early_majority,
         "highest_sustainable_x": sustainable,
         "highest_tested_x": tested_extreme,
         "highest_usable_x": usable_extreme,
@@ -669,9 +687,19 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
               f"(the sender ran short of cpu, so their throughput says nothing about the system):")
         for point in tooling_limited:
             print(f"         {point['run_id']}: {point['_class']['tooling_limited'][0]}")
-    if outliers:
-        print(f"    isolated saturating level(s) at {outliers} - a minority of replicates only, "
-              f"on the unstressed side of the knee. treated as noise, not as the onset.")
+    if early_minority:
+        print(f"    isolated saturating level(s) at {early_minority} - a minority of replicates "
+              f"only, on the unstressed side of the knee. treated as noise, not as the onset.")
+    if early_majority:
+        print(f"    !! {x_parameter} = {early_majority} saturated in a MAJORITY of replicates but "
+              f"recovered at higher levels - not the onset, but not noise either:")
+        for level in early_majority:
+            reasons = sorted({reason for point in by_level[level]
+                              for reason in point["_class"]["reasons"]})
+            count = sum(1 for point in by_level[level] if point["_class"]["saturated"])
+            print(f"         {level} ({count}/{len(by_level[level])}): {'; '.join(reasons) or '-'}")
+        print(f"       the sustainable value below does NOT step over these. investigate before "
+              f"treating anything above them as safe.")
 
     if knee is None:
         if x_direction == "increasing":
@@ -760,6 +788,9 @@ def main() -> int:
     parser.add_argument("--infra-roles", nargs="*", default=list(INFRA_ROLES),
                         help="node roles that are evaluation scaffolding, not the system under test. "
                              f"measured and reported but excluded from every saturation signal (default: {' '.join(INFRA_ROLES)}). pass nothing to include everything")
+    parser.add_argument("--infra-queue-fill-warn", type=float, default=0.9,
+                        help="warn when an excluded queue (the result sink) reaches this fill. it is never a saturation signal, but a full sink can backpressure into the "
+                             "system and confound the result (default 0.9)")
     parser.add_argument("--infra-queues", nargs="*", default=list(INFRA_QUEUES), help="queues excluded from the queue saturation signal because their depth "
                              f"reflects infrastructure, not load (default: {' '.join(INFRA_QUEUES)})")
     parser.add_argument("--include-invalid", action="store_true", help="keep runs that were SIGKILLed or short on results in the saturation search")
@@ -769,7 +800,8 @@ def main() -> int:
 
     thresholds = {"achieved_ratio": args.achieved_ratio, "cpu_pct": args.cpu_threshold,
                   "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
-                  "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold}
+                  "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold,
+                  "infra_queue_fill_warn": args.infra_queue_fill_warn}
 
     run_directories = sorted(entry for entry in args.experiment_dir.iterdir() if (entry / "run.json").exists()) \
         if args.experiment_dir.is_dir() else []
@@ -827,6 +859,27 @@ def main() -> int:
     for system in args.systems:
         if points_by_system[system]:
             print_system_table(system, points_by_system[system], args.x_param)
+
+    saturated_infra = [point for point in all_points
+                       if (point.get("infra_queue_fill_max") or 0) >= args.infra_queue_fill_warn]
+    if saturated_infra:
+        worst = max(saturated_infra, key=lambda point: point["infra_queue_fill_max"])
+        levels_hit = sorted({point["x"] for point in saturated_infra if point.get("x") is not None})
+        print()
+        print("=" * 132)
+        print(f"  !! CONFOUND: {worst['infra_queue_fill_max_queue']} reached "
+              f">= {args.infra_queue_fill_warn:.0%} of capacity in {len(saturated_infra)} of "
+              f"{len(all_points)} point(s), at {args.x_param} {levels_hit}")
+        print(f"     the result sink is evaluation scaffolding and is excluded from every saturation "
+              f"signal, but a full sink queue")
+        print(f"     backpressures through tcp into the nodes' result emitters and can stall the "
+              f"event processors being measured.")
+        if len(levels_hit) == len({point.get("x") for point in all_points}):
+            print(f"     it is full at EVERY level tested, including the lowest - so this is not a "
+                  f"consequence of load. raise the sink's")
+            print(f"     mpsc_channel_size / max_batch_size and re run before trusting any knee "
+                  f"found here.")
+        print("=" * 132)
 
     print()
     print("=" * 132)
