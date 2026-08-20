@@ -312,9 +312,9 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     cpu_cap = parse_cpu_cap(params, plan["defaults"])
     cpu_cap_info = ensure_cpu_cap_possible(cpu_cap, len(nodes))
 
-    tokio_runtime_sizing = params.get("worker_threads", plan["defaults"].get("worker_threads", "cap"))
-    capped_nodes = sum(1 for node in nodes if node.role not in cpu_cap.exclude_roles)
-    cpu_cap_info.update(worker_threads_info(cpu_cap, tokio_runtime_sizing, capped_nodes))
+    tokio_runtime_sizing = params.get("worker_threads", plan["defaults"].get("worker_threads"))
+    worker_nodes = sum(1 for node in nodes if node.role not in cpu_cap.exclude_roles)
+    cpu_cap_info.update(worker_threads_info(cpu_cap, tokio_runtime_sizing, worker_nodes))
 
     if cpu_cap.enabled:
         log(f"  cpu cap: {cpu_cap.mode}/{cpu_cap.scope} cores={cpu_cap.cores} "
@@ -327,7 +327,8 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     log(f"  tokio workers: policy={cpu_cap_info['worker_threads_policy']} "
         f"per_node={cpu_cap_info['worker_threads_per_node']} "
         f"total={cpu_cap_info.get('worker_threads_total', '-')} "
-        f"over {capped_nodes} capped node(s)")
+        f"over {worker_nodes} node(s) "
+        f"(usable cpus/node={cpu_cap_info['usable_cpus_per_node']}, cpu cap {cpu_cap.mode})")
     if cpu_cap_info.get("worker_threads_warning"):
         log(f"    !! {cpu_cap_info['worker_threads_warning']}")
 
@@ -338,7 +339,7 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
         for index, node in enumerate(nodes):
             stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
             node_env = dict(env)
-            workers = worker_threads_for_node(cpu_cap, tokio_runtime_sizing, capped_nodes, node.role)
+            workers = worker_threads_for_node(cpu_cap, tokio_runtime_sizing, worker_nodes, node.role)
             if workers is not None:
                 node_env["CC_WORKER_THREADS"] = str(workers)
             proc = subprocess.Popen(

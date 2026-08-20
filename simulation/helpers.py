@@ -394,6 +394,9 @@ def ensure_cpu_cap_possible(cap: CpuCap, node_count: int) -> dict:
     return info
 
 
+DEFAULT_WORKER_POLICY = "per-cpu"
+
+
 # how many tokio worker threads a node process should build its runtime with
 def _usable_cpu_count(cap: "CpuCap") -> int:
     available = sorted(os.sched_getaffinity(0))
@@ -406,40 +409,43 @@ def _usable_cpu_count(cap: "CpuCap") -> int:
     return max(1, int(round(cap.cores))) # quota
 
 
-def worker_threads_for_node(cap: "CpuCap", policy, capped_nodes: int, role: str = "") -> int | None:
+# resolved per node so roles excluded from the cap (the sink) keep the binary's own default
+def worker_threads_for_node(cap: "CpuCap", policy, node_count: int, role: str = "") -> int | None:
     if policy is None:
-        policy = "cap"
+        policy = DEFAULT_WORKER_POLICY
     if isinstance(policy, str):
         policy = policy.strip().lower()
+        policy = {"cap": "per-cpu", "percpu": "per-cpu"}.get(policy, policy)  # accepted aliases
 
-    if policy == "auto" or policy == "off":
+    if policy in ("auto", "off"):
         return None
     if isinstance(policy, (int, float)) or (isinstance(policy, str) and policy.isdigit()):
         return max(1, int(policy))
-    if policy not in ("cap", "share"):
-        raise ValueError(f"worker_threads must be auto | cap | share | <int>, got {policy!r}")
+    if policy not in ("per-cpu", "share"):
+        raise ValueError(f"worker_threads must be auto | per-cpu | share | <int>, got {policy!r}")
 
     if cap.enabled and role in cap.exclude_roles:
         return None
 
     usable = _usable_cpu_count(cap)
-    if policy == "cap":
+    if policy == "per-cpu":
         return max(1, usable)
     if cap.enabled and cap.scope == "node":
-        return max(1, usable)
-    return max(1, usable // max(1, capped_nodes))
+        return max(1, usable)  # each node already owns its own cpus, nothing to share
+    return max(1, usable // max(1, node_count))
 
 
 # summary for the run metadata (timeline["cpu_cap"])
-def worker_threads_info(cap: "CpuCap", policy, capped_nodes: int) -> dict:
-    resolved = worker_threads_for_node(cap, policy, capped_nodes)
-    info = {"worker_threads_policy": policy if policy is not None else "cap",
+def worker_threads_info(cap: "CpuCap", policy, node_count: int) -> dict:
+    resolved = worker_threads_for_node(cap, policy, node_count)
+    info = {"worker_threads_policy": policy if policy is not None else DEFAULT_WORKER_POLICY,
             "worker_threads_per_node": resolved,
-            "capped_nodes": capped_nodes,
-            "usable_cpus_per_node": _usable_cpu_count(cap)}
+            "worker_threads_nodes": node_count,
+            "usable_cpus_per_node": _usable_cpu_count(cap),
+            "cpu_cap_mode": cap.mode}
     if resolved is not None:
-        info["worker_threads_total"] = resolved * capped_nodes
-    if cap.enabled and cap.mode == "quota" and (policy in (None, "auto", "off")):
+        info["worker_threads_total"] = resolved * node_count
+    if cap.enabled and cap.mode == "quota" and policy in (None, "auto", "off"):
         info["worker_threads_warning"] = (
             "quota mode with worker_threads=auto: available_parallelism() does not see cpu.max, so "
             "each node builds a full host sized runtime and is then throttled. use \"cap\" or \"share\"")
