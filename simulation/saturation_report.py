@@ -11,7 +11,7 @@ it reads per run and per system:
   run.json               validity, settlement, pairs vs expected, timeline windows
   send/<system>.stdout   pacer summary: effective rate, late, resyncs, blocked_sends, max_send
   send/<system>.log      achieved rate per wall clock second, inter send gap quantiles
-  resources/<system>     cpu and rss per process, split into the system under test and the harness
+  resources/<system>     cpu and rss per process, split into the system under test and the tooling
   records/<system>/      queue depths and message drops 
   compare_results.json   correctness of the final verdicts
 
@@ -407,7 +407,8 @@ def classify(point: dict, thresholds: dict) -> dict:
         reasons.append(f"max_send={max_send:.1f}ms > {thresholds['max_send_ms']}ms - a node stopped reading its socket long enough to block the sender")
 
     ratio = point.get("achieved_ratio")
-    if ratio is not None and ratio < thresholds["achieved_ratio"]:
+    achieved_ratio_fired = ratio is not None and ratio < thresholds["achieved_ratio"]
+    if achieved_ratio_fired:
         reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}")
 
     if point.get("message_drops"):
@@ -438,12 +439,22 @@ def classify(point: dict, thresholds: dict) -> dict:
     # check if the sender is the limit
     warnings: list[str] = []
     sender_cpu = point.get("sender_cpu_pct")
-    if sender_cpu is not None and sender_cpu > thresholds["cpu_pct"]:
-        warnings.append(f"SENDER at {sender_cpu:.0f}% of a core - the load generator may be the limit here, not the system under test")
+    # check if the tooling (sender) is reaching its limit
+    tooling_limited: list[str] = []
+    if sender_cpu is not None and sender_cpu > thresholds["sender_cpu_pct"]:
+        if achieved_ratio_fired and len(reasons) == 1:
+            tooling_limited.append(
+                f"the only saturation signal is achieved/target={ratio:.3f}, and the SENDER was at "
+                f"{sender_cpu:.0f}% of a core (> {thresholds['sender_cpu_pct']}%) - this is a load "
+                f"generator limit, not a system limit")
+        else:
+            warnings.append(f"SENDER at {sender_cpu:.0f}% of a core - interpret the throughput "
+                            f"numbers here with care")
     elif sender_cpu is None and point.get("target_rate"):
         warnings.append("sender cpu not sampled (old run) - cannot rule out a load generator limit")
 
-    return {"saturated": bool(reasons), "reasons": reasons, "invalid": invalid, "warnings": warnings}
+    return {"saturated": bool(reasons), "reasons": reasons, "invalid": invalid,
+            "warnings": warnings, "tooling_limited": tooling_limited}
 
 
 def fmt(value, spec="", dash="-"):
@@ -469,6 +480,8 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
         verdict = point["_class"]
         if verdict["invalid"]:
             tag = "INVALID"
+        elif verdict.get("tooling_limited"):
+            tag = "TOOLING-LIMITED"
         elif verdict["saturated"]:
             tag = "SATURATED"
         else:
@@ -493,83 +506,116 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
             print(f"{'':>8}   -> {reason}")
         for reason in verdict["invalid"]:
             print(f"{'':>8}   !! {reason}")
+        for reason in verdict.get("tooling_limited", []):
+            print(f"{'':>8}   ~~ {reason}")
         for warning in verdict["warnings"]:
             print(f"{'':>8}   ?? {warning}")
 
 
-def summarise_system(system: str, points: list[dict], x_param: str) -> dict:
-    usable = [point for point in points if not point["_class"]["invalid"] and point.get("x") is not None]
-    usable.sort(key=lambda point: point["x"])
-    saturating = [point for point in usable if point["_class"]["saturated"]]
+# aggregate the replicates at each x, then look for the knee ACROSS x values
+def summarise_system(system: str, points: list[dict], x_parameter: str, knee_frac: float = 0.5) -> dict:
 
-    # find sustained saturation
-    first_sustained = None
-    for index, point in enumerate(usable):
-        if point["_class"]["saturated"] and all(usable_point["_class"]["saturated"] for usable_point in usable[index:]):
-            first_sustained = point
+    usable = [point for point in points
+              if not point["_class"]["invalid"] and not point["_class"]["tooling_limited"]
+              and point.get("x") is not None]
+    tooling_limited = [point for point in points if point["_class"]["tooling_limited"]]
+    invalid_points = [point["run_id"] for point in points if point["_class"]["invalid"]]
+
+    by_x: dict[float, list[dict]] = {}
+    for point in usable:
+        by_x.setdefault(point["x"], []).append(point)
+    levels = sorted(by_x)
+    saturating_frac = {x_param: sum(1 for point in by_x[x_param] if point["_class"]["saturated"]) / len(by_x[x_param])
+                       for x_param in levels}
+    is_saturating = {x_param: saturating_frac[x_param] >= knee_frac for x_param in levels}
+
+    knee = None
+    for index, x_param in enumerate(levels):
+        if is_saturating[x_param] and all(is_saturating[higher] for higher in levels[index:]):
+            knee = x_param
             break
-    outliers = [saturating_point for saturating_point in saturating if first_sustained is None or saturating_point["x"] < first_sustained["x"]]
+    # an x that saturates only in a minority of replicates, below the knee: noise, not the onset
+    outliers = [x_param for x_param in levels
+                if 0 < saturating_frac[x_param] < knee_frac and (knee is None or x_param < knee)]
 
     sustainable = None
-    if first_sustained is not None:
-        below = [point for point in usable if point["x"] < first_sustained["x"] and not point["_class"]["saturated"]]
-        sustainable = max((point["x"] for point in below), default=None)
-    elif usable:
-        sustainable = max(point["x"] for point in usable)
+    if knee is not None:
+        below = [x_param for x_param in levels if x_param < knee and not is_saturating[x_param]]
+        sustainable = max(below, default=None)
+    elif levels:
+        sustainable = max(levels)
 
-    invalid_points = [point["run_id"] for point in points if point["_class"]["invalid"]]
     tested_max = max((point["x"] for point in points if point.get("x") is not None), default=None)
-    usable_max = max((point["x"] for point in usable), default=None)
+    usable_max = max(levels, default=None)
 
     summary = {
         "system": system,
         "points": len(points),
         "usable_points": len(usable),
+        "levels": levels,
+        "replicates_per_level": {x_param: len(by_x[x_param]) for x_param in levels},
+        "saturating_fraction": saturating_frac,
+        "knee_frac": knee_frac,
         "invalid_points": invalid_points,
-        "first_sustained_saturating_x": first_sustained["x"] if first_sustained else None,
-        "first_sustained_saturating_reasons": first_sustained["_class"]["reasons"] if first_sustained else [],
-        "isolated_saturating_x": [p["x"] for p in outliers],
+        "tooling_limited_points": [point["run_id"] for point in tooling_limited],
+        "first_sustained_saturating_x": knee,
+        "first_sustained_saturating_reasons": (
+            sorted({reason for point in by_x[knee] for reason in point["_class"]["reasons"]})
+            if knee is not None else []),
+        "isolated_saturating_x": outliers,
         "highest_sustainable_x": sustainable,
         "highest_tested_x": tested_max,
         "highest_usable_x": usable_max,
-        "saturation_bracketed": first_sustained is not None,
+        "saturation_bracketed": knee is not None,
         "base_point_60pct": round(sustainable * 0.6) if sustainable else None,
     }
 
     print()
     print(f"  {system}:")
-    if not usable:
-        print("    no usable points - every run was invalid, fix those first")
+    if not levels:
+        print("    no usable points - every run was invalid or tooling limited, fix those first")
         return summary
+
+    print(f"    {x_parameter} levels and the share of replicates that saturated "
+          f"(a level counts as saturating at >= {knee_frac:.0%}):")
+    for x_param in levels:
+        mark = "SAT" if is_saturating[x_param] else "   "
+        count = sum(1 for p in by_x[x_param] if p["_class"]["saturated"])
+        print(f"      {x_param:>8}  {count}/{len(by_x[x_param])}  {mark}")
+
+    if tooling_limited:
+        print(f"    !! {len(tooling_limited)} point(s) EXCLUDED as load generator limited "
+              f"(the sender ran short of cpu, so their throughput says nothing about the system):")
+        for point in tooling_limited:
+            print(f"         {point['run_id']}: {point['_class']['tooling_limited'][0]}")
     if outliers:
-        print(f"    isolated saturating point(s) at {summary['isolated_saturating_x']} with healthy points "
-              f"above them - treated as outliers, not as the knee.")
-        print(f"    repeat those with more replicates before trusting or discarding them.")
-    if first_sustained is None:
-        print(f"    NOT SATURATED anywhere in the tested range. highest tested {x_param} = {sustainable}.")
+        print(f"    isolated saturating level(s) at {outliers} - a minority of replicates only, "
+              f"below the knee. treated as noise, not as the onset.")
+    if knee is None:
+        print(f"    NOT SATURATED anywhere in the tested range. highest usable {x_parameter} = {sustainable}.")
         print(f"    the saturation point is ABOVE the grid - extend it before reading a base point off this.")
         # a rudimentary linear extrapolation of cpu
         fit = extrapolate_cpu(usable)
         if fit:
             print(f"    linear fit of the busiest process: cpu% = {fit['intercept']:.1f} + "
-                  f"{fit['slope'] * 1000:.2f} per 1000 {x_param}  ->  100% of a core near "
-                  f"{x_param} = {fit['x_at_100']:,.0f}")
-            print(f"    (extrapolation only, and 100% of one core is not necessarily the ceiling for a "
-                  f"multi threaded process - treat it as where to aim the next grid)")
+                  f"{fit['slope'] * 1000:.2f} per 1000 {x_parameter}  ->  100% of a core near "
+                  f"{x_parameter} = {fit['x_at_100']:,.0f}")
+            print(f"    (extrapolation only, and 100% of one core is NOT the ceiling for a multi "
+                  f"threaded process - if cpu_max already exceeds 100% the work is spreading across "
+                  f"threads and this number means nothing. measure per thread instead)")
             summary["cpu_fit"] = fit
     else:
-        print(f"    saturation starts at {x_param} = {first_sustained['x']} and holds above it")
-        for reason in first_sustained["_class"]["reasons"]:
+        print(f"    saturation starts at {x_parameter} = {knee} and holds above it")
+        for reason in summary["first_sustained_saturating_reasons"]:
             print(f"      because: {reason}")
-        print(f"    highest sustainable {x_param} = {sustainable}")
+        print(f"    highest sustainable {x_parameter} = {sustainable}")
         if summary["base_point_60pct"]:
             print(f"    60% base point = {summary['base_point_60pct']}")
     if invalid_points:
         print(f"    !! {len(invalid_points)} invalid point(s) excluded: {invalid_points}")
         if usable_max is not None and tested_max is not None and usable_max < tested_max:
-            print(f"    !! the top of the grid ({tested_max}) is invalid, so the usable range only "
-                  f"reaches {usable_max}. re-run the invalid points before concluding anything about "
-                  f"the saturation point.")
+            print(f"    !! the top of the grid ({tested_max}) has no usable points, so the usable "
+                  f"range only reaches {usable_max}.")
             summary["saturation_bracketed"] = False
     return summary
 
@@ -602,19 +648,23 @@ def main() -> int:
     parser.add_argument("--queue-fill", type=float, default=0.25, help="saturated above this peak queue depth / capacity (default 0.25)")
     parser.add_argument("--blocked-frac", type=float, default=0.001, help="saturated above this fraction of sends blocked >1ms (default 0.001)")
     parser.add_argument("--max-send-ms", type=float, default=50.0, help="saturated above this single worst socket write in ms (default 50)")
+    parser.add_argument("--sender-cpu-threshold", type=float, default=60.0,
+                        help="above this sender cpu%% of one core, a lone achieved/target shortfall is attributed to the load generator rather than the system (default 60)")
+    parser.add_argument("--knee-frac", type=float, default=0.5,
+                        help="fraction of replicates at one x that must saturate for that x to count as saturating (default 0.5, i.e. a majority)")
     parser.add_argument("--infra-roles", nargs="*", default=list(INFRA_ROLES),
-                        help="node roles that are evaluation scaffolding, not the system under test. measured and reported but excluded from every saturation signal "
-                             f"(default: {' '.join(INFRA_ROLES)}). pass nothing to include everything")
-    parser.add_argument("--infra-queues", nargs="*", default=list(INFRA_QUEUES),
-                        help="queues excluded from the queue saturation signal because their depth "
+                        help="node roles that are evaluation scaffolding, not the system under test. "
+                             f"measured and reported but excluded from every saturation signal (default: {' '.join(INFRA_ROLES)}). pass nothing to include everything")
+    parser.add_argument("--infra-queues", nargs="*", default=list(INFRA_QUEUES), help="queues excluded from the queue saturation signal because their depth "
                              f"reflects infrastructure, not load (default: {' '.join(INFRA_QUEUES)})")
     parser.add_argument("--include-invalid", action="store_true", help="keep runs that were SIGKILLed or short on results in the saturation search")
     parser.add_argument("--json", type=Path, default=None, help="write the full per point data here")
     parser.add_argument("--csv", type=Path, default=None, help="write a flat per point table here")
     args = parser.parse_args()
 
-    thresholds = {"achieved_ratio": args.achieved_ratio, "cpu_pct": args.cpu_threshold, "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
-                  "max_send_ms": args.max_send_ms}
+    thresholds = {"achieved_ratio": args.achieved_ratio, "cpu_pct": args.cpu_threshold,
+                  "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
+                  "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold}
 
     run_directories = sorted(entry for entry in args.experiment_dir.iterdir() if (entry / "run.json").exists()) \
         if args.experiment_dir.is_dir() else []
@@ -677,7 +727,7 @@ def main() -> int:
     print("=" * 132)
     print("  SUMMARY PER SYSTEM")
     print("=" * 132)
-    summaries_by_system = {system: summarise_system(system, points_by_system[system], args.x_param)
+    summaries_by_system = {system: summarise_system(system, points_by_system[system], args.x_param, args.knee_frac)
                            for system in args.systems if points_by_system[system]}
 
     print()
