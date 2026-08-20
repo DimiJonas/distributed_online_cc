@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
 import re
+import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -310,6 +311,221 @@ def _signal_process(proc: subprocess.Popen, sig: int) -> None:
 # the shutdown of a node is 'sleep(500ms)' + SHUTDOWN_TIMEOUT (10s - see record_writer.rs)
 # the stop grace has to cover that period
 DEFAULT_STOP_GRACE_S = 15.0
+
+
+# cap the cpu resource in a run
+# 'cpuset' caps the amount of available cores
+# 'quote' caps the amount of cpu-time, but the kernel enforces it by freezing the processes for the rest of its 100ms intervals, which disturbs latency numbers
+@dataclass
+class CpuCap:
+    mode: str = "off"                 # off | cpuset | quota
+    scope: str = "system"             # 'system' cap whole system | 'node' cap each node
+    cores: float = 0.0                # cpuset: cores per scope unit; quota: cores worth of runtime
+    cpus: str | None = None           # explicit cpuset list (overrides cores)
+    tooling_cores: int = 2            # cpus held back for the tooling to run on
+    isolate_tooling: bool = True
+    exclude_roles: tuple[str, ...] = ("sink",)
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "off"
+
+
+def _cpu_list(cpus: list[int]) -> str:
+    return ",".join(str(cpu) for cpu in cpus)
+
+
+def parse_cpu_cap(params: dict, defaults: dict) -> CpuCap:
+    def pick(key, fallback):
+        return params.get(key, defaults.get(key, fallback))
+
+    mode = str(pick("cpu_cap_mode", "off")).lower()
+    if mode not in ("off", "cpuset", "quota"):
+        raise ValueError(f"cpu_cap_mode must be off | cpuset | quota, got {mode!r}")
+    scope = str(pick("cpu_cap_scope", "system")).lower()
+    if scope not in ("system", "node"):
+        raise ValueError(f"cpu_cap_scope must be system | node, got {scope!r}")
+    cap = CpuCap(mode=mode, scope=scope,
+                 cores=float(pick("cpu_cap_cores", 0) or 0),
+                 cpus=pick("cpu_cap_cpus", None),
+                 tooling_cores=int(pick("cpu_cap_tooling_cores", 2)),
+                 isolate_tooling=bool(pick("cpu_cap_isolate_tooling", True)),
+                 exclude_roles=tuple(pick("cpu_cap_exclude_roles", ["sink"])))
+    if cap.enabled and not cap.cores and not cap.cpus:
+        raise ValueError("cpu_cap_mode is set but neither cpu_cap_cores nor cpu_cap_cpus was given")
+    if cap.mode == "cpuset" and cap.cpus is None and cap.cores != int(cap.cores):
+        raise ValueError(f"cpu_cap_mode=cpuset needs a whole number of cores, got {cap.cores}. "
+                         "use cpu_cap_mode=quota for fractional caps (but read the throttling note)")
+    return cap
+
+
+# ensure that the configured cpu cap is possible 
+def ensure_cpu_cap_possible(cap: CpuCap, node_count: int) -> dict:
+    if not cap.enabled:
+        return {"mode": "off"}
+    available = sorted(os.sched_getaffinity(0))
+    info = {"mode": cap.mode, "scope": cap.scope, "cores": cap.cores, "cpus": cap.cpus,
+            "isolate_tooling": cap.isolate_tooling, "exclude_roles": list(cap.exclude_roles),
+            "host_cpus_available": len(available)}
+
+    if cap.mode == "cpuset":
+        if shutil.which("taskset") is None:
+            raise RuntimeError("cpu_cap_mode=cpuset needs taskset (util-linux), which is not on PATH")
+        system_cpus = _resolve_system_cpus(cap, available)
+        info["system_cpus"] = _cpu_list(system_cpus)
+        if cap.scope == "system":
+            info["system_cpus"] = _cpu_list(system_cpus)
+            info["tokio_worker_threads"] = len(system_cpus)
+        else:
+            per_node = int(cap.cores)
+            info["node_cpu_pool"] = _cpu_list(system_cpus)
+            info["cpus_per_node"] = per_node
+            info["tooling_cores_reserved"] = cap.tooling_cores if cap.isolate_tooling else 0
+            info["tokio_worker_threads"] = per_node
+            if per_node * node_count > len(system_cpus):
+                info["note"] = (f"{node_count} nodes x {per_node} cpu(s) exceeds the "
+                                f"{len(system_cpus)} in the pool, so node cpusets overlap - a per "
+                                f"node cap is a ceiling, not a reservation")
+
+    else:
+        _assert_cgroup_writable()
+        info["quota_pct_per_unit"] = int(round(cap.cores * 100))
+        info["cgroup_root"] = str(CGROUP_ROOT)
+        info["warning"] = ("quota is enforced by freezing the cgroup for the rest of each 100ms "
+                           "period once its budget is spent - do not use this for latency experiments")
+    return info
+
+
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+CGROUP_PREFIX = "cc-sim"
+
+
+def _assert_cgroup_writable() -> None:
+    if not (CGROUP_ROOT / "cgroup.controllers").exists():
+        raise RuntimeError("cpu_cap_mode=quota needs cgroup v2 at /sys/fs/cgroup. "
+                           "use cpu_cap_mode=cpuset, which needs no privileges")
+    try:
+        controllers = (CGROUP_ROOT / "cgroup.subtree_control").read_text().split()
+    except OSError as error:
+        raise RuntimeError(f"cannot read cgroup.subtree_control ({error}). use cpu_cap_mode=cpuset")
+    if "cpu" not in controllers:
+        raise RuntimeError("the cpu controller is not enabled in /sys/fs/cgroup/cgroup.subtree_control. "
+                           "enable it as root (echo +cpu > ...) or use cpu_cap_mode=cpuset")
+    probe = CGROUP_ROOT / f"{CGROUP_PREFIX}-probe"
+    try:
+        probe.mkdir(exist_ok=True)
+        (probe / "cpu.max").write_text("max 100000")
+    except OSError as error:
+        raise RuntimeError(f"cannot create a cgroup under {CGROUP_ROOT} ({error}). run as root, "
+                           "delegate the subtree, or use cpu_cap_mode=cpuset")
+    finally:
+        try:
+            probe.rmdir()
+        except OSError:
+            pass
+
+
+def make_quota_cgroup(name: str, cores: float, period_us: int = 100_000) -> Path:
+    path = CGROUP_ROOT / f"{CGROUP_PREFIX}-{name}"
+    path.mkdir(exist_ok=True)
+    (path / "cpu.max").write_text(f"{int(round(cores * period_us))} {period_us}")
+    return path
+
+
+def remove_quota_cgroups() -> None:
+    for path in CGROUP_ROOT.glob(f"{CGROUP_PREFIX}-*"):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+# returned as preexec_fn so the child writes its own pid, so keep the Popen.pid as the nodes pid
+def join_cgroup_preexec(path: Path):
+    def _join():
+        with open(path / "cgroup.procs", "w") as cgroup_file:
+            cgroup_file.write(str(os.getpid()))
+    return _join
+
+
+# the pool of cpus the capped deployment may use
+def _resolve_system_cpus(cap: CpuCap, available: list[int]) -> list[int]:
+    if cap.cpus:
+        wanted = _expand_cpu_list(cap.cpus)
+        missing = [cpu for cpu in wanted if cpu not in available]
+        if missing:
+            raise RuntimeError(f"cpu_cap_cpus asks for cpus {missing} which this process may not use")
+        return wanted
+
+    if cap.scope == "node":
+        reserve = cap.tooling_cores if cap.isolate_tooling else 0
+        pool = available[:len(available) - reserve] if reserve else list(available)
+        if len(pool) < int(cap.cores):
+            raise RuntimeError(f"cpu_cap_scope=node wants {int(cap.cores)} cpu(s) per node but only "
+                               f"{len(pool)} are left after reserving {reserve} for the sender and "
+                               f"sink. lower cpu_cap_cores or cpu_cap_tooling_cores")
+        return pool
+
+    count = min(int(cap.cores), len(available))
+    if count < 1:
+        raise RuntimeError("cpu_cap resolves to zero cpus")
+    if cap.isolate_tooling and count >= len(available):
+        raise RuntimeError(f"the cap wants all {len(available)} cpus, leaving none for the sender "
+                           f"and sink. lower cpu_cap_cores or set cpu_cap_isolate_tooling=false")
+    return available[:count]
+
+
+def _tooling_cpus(cap: CpuCap, available: list[int], system_cpus: list[int]) -> list[int]:
+    if not cap.isolate_tooling:
+        return available
+    rest = [cpu for cpu in available if cpu not in set(system_cpus)]
+    return rest or available
+
+
+def _expand_cpu_list(spec: str) -> list[int]:
+    cpus: list[int] = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus += list(range(int(lo), int(hi) + 1))
+        else:
+            cpus.append(int(part))
+    return sorted(set(cpus))
+
+
+# command prefix that applies the cap to one process
+def cpu_cap_prefix(cap: CpuCap, role: str, node_index: int, tooling: bool = False) -> list[str]:
+    if not cap.enabled:
+        return []
+    available = sorted(os.sched_getaffinity(0))
+    system_cpus = _resolve_system_cpus(cap, available)
+
+    if tooling or role in cap.exclude_roles:
+        if cap.mode == "cpuset" and cap.isolate_tooling:
+            return ["taskset", "-c", _cpu_list(_tooling_cpus(cap, available, system_cpus))]
+        return []
+
+    if cap.mode == "cpuset":
+        if cap.scope == "system":
+            return ["taskset", "-c", _cpu_list(system_cpus)]
+        per_node = max(1, int(cap.cores))
+        start = (node_index * per_node) % len(system_cpus)
+        block = [system_cpus[(start + offset) % len(system_cpus)] for offset in range(per_node)]
+        return ["taskset", "-c", _cpu_list(sorted(set(block)))]
+
+    # quota adds no command prefix
+    return []
+
+
+# cgroup join hook for quota mode; None for cpuset and for uncapped
+def cpu_cap_preexec(cap: CpuCap, system: str, role: str, node_index: int, tooling: bool = False):
+    if not cap.enabled or cap.mode != "quota" or tooling or role in cap.exclude_roles:
+        return None
+    name = system if cap.scope == "system" else f"{system}-node{node_index}"
+    return join_cgroup_preexec(make_quota_cgroup(name, cap.cores))
 
 
 # send SIGTERM and escalate to SIGKILL if node does not shut down

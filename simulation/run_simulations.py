@@ -38,6 +38,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (
+    CpuCap, cpu_cap_preexec, cpu_cap_prefix, parse_cpu_cap, ensure_cpu_cap_possible,
+    remove_quota_cgroups,
     DEFAULT_STOP_GRACE_S, GROUP_TOOLING, GROUP_SYSTEM, NodeInfo, ProcSampler, assert_addresses_free,
     binary_cmd, check_records_complete, checkpoint_wal, db_progress, kill_stale_nodes,
     load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
@@ -284,7 +286,7 @@ def ensure_stream(plan: dict, repo: Path, paths: RunPaths, params: dict, kind: s
             "expected_pairs": len(load_expected(expected)) if Path(expected).exists() else None}
 
 
-def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict) -> tuple[dict[int, subprocess.Popen], list[NodeInfo]]:
+def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict) -> tuple[dict[int, subprocess.Popen], list[NodeInfo], CpuCap, dict]:
     nodes = load_system_configs(paths.configs(system))
     if not nodes:
         raise RuntimeError(f"no configs for {system} in {paths.configs(system)}")
@@ -307,14 +309,27 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     if not node_bin.exists():
         raise RuntimeError(f"node binary {node_bin} not found - build with `cargo build --release`")
 
+    cpu_cap = parse_cpu_cap(params, plan["defaults"])
+    cpu_cap_info = ensure_cpu_cap_possible(cpu_cap, len(nodes))
+    if cpu_cap.enabled:
+        log(f"  cpu cap: {cpu_cap.mode}/{cpu_cap.scope} cores={cpu_cap.cores} "
+            f"system_cpus={cpu_cap_info.get('system_cpus', '-')} "
+            f"excluded={','.join(cpu_cap.exclude_roles)}+sender")
+        if cpu_cap_info.get("note"):
+            log(f"    note: {cpu_cap_info['note']}")
+        if cpu_cap_info.get("warning"):
+            log(f"    !! {cpu_cap_info['warning']}")
+
     procs: dict[int, subprocess.Popen] = {}
     log_dir = paths.logs(system).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
-        for node in nodes:
+        for index, node in enumerate(nodes):
             stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
             proc = subprocess.Popen(
-                [str(node_bin), "-c", node.path, "-l", str(log_dir)],
+                cpu_cap_prefix(cpu_cap, node.role, index)
+                + [str(node_bin), "-c", node.path, "-l", str(log_dir)],
+                preexec_fn=cpu_cap_preexec(cpu_cap, system, node.role, index),
                 cwd=str(repo), env={**os.environ, **env},
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=stderr_file, start_new_session=True)
@@ -324,12 +339,14 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     except BaseException:
         stop_processes(procs)
         raise
-    return procs, nodes
+    return procs, nodes, cpu_cap, cpu_cap_info
 
 
-def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict, sampler: ProcSampler | None = None) -> dict:
+def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict,
+                sampler: ProcSampler | None = None, cap: CpuCap | None = None) -> dict:
     sender = repo / plan["defaults"].get("send_script", "send_event_stream.py")
-    send_stream_cmd = [plan["defaults"].get("python", "python3.11"), str(sender),
+    sender_prefix = cpu_cap_prefix(cap, "sender", tooling=True) if cap else []
+    send_stream_cmd = sender_prefix + [plan["defaults"].get("python", "python3.11"), str(sender),
            "--config-dir", str(paths.configs(system).resolve()),
            "--log", str((paths.send / f"{system}.log").resolve()),
            "--stream", stream["manifest"],
@@ -400,7 +417,8 @@ def wait_for_system_settlement(paths: RunPaths, system: str, expected_pairs: int
 def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: dict, stream: dict) -> dict:
     log(f"  --- {system} ---")
     timeline: dict = {"system": system}
-    procs, nodes = launch_system(plan, repo, paths, system, params)
+    procs, nodes, cpu_cap, cpu_cap_info = launch_system(plan, repo, paths, system, params)
+    timeline["cpu_cap"] = cpu_cap_info
     sampler = None
     try:
         timeline["launch_us"] = now_us()
@@ -421,7 +439,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         time.sleep(idle)
         timeline["idle_end_us"] = now_us()
 
-        timeline.update(send_stream(plan, repo, paths, system, params, stream, sampler=sampler))
+        timeline.update(send_stream(plan, repo, paths, system, params, stream, sampler=sampler, cap=cpu_cap))
         timeline.update(wait_for_system_settlement(paths, system, stream.get("expected_pairs"), params))
     finally:
         problems: list[str] = []
@@ -453,6 +471,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
                 log(f"  !! {len(incomplete)} incomplete record file(s) in {paths.records / system}")
 
         remove_sockets(nodes)
+        remove_quota_cgroups()
         for suffix in ("-wal", "-shm"):
             Path(str(paths.db(system)) + suffix).unlink(missing_ok=True)
         timeline["problems"] = problems
@@ -482,10 +501,7 @@ def compare(plan: dict, repo: Path, paths: RunPaths, stream: dict, systems: list
     proc = run_logged(compare_results_cmd, repo, out, check=False)
     result["out"] = str(out)
     result["returncode"] = proc.returncode
-    # 0 and 1 both mean the comparison ran (1 = it found discrepancies, which is the measurement result and is
-    # expected on nearly every loaded run). only 2 means it could not be performed, and only that is a failure
     result["ok"] = proc.returncode in (0, 1)
-    # inline the counts into run.json so a batch can be aggregated from the run records alone
     if summary_path.exists():
         try:
             result["summary"] = json.loads(summary_path.read_text())

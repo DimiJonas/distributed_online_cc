@@ -44,6 +44,13 @@ send_timeout_s = 7200                   # max time the send_event_stream.py scri
 run_order = "shuffle"                   # shuffle the order of the runs to rule out order based differences
 system_order = "shuffle"                # shuffle the order in which the 2 systems are simulated to rule out order based differences/advantages
 order_seed = 29                         # seed for the order shuffle to make it reproducible
+cpu_cap_mode = "off"                    # off | cpuset (set number of nodes) | quota (set cores worth of cpu time)
+cpu_cap_scope = "system"                # whether the cap is per system or per node
+cpu_cap_cores = 0                       # cpuset: whole cores; quota: cores worth of runtime (fractions ok)
+# cpu_cap_cpus = "0-3"                  # explicit cpuset list, overrides cpu_cap_cores
+cpu_cap_isolate_tooling = true          # pin send script + sink to the cpus the deployment is not using
+cpu_cap_tooling_cores = 2               # cpus held back for the tooling under scope="node"
+cpu_cap_exclude_roles = ["sink"]        # node roles to exclude from cpu cap (currently just used for the sink)
 
 [defaults.params]
 catalog = "default"               # the default catalog is the synthetic catalog for the scalability runs (see gen-config.rs)
