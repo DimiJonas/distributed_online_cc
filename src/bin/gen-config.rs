@@ -34,7 +34,7 @@ struct Args {
     /// total nodes in the decentralized system (constraint nodes + 1 sink)
     /// default: one constraint node per role assignment unit + 1 sink
     /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
-    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)
+    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)(--catalog traffic-fines: 12 activities -> 13 nodes)
     #[arg(short, long)]
     nodes: Option<u64>,
 
@@ -45,6 +45,7 @@ struct Args {
 
     /// which constraint catalog to instantiate: `default` for the built-in test catalog, or
     /// `sepsis` for the sepsis event log catalog (reuses event ids across constraints so it needs `--role-assignment by-event`)
+    /// `traffic-fines` for the traffic fines event log catalog (reuses event ids across constraints so it needs `--role-assignment by-event`)
     #[arg(long, value_enum, default_value_t = CatalogKind::Default)]
     catalog: CatalogKind,
 
@@ -406,6 +407,38 @@ fn suffix(stem: &str, copy: u64) -> String {
     }
 }
 
+// sepsis events
+const IV_ANTIBIOTICS: &str = "IV Antibiotics";
+const IV_LIQUID: &str = "IV Liquid";
+const LACTIC_ACID: &str = "LacticAcid";
+const LEUCOCYTES: &str = "Leucocytes";
+const CRP: &str = "CRP";
+const ER_REGISTRATION: &str = "ER Registration";
+const ER_TRIAGE: &str = "ER Triage";
+const ER_SEPSIS_TRIAGE: &str = "ER Sepsis Triage";
+const ADMISSION_NC: &str = "Admission NC";
+const ADMISSION_IC: &str = "Admission IC";
+const RELEASE_A: &str = "Release A";
+const RELEASE_B: &str = "Release B";
+const RELEASE_C: &str = "Release C";
+const RELEASE_D: &str = "Release D";
+const RELEASE_E: &str = "Release E";
+const RETURN_ER: &str = "Return ER";
+const CASE_END: &str = "Case End";
+
+// traffic fines events
+const ADD_PENALTY: &str = "Add penalty";
+const APPEAL_TO_JUDGE: &str = "Appeal to Judge";
+const CREATE_FINE: &str = "Create Fine";
+const INSERT_DATE_APPEAL_TO_PREFECTURE: &str = "Insert Date Appeal to Prefecture";
+const INSERT_FINE_NOTIFICATION: &str = "Insert Fine Notification";
+const NOTIFY_RESULT_APPEAL_TO_OFFENDER: &str = "Notify Result Appeal to Offender";
+const PAYMENT: &str = "Payment";
+const RECEIVE_RESULT_APPEAL_FROM_PREFECTURE: &str = "Receive Result Appeal from Prefecture";
+const SEND_APPEAL_TO_PREFECTURE: &str = "Send Appeal to Prefecture";
+const SEND_FINE: &str = "Send Fine";
+const SEND_FOR_CREDIT_COLLECTION: &str = "Send for Credit Collection";
+
 // which built-in catalog gets instantiated
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CatalogKind {
@@ -413,20 +446,256 @@ enum CatalogKind {
     Default,
     /// the catalog for the sepsis event log with one node per activity of the log
     Sepsis,
+    /// the catalog for the traffic fines event log with one node per activity of the log
+    TrafficFines,
 }
 impl CatalogKind {
     fn templates(self) -> Vec<Template> {
         match self {
             Self::Default => catalog(),
             Self::Sepsis => catalog_sepsis(),
+            Self::TrafficFines => catalog_traffic_fines(),
         }
     }
     fn name(self) -> &'static str {
         match self {
             Self::Default => "default",
             Self::Sepsis => "sepsis",
+            Self::TrafficFines => "traffic_fines",
         }
     }
+}
+
+fn catalog_traffic_fines() -> Vec<Template> {
+    vec![
+        Template {
+            constraint_stem: "card_payment_min_1",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Min,
+                        frequency: 1,
+                        reset: AppearanceCounterReset::Zero,
+                    },
+                    CREATE_FINE,
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    CASE_END,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "card_send_fine_insert_fine_notification_equal",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Min,
+                        frequency: 1,
+                        reset: AppearanceCounterReset::Subtract,
+                    },
+                    SEND_FINE,
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    INSERT_FINE_NOTIFICATION,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "card_appeal_to_judge_max_1",
+            roles: vec![
+                (
+                    Role::AppearanceCounter {
+                        mode: MinMaxMode::Max,
+                        frequency: 1,
+                        reset: AppearanceCounterReset::Keep,
+                    },
+                    APPEAL_TO_JUDGE,
+                    None,
+                ),
+                (
+                    Role::AppearanceTrigger { counters: vec![0] },
+                    CASE_END,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "dist_appear_no_credit_collection_with_open_appeal",
+            roles: vec![
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    INSERT_DATE_APPEAL_TO_PREFECTURE,
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    SEND_APPEAL_TO_PREFECTURE,
+                    None,
+                ),
+                (
+                    Role::DistAppearanceCounter {
+                        reset: DistributedAppearanceCounterReset::Zero,
+                    },
+                    APPEAL_TO_JUDGE,
+                    None,
+                ),
+                (
+                    Role::DistAppearanceTrigger {
+                        mode: MinMaxMode::Max,
+                        frequency: 0,
+                        counters: vec![0, 1, 2],
+                    },
+                    SEND_FOR_CREDIT_COLLECTION,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "not_coex_payment_credit_collection",
+            roles: vec![
+                (Role::NotCoexistenceA { b: 1 }, PAYMENT, None),
+                (
+                    Role::NotCoexistenceB { a: 0 },
+                    SEND_FOR_CREDIT_COLLECTION,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "not_coex_appeal_result_credit_collection",
+            roles: vec![
+                (
+                    Role::NotCoexistenceA { b: 1 },
+                    RECEIVE_RESULT_APPEAL_FROM_PREFECTURE,
+                    None,
+                ),
+                (
+                    Role::NotCoexistenceB { a: 0 },
+                    SEND_FOR_CREDIT_COLLECTION,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "order_send_fine_before_adding_penalty",
+            roles: vec![
+                (Role::OrderFirst, SEND_FINE, None),
+                (Role::OrderSecond { first: 0 }, ADD_PENALTY, None),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_insert_appeal_date_send_appeal",
+            roles: vec![
+                (
+                    Role::PrecedenceProducer { consumers: vec![1] },
+                    INSERT_DATE_APPEAL_TO_PREFECTURE,
+                    None,
+                ),
+                (Role::PrecedenceConsumer, SEND_APPEAL_TO_PREFECTURE, None),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_appeal_result_notify_result",
+            roles: vec![
+                (
+                    Role::PrecedenceProducer { consumers: vec![1] },
+                    RECEIVE_RESULT_APPEAL_FROM_PREFECTURE,
+                    None,
+                ),
+                (
+                    Role::PrecedenceConsumer,
+                    NOTIFY_RESULT_APPEAL_TO_OFFENDER,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "prec_fine_notification_add_penalty",
+            roles: vec![
+                (
+                    Role::PrecedenceProducer { consumers: vec![1] },
+                    INSERT_FINE_NOTIFICATION,
+                    None,
+                ),
+                (Role::PrecedenceConsumer, ADD_PENALTY, None),
+            ],
+        },
+        Template {
+            constraint_stem: "resp_send_appeal_receive_result",
+            roles: vec![
+                (Role::ResponseProducer, SEND_APPEAL_TO_PREFECTURE, None),
+                (
+                    Role::ResponseConsumer { producers: vec![0] },
+                    RECEIVE_RESULT_APPEAL_FROM_PREFECTURE,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "sens_normal_fine_amount",
+            roles: vec![
+                (
+                    Role::SensorCollector {
+                        attribute_key: "amount".to_string(),
+                        value: 150.0,
+                        mode: SensorConstraintMode::Lte,
+                        max_value_age: Duration::from_hours(2160),
+                    },
+                    CREATE_FINE,
+                    None,
+                ),
+                (
+                    Role::SensorTrigger {
+                        collectors: vec![0],
+                    },
+                    SEND_FINE,
+                    None,
+                ),
+            ],
+        },
+        Template {
+            constraint_stem: "time_create_fine_send_fine_90_d",
+            roles: vec![
+                (
+                    Role::TimeStart {
+                        duration: Duration::from_hours(2160),
+                        mode: MinMaxMode::Max,
+                    },
+                    CREATE_FINE,
+                    None,
+                ),
+                (Role::TimeStop { start: 0 }, SEND_FINE, None),
+            ],
+        },
+        Template {
+            constraint_stem: "time_fine_notification_add_penalty",
+            roles: vec![
+                (
+                    Role::TimeStart {
+                        duration: Duration::from_hours(1440),
+                        mode: MinMaxMode::Min,
+                    },
+                    INSERT_FINE_NOTIFICATION,
+                    None,
+                ),
+                (Role::TimeStop { start: 0 }, ADD_PENALTY, None),
+            ],
+        },
+        Template {
+            constraint_stem: "case_end",
+            roles: vec![(Role::EndActivity, CASE_END, None)],
+        },
+    ]
 }
 
 fn catalog_sepsis() -> Vec<Template> {
@@ -439,12 +708,12 @@ fn catalog_sepsis() -> Vec<Template> {
                         duration: Duration::from_hours(1),
                         mode: MinMaxMode::Max,
                     },
-                    "ER Sepsis Triage",
+                    ER_SEPSIS_TRIAGE,
                     Some(ResultBufferConfig::Revocable {
                         duration: Duration::from_mins(20),
                     }),
                 ),
-                (Role::TimeStop { start: 0 }, "IV Antibiotics", None),
+                (Role::TimeStop { start: 0 }, IV_ANTIBIOTICS, None),
             ],
         },
         Template {
@@ -455,21 +724,21 @@ fn catalog_sepsis() -> Vec<Template> {
                         duration: Duration::from_hours(3),
                         mode: MinMaxMode::Max,
                     },
-                    "ER Sepsis Triage",
+                    ER_SEPSIS_TRIAGE,
                     Some(ResultBufferConfig::Revocable {
                         duration: Duration::from_mins(20),
                     }),
                 ),
-                (Role::TimeStop { start: 0 }, "LacticAcid", None),
+                (Role::TimeStop { start: 0 }, LACTIC_ACID, None),
             ],
         },
         Template {
             constraint_stem: "prec_registration_lab_leucocytes",
             roles: vec![
-                (Role::PrecedenceConsumer, "Leucocytes", None),
+                (Role::PrecedenceConsumer, LEUCOCYTES, None),
                 (
                     Role::PrecedenceProducer { consumers: vec![0] },
-                    "ER Registration",
+                    ER_REGISTRATION,
                     None,
                 ),
             ],
@@ -477,10 +746,10 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "prec_registration_lab_lacticacid",
             roles: vec![
-                (Role::PrecedenceConsumer, "LacticAcid", None),
+                (Role::PrecedenceConsumer, LACTIC_ACID, None),
                 (
                     Role::PrecedenceProducer { consumers: vec![0] },
-                    "ER Registration",
+                    ER_REGISTRATION,
                     None,
                 ),
             ],
@@ -488,10 +757,10 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "prec_registration_lab_crp",
             roles: vec![
-                (Role::PrecedenceConsumer, "CRP", None),
+                (Role::PrecedenceConsumer, CRP, None),
                 (
                     Role::PrecedenceProducer { consumers: vec![0] },
-                    "ER Registration",
+                    ER_REGISTRATION,
                     None,
                 ),
             ],
@@ -499,10 +768,10 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "prec_sepsis_triage_antibiotics",
             roles: vec![
-                (Role::PrecedenceConsumer, "IV Antibiotics", None),
+                (Role::PrecedenceConsumer, IV_ANTIBIOTICS, None),
                 (
                     Role::PrecedenceProducer { consumers: vec![0] },
-                    "ER Sepsis Triage",
+                    ER_SEPSIS_TRIAGE,
                     None,
                 ),
             ],
@@ -510,10 +779,10 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "prec_sepsis_triage_ivliquid",
             roles: vec![
-                (Role::PrecedenceConsumer, "IV Liquid", None),
+                (Role::PrecedenceConsumer, IV_LIQUID, None),
                 (
                     Role::PrecedenceProducer { consumers: vec![0] },
-                    "ER Sepsis Triage",
+                    ER_SEPSIS_TRIAGE,
                     None,
                 ),
             ],
@@ -525,35 +794,35 @@ fn catalog_sepsis() -> Vec<Template> {
                     Role::DistAppearanceCounter {
                         reset: DistributedAppearanceCounterReset::Zero,
                     },
-                    "Release A",
+                    RELEASE_A,
                     None,
                 ),
                 (
                     Role::DistAppearanceCounter {
                         reset: DistributedAppearanceCounterReset::Zero,
                     },
-                    "Release B",
+                    RELEASE_B,
                     None,
                 ),
                 (
                     Role::DistAppearanceCounter {
                         reset: DistributedAppearanceCounterReset::Zero,
                     },
-                    "Release C",
+                    RELEASE_C,
                     None,
                 ),
                 (
                     Role::DistAppearanceCounter {
                         reset: DistributedAppearanceCounterReset::Zero,
                     },
-                    "Release D",
+                    RELEASE_D,
                     None,
                 ),
                 (
                     Role::DistAppearanceCounter {
                         reset: DistributedAppearanceCounterReset::Zero,
                     },
-                    "Release E",
+                    RELEASE_E,
                     None,
                 ),
                 (
@@ -562,7 +831,7 @@ fn catalog_sepsis() -> Vec<Template> {
                         frequency: 1,
                         counters: vec![0, 1, 2, 3, 4],
                     },
-                    "Return ER",
+                    RETURN_ER,
                     None,
                 ),
             ],
@@ -570,10 +839,10 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "response_registration_triage",
             roles: vec![
-                (Role::ResponseProducer, "ER Registration", None),
+                (Role::ResponseProducer, ER_REGISTRATION, None),
                 (
                     Role::ResponseConsumer { producers: vec![0] },
-                    "ER Triage",
+                    ER_TRIAGE,
                     None,
                 ),
             ],
@@ -581,92 +850,92 @@ fn catalog_sepsis() -> Vec<Template> {
         Template {
             constraint_stem: "order_no_triage_after_sepsis_triage",
             roles: vec![
-                (Role::OrderFirst, "ER Triage", None),
-                (Role::OrderSecond { first: 0 }, "ER Sepsis Triage", None),
+                (Role::OrderFirst, ER_TRIAGE, None),
+                (Role::OrderSecond { first: 0 }, ER_SEPSIS_TRIAGE, None),
             ],
         },
         Template {
             constraint_stem: "order_no_sepsis_triage_after_admission_NC",
             roles: vec![
-                (Role::OrderFirst, "ER Sepsis Triage", None),
-                (Role::OrderSecond { first: 0 }, "Admission NC", None),
+                (Role::OrderFirst, ER_SEPSIS_TRIAGE, None),
+                (Role::OrderSecond { first: 0 }, ADMISSION_NC, None),
             ],
         },
         Template {
             constraint_stem: "order_no_sepsis_triage_after_admission_IC",
             roles: vec![
-                (Role::OrderFirst, "ER Sepsis Triage", None),
-                (Role::OrderSecond { first: 0 }, "Admission IC", None),
+                (Role::OrderFirst, ER_SEPSIS_TRIAGE, None),
+                (Role::OrderSecond { first: 0 }, ADMISSION_IC, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_ab",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release B", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_A, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_B, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_ac",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release C", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_A, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_C, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_ad",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_A, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_D, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_ae",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release A", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_A, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_E, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_bc",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release C", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_B, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_C, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_bd",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_B, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_D, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_be",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release B", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_B, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_E, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_cd",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release C", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release D", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_C, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_D, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_ce",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release C", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_C, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_E, None),
             ],
         },
         Template {
             constraint_stem: "notcoex_release_de",
             roles: vec![
-                (Role::NotCoexistenceA { b: 1 }, "Release D", None),
-                (Role::NotCoexistenceB { a: 0 }, "Release E", None),
+                (Role::NotCoexistenceA { b: 1 }, RELEASE_D, None),
+                (Role::NotCoexistenceB { a: 0 }, RELEASE_E, None),
             ],
         },
         Template {
@@ -678,12 +947,12 @@ fn catalog_sepsis() -> Vec<Template> {
                         frequency: 1,
                         reset: AppearanceCounterReset::Zero,
                     },
-                    "Leucocytes",
+                    LEUCOCYTES,
                     None,
                 ),
                 (
                     Role::AppearanceTrigger { counters: vec![0] },
-                    "Case End",
+                    CASE_END,
                     None,
                 ),
             ],
@@ -697,12 +966,12 @@ fn catalog_sepsis() -> Vec<Template> {
                         frequency: 9,
                         reset: AppearanceCounterReset::Zero,
                     },
-                    "Leucocytes",
+                    LEUCOCYTES,
                     None,
                 ),
                 (
                     Role::AppearanceTrigger { counters: vec![0] },
-                    "Case End",
+                    CASE_END,
                     None,
                 ),
             ],
@@ -716,12 +985,12 @@ fn catalog_sepsis() -> Vec<Template> {
                         frequency: 1,
                         reset: AppearanceCounterReset::Zero,
                     },
-                    "CRP",
+                    CRP,
                     None,
                 ),
                 (
                     Role::AppearanceTrigger { counters: vec![0] },
-                    "Case End",
+                    CASE_END,
                     None,
                 ),
             ],
@@ -735,12 +1004,12 @@ fn catalog_sepsis() -> Vec<Template> {
                         frequency: 8,
                         reset: AppearanceCounterReset::Zero,
                     },
-                    "CRP",
+                    CRP,
                     None,
                 ),
                 (
                     Role::AppearanceTrigger { counters: vec![0] },
-                    "Case End",
+                    CASE_END,
                     None,
                 ),
             ],
@@ -755,14 +1024,14 @@ fn catalog_sepsis() -> Vec<Template> {
                         mode: SensorConstraintMode::Lte,
                         max_value_age: Duration::from_hours(408),
                     },
-                    "LacticAcid",
+                    LACTIC_ACID,
                     None,
                 ),
                 (
                     Role::SensorTrigger {
                         collectors: vec![0],
                     },
-                    "Release A",
+                    RELEASE_A,
                     None,
                 ),
             ],
@@ -777,14 +1046,14 @@ fn catalog_sepsis() -> Vec<Template> {
                         mode: SensorConstraintMode::Lte,
                         max_value_age: Duration::from_hours(408),
                     },
-                    "LacticAcid",
+                    LACTIC_ACID,
                     None,
                 ),
                 (
                     Role::SensorTrigger {
                         collectors: vec![0],
                     },
-                    "Release B",
+                    RELEASE_B,
                     None,
                 ),
             ],
@@ -799,14 +1068,14 @@ fn catalog_sepsis() -> Vec<Template> {
                         mode: SensorConstraintMode::Lte,
                         max_value_age: Duration::from_hours(408),
                     },
-                    "LacticAcid",
+                    LACTIC_ACID,
                     None,
                 ),
                 (
                     Role::SensorTrigger {
                         collectors: vec![0],
                     },
-                    "Release C",
+                    RELEASE_C,
                     None,
                 ),
             ],
@@ -821,14 +1090,14 @@ fn catalog_sepsis() -> Vec<Template> {
                         mode: SensorConstraintMode::Lte,
                         max_value_age: Duration::from_hours(408),
                     },
-                    "LacticAcid",
+                    LACTIC_ACID,
                     None,
                 ),
                 (
                     Role::SensorTrigger {
                         collectors: vec![0],
                     },
-                    "Release D",
+                    RELEASE_D,
                     None,
                 ),
             ],
@@ -843,21 +1112,21 @@ fn catalog_sepsis() -> Vec<Template> {
                         mode: SensorConstraintMode::Lte,
                         max_value_age: Duration::from_hours(408),
                     },
-                    "LacticAcid",
+                    LACTIC_ACID,
                     None,
                 ),
                 (
                     Role::SensorTrigger {
                         collectors: vec![0],
                     },
-                    "Release E",
+                    RELEASE_E,
                     None,
                 ),
             ],
         },
         Template {
             constraint_stem: "case_end",
-            roles: vec![(Role::EndActivity, "Case End", None)],
+            roles: vec![(Role::EndActivity, CASE_END, None)],
         },
     ]
 }
