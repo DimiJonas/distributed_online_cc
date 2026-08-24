@@ -72,6 +72,23 @@ def load_plan(path: Path) -> dict:
         return tomllib.load(file)
 
 
+ROLE_ASSIGNMENTS = ("round-robin", "blocked", "by-event")
+
+# catalogs that only work with by-event assigment
+EVENT_SHARING_CATALOGS = ("sepsis", "traffic-fines", "traffic_fines")
+
+
+def validate_params(params: dict, where: str) -> dict:
+    # validate role assignment against catalog
+    assignment = str(params.get("role_assignment", "round-robin"))
+    if assignment not in ROLE_ASSIGNMENTS:
+        raise ValueError(f"{where}: role_assignment={assignment!r} is not one of {', '.join(ROLE_ASSIGNMENTS)}")
+    catalog = str(params.get("catalog", "default"))
+    if catalog in EVENT_SHARING_CATALOGS and assignment != "by-event":
+        raise ValueError(f"{where}: catalog={catalog!r} reuses event ids across constraints, so it needs role_assignment=\"by-event\" (got {assignment!r})")
+    return params
+
+
 # from experiment.grid (cartesian product) and experiment.sensitivity (one at a time) create the different parametrisations to run on after another
 def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
 
@@ -105,7 +122,7 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
     for point in points:
         for seed in seeds:
             for replicate in range(replicates):
-                params = dict(point)
+                params = validate_params(dict(point), f"experiment {exp['id']!r}")
                 params["seed"] = seed
                 label = "_".join(f"{key}{_fmt(value)}" for key, value in sorted(point.items())
                              if key in label_keys)

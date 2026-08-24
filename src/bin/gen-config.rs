@@ -32,14 +32,13 @@ use std::time::Duration;
 #[command(about = "Generate comparable decentralized + central node configs")]
 struct Args {
     /// total nodes in the decentralized system (constraint nodes + 1 sink)
-    /// default: one constraint node per role assignment unit + 1 sink
-    /// i.e. one node per role for `round-robin` (default catalog: 22 roles -> 23 nodes)
-    /// and one node per distinct event id for `by-event` (--catalog sepsis: 17 activities -> 18 nodes)(--catalog traffic-fines: 12 activities -> 13 nodes)
+    /// default: one constraint node per role assignment unit (roles, constraints, events) + 1 sink
     #[arg(short, long)]
     nodes: Option<u64>,
 
-    /// how constraint roles are assigned to nodes: `round-robin` one role at a time, or
-    /// `by-event` to give each node one event with all the constraint roles configured for it
+    /// how constraint roles are assigned to nodes: `round-robin` one role at a time, `blocked` to keep the roles
+    /// of one constraint together on the same node, or `by-event` to give each node one event with
+    /// all the constraint roles configured for it
     #[arg(long, value_enum, default_value_t = RoleAssignment::RoundRobin)]
     role_assignment: RoleAssignment,
 
@@ -1491,6 +1490,8 @@ type Layout = Vec<Vec<u64>>;
 enum RoleAssignment {
     /// hand out roles one at a time, round robin over the nodes (default)
     RoundRobin,
+    /// hand out whole constraints: every role of one constraint lands on the same node
+    Blocked,
     /// give every node one event: all roles observing the same event id land on the same node
     ByEvent,
 }
@@ -1498,6 +1499,7 @@ impl RoleAssignment {
     fn name(self) -> &'static str {
         match self {
             Self::RoundRobin => "round-robin",
+            Self::Blocked => "blocked",
             Self::ByEvent => "by-event",
         }
     }
@@ -1505,7 +1507,11 @@ impl RoleAssignment {
     // slots needed so nothing has to share a node: one per role, or one per distinct event
     fn units(self, instances: &[Instance]) -> u64 {
         match self {
+            // number of roles
             Self::RoundRobin => instances.iter().map(|inst| inst.roles.len() as u64).sum(),
+            // number of constraints
+            Self::Blocked => instances.len() as u64,
+            // number of distrinct events
             Self::ByEvent => distinct_events(instances).len() as u64,
         }
     }
@@ -1513,6 +1519,7 @@ impl RoleAssignment {
     fn unit_name(self) -> &'static str {
         match self {
             Self::RoundRobin => "roles",
+            Self::Blocked => "constraints",
             Self::ByEvent => "distinct events",
         }
     }
@@ -1524,6 +1531,7 @@ impl RoleAssignment {
         );
         match self {
             Self::RoundRobin => round_robin_layout(instances, role_node_count),
+            Self::Blocked => blocked_layout(instances, role_node_count),
             Self::ByEvent => event_layout(instances, role_node_count),
         }
     }
@@ -1557,6 +1565,29 @@ fn round_robin_layout(instances: &[Instance], role_node_count: u64) -> Layout {
                     node
                 })
                 .collect()
+        })
+        .collect()
+}
+
+// whole constraints are handed out in blocks, so every role of one constraint lands on the same node
+fn blocked_layout(instances: &[Instance], role_node_count: u64) -> Layout {
+    let instance_count = instances.len() as u64;
+    let total_roles: u64 = instances.iter().map(|inst| inst.roles.len() as u64).sum();
+    let mut placed_roles = 0u64;
+    instances
+        .iter()
+        .enumerate()
+        .map(|(index, instance)| {
+            let node = if role_node_count >= instance_count {
+                // at least one node per constraint: pack them, any surplus nodes stay empty
+                index as u64
+            } else {
+                // fewer nodes than constraints: cut the role sequence into balanced blocks, so
+                // nodes carry a similar number of roles even when constraints differ in role count
+                ((placed_roles * role_node_count) / total_roles.max(1)).min(role_node_count - 1)
+            };
+            placed_roles += instance.roles.len() as u64;
+            vec![node; instance.roles.len()]
         })
         .collect()
 }
