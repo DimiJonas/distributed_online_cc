@@ -379,9 +379,11 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
                 sampler: ProcSampler | None = None, cap: CpuCap | None = None) -> dict:
     sender = repo / plan["defaults"].get("send_script", "send_event_stream.py")
     sender_prefix = cpu_cap_prefix(cap, "sender", 0, tooling=True) if cap else []
+    sender_summary_path = paths.send / f"{system}.summary.json"
     send_stream_cmd = sender_prefix + [plan["defaults"].get("python", "python3.11"), str(sender),
            "--config-dir", str(paths.configs(system).resolve()),
            "--log", str((paths.send / f"{system}.log").resolve()),
+           "--json-summary", str(sender_summary_path.resolve()),
            "--stream", stream["manifest"],
            "--progress", "off"]
     if params.get("rate"):
@@ -406,8 +408,15 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
         if sampler is not None and "pid" in sender_pid:
             sampler.remove_target(sender_pid["pid"])
     stream_stop_time = now_us()
+    sender_summary = None
+    if sender_summary_path.exists():
+        try:
+            sender_summary = json.loads(sender_summary_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            log(f"  !! could not read the send summary {sender_summary_path}: {error}")
     return {"send_start_us": stream_start_time, "send_end_us": stream_stop_time,
             "sender_pid": sender_pid.get("pid"), "sender_returncode": proc.returncode,
+            "sender_summary": sender_summary,
             "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
 
 

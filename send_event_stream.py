@@ -32,6 +32,7 @@ import sys
 import time
 import tomllib
 from glob import glob
+from pathlib import Path
 
 
 # ---- read configs -> nodes + routing ----
@@ -137,6 +138,21 @@ class Pacer:
         if rate >= 1:
             return f"{rate:.1f}".rstrip("0").rstrip(".")
         return f"{rate:.3g}"
+
+    # pacer summary as json
+    def json_summary(self):
+        elapsed = time.monotonic() - self.starttime
+        return {
+            "target_rate": (1.0 / self.interval) if self.interval > 0 else None,
+            "effective_rate": (self.count / elapsed) if elapsed > 0 else 0.0,
+            "elapsed_s": elapsed,
+            "events_paced": self.count,
+            "burst": self.burst,
+            "jitter": self.jitter,
+            "late": self.late,
+            "max_lag_ms": self.max_lag * 1000.0,
+            "resyncs": self.resyncs,
+        }
 
     def summary(self):
         elapsed = time.monotonic() - self.starttime
@@ -463,6 +479,7 @@ def main():
     ap.add_argument("--send-timeout", type=float, default=60.0,
                     help="socket timeout for a single send. long on purpose: blocking here is backpressure, not an error (default 60s)")
     ap.add_argument("--log", default="send_log.jsonl")
+    ap.add_argument("--json-summary", default=None, help="write the pacer/send counters to this path as json (for the evaluation scripts)")
     args = ap.parse_args()
 
     nodes = load_nodes(args.config_dir)
@@ -581,9 +598,33 @@ def main():
         raise
     finally:
         pacer_summary = pacer.summary()
+        pacer_stats = pacer.json_summary()
         prog.close(counts)
         log.close()
         pool.close_all()
+
+        if args.json_summary:
+            summary_payload = {
+                "schema_version": 1,
+                "system": kind,
+                "interrupted": interrupted,
+                "dry_run": bool(args.dry_run),
+                "wire": args.wire,
+                "preloaded": bool(preloaded),
+                "stream": str(args.stream) if args.stream else None,
+                "counts": dict(counts),
+                "pacer": pacer_stats,
+                "sends": {"blocked_over_1ms": slow_sends, "max_send_us": max_send_us,
+                          "reconnects": pool.reconnects()},
+                "send_log": {"path": str(args.log), "lines": log.written,
+                             "deferred": log.deferred, "spills": log.spills},
+            }
+            try:
+                summary_path = Path(args.json_summary)
+                summary_path.parent.mkdir(parents=True, exist_ok=True)
+                summary_path.write_text(json.dumps(summary_payload, indent=2))
+            except OSError as error:
+                print(f"could not write --json-summary to {args.json_summary}: {error}", file=sys.stderr)
 
         print(f"system={kind}  sent={counts['sent']} dry-run={counts['dry-run']} "
               f"no_route={counts['no_route']} error={counts['error']}"

@@ -17,6 +17,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import math
 import threading
 import time
 import tomllib
@@ -814,3 +815,43 @@ def netem_apply(delay_ms: float, jitter_ms: float = 0.0, dev: str = "lo", sudo: 
 def netem_clear(dev: str = "lo", sudo: bool = True) -> None:
     cmd = (["sudo", "-n"] if sudo else []) + ["tc", "qdisc", "del", "dev", dev, "root"]
     subprocess.run(cmd, check=False, capture_output=True)
+
+
+def percentiles(values: list[float], points=(50, 95, 99)) -> dict:
+    if not values:
+        return {"n": 0}
+    ordered = sorted(values)
+    percentile_batch = {"n": len(ordered), "min": ordered[0], "max": ordered[-1], "mean": sum(ordered) / len(ordered)}
+    for point in points:
+        # nearest rank, so every reported value is an observed one
+        index = min(len(ordered) - 1, max(0, math.ceil(point / 100 * len(ordered)) - 1))
+        percentile_batch[f"p{point}"] = ordered[index]
+    return percentile_batch
+
+
+def quantile(values: list[float], quantil_level: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil(quantil_level * len(ordered)) - 1))
+    return ordered[index]
+
+
+# least squares slope
+# used to tell a queue that grows without bound from one that just jitters
+def slope_per_second(points: list[tuple[float, float]]) -> float:
+    if len(points) < 3:
+        return 0.0
+    num_points = len(points)
+    mean_time = sum(time for time, _ in points) / num_points
+    mean_peak_value = sum(peak_value for _, peak_value in points) / num_points
+    denominator = sum((time - mean_time) ** 2 for time, _ in points)
+    if denominator == 0:
+        return 0.0
+    return sum((time - mean_time) * (peak_value - mean_peak_value) for time, peak_value in points) / denominator * 1e6
+
+
+# deterministic fraction float from a case id for reproducible case subsampling
+def case_id_hash_fraction(case_id: str) -> float:
+    digest = hashlib.blake2b(case_id.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / float(1 << 64)
