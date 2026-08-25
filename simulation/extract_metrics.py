@@ -99,7 +99,7 @@ class Scan:
         self.parse_us: list[float] = []
         self.serde_us: list[float] = []
 
-        self.messages = {"idle": self._msg_bucket(), "load": self._msg_bucket()}
+        self.messages = {"idle": self._msg_bucket(), "load": self._msg_bucket(), "settle": self._msg_bucket()}
         self.drops = {"total": 0, "by_reason": {}, "by_kind": {}}
         self.queues: dict[str, list[tuple[float, float]]] = {} # name -> (timestamp, fill)
         self.queue_capacity: dict[str, int] = {} # name -> capacity
@@ -111,7 +111,7 @@ class Scan:
 
         # privacy observations
         self.local: dict[int, dict[str, set[str]]] = {} # node id -> (case -> {event ids})
-        self.msg_case_constraint: dict[int, set[tuple[str, str]]] = {} # node id -> {(case, constraint)}
+        self.msg_case_constraint: dict[int, set[tuple[str, str, str]]] = {} # node id -> {(case, constraint, peer address)}
         self.msg_case_only: dict[int, set[str]] = {} # node id -> {case} --- from gossip, so no constraint
         self.case_end_seen: dict[int, dict[str, dict]] = {} # node id -> (case -> case end seen record)
         self.case_end_truth: dict[str, int] = {} # case -> node id
@@ -175,7 +175,9 @@ class Scan:
 
     def _message(self, line: dict, node_id: int, wallclock_time: int) -> None:
         bucket_name = ("idle" if self.windows.contains(self.windows.idle, wallclock_time)
-                       else "load" if self.windows.contains(self.windows.load, wallclock_time) else None)
+                       else "load" if self.windows.contains(self.windows.load, wallclock_time)
+                       else "settle" if self.windows.contains(self.windows.settle, wallclock_time)
+                       else None)
         payload_type = str(line.get("payload_type"))
         direction = line.get("direction")
         byte_count = int(line.get("bytes", 0))
@@ -202,12 +204,12 @@ class Scan:
                     bucket[key][value] = bucket[key].get(value, 0) + 1
         self.serde_us.append(line.get("serde_us", 0))
 
-        # privacy: a coordination message tells the endpoints that this case touched this constraint
+        # privacy: a coordination message tells the endpoints that this case touched this constraint.
         case_id = line.get("case_id")
         if case_id and payload_type in ("conformance", "ce_gossip") and self._keep_case(case_id):
             constraint_id = line.get("constraint_id")
             if constraint_id:
-                self.msg_case_constraint.setdefault(node_id, set()).add((case_id, constraint_id))
+                self.msg_case_constraint.setdefault(node_id, set()).add((case_id, constraint_id, line.get("peer_address")))
             else:
                 self.msg_case_only.setdefault(node_id, set()).add(case_id)
 
@@ -357,8 +359,26 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
     }
 
 
+def merge_message_buckets(first_bucket: dict, second_bucket: dict) -> dict:
+    merged = {"sent": first_bucket["sent"] + second_bucket["sent"],
+              "received": first_bucket["received"] + second_bucket["received"],
+              "bytes_sent": first_bucket["bytes_sent"] + second_bucket["bytes_sent"],
+              "bytes_received": first_bucket["bytes_received"] + second_bucket["bytes_received"],
+              "by_payload_type": {}, "by_cc_msg_type": {}, "by_gossip_msg_type": {}}
+    for bucket in (first_bucket, second_bucket):
+        for payload_type, counts in bucket["by_payload_type"].items():
+            target = merged["by_payload_type"].setdefault(
+                payload_type, {"sent": 0, "received": 0, "bytes_sent": 0, "bytes_received": 0})
+            for field, value in counts.items():
+                target[field] += value
+        for key in ("by_cc_msg_type", "by_gossip_msg_type"):
+            for message_type, count in bucket[key].items():
+                merged[key][message_type] = merged[key].get(message_type, 0) + count
+    return merged
+
+
 # metrics from the sender
-def send_metrics(send_dir: Path, system: str, windows: Windows) -> dict:
+def send_metrics(send_dir: Path, system: str) -> dict:
     send_summary_path = send_dir / f"{system}.summary.json"
     send_summary = None
     if send_summary_path.exists():
@@ -432,15 +452,19 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     revision_histogram: dict[str, int] = {} # number of revisions -> how many results had this many revisions
     multi_revision_pairs_count = 0
     final_after_send_end = 0
+    highest_revision = 0
+    verdicts_by_trigger: dict[str, int] = {} # trigger -> number of (case, constraint) pairs
 
     for (case_id, constraint_id), revisions in scan.verdicts.items():
         ordered = sorted(revisions.items())
-        first_rev, (t3, _r, trigger, instance) = ordered[0]
-        _last_rev, (t4, _r2, _t2, _i2) = ordered[-1]
+        first_revision, (t3, _r, trigger, instance) = ordered[0]
+        last_revision, (t4, _r2, _t2, _i2) = ordered[-1]
         revision_count = len(ordered)
         revision_histogram[str(revision_count)] = revision_histogram.get(str(revision_count), 0) + 1
         if revision_count > 1:
             multi_revision_pairs_count += 1
+        highest_revision = max(highest_revision, last_revision)
+        verdicts_by_trigger[str(trigger)] = verdicts_by_trigger.get(str(trigger), 0) + 1
         if windows.load[1] and t4 > windows.load[1]:
             final_after_send_end += 1
         if windows.contains(windows.steady, t3):
@@ -455,7 +479,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             if instance in scan.t2:
                 routing.append(scan.t2[instance] - t1)
                 checking.append(t3 - scan.t2[instance])
-        elif trigger in ("case_end", "timer"):
+        elif trigger == "case_end":
             # no triggering event, so it is measured from the arrival of the end activity
             arrival = end_event_arrival.get(case_id)
             if arrival is not None and windows.contains(windows.steady, arrival):
@@ -499,7 +523,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
         negative_fraction = negative / len(coordination)
 
     # --- throughput
-    send = send_metrics(run_dir / "send", system, windows)
+    send = send_metrics(run_dir / "send", system)
     steady_duration_s = windows.seconds(windows.steady)
     queues_out = {}
     for queue_name, samples in scan.queues.items():
@@ -522,14 +546,18 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
 
     # --- messages
     load_messages = scan.messages["load"]
+    settle_messages = scan.messages["settle"]
     idle_messages = scan.messages["idle"]
+    workload_messages = merge_message_buckets(load_messages, settle_messages)
+
     events = send.get("events_sent") or len(scan.t1) or 1
     cases_count = send.get("cases") or len(per_case_times) or 1
     idle_seconds = windows.seconds(windows.idle)
+    settle_seconds = windows.seconds(windows.settle)
     idle_nodes = max(1, len(scan.nodes_seen))
+
     def sum_all(field: str, payloads) -> int:
-        return sum(counts[field] for payload_type, counts in load_messages["by_payload_type"].items()
-                   if payload_type in payloads)
+        return sum(counts[field] for payload_type, counts in workload_messages["by_payload_type"].items() if payload_type in payloads)
 
     coordination_sent = sum_all("sent", COORDINATION_PAYLOADS)
     coordination_bytes = sum_all("bytes_sent", COORDINATION_PAYLOADS)
@@ -537,8 +565,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     transport_bytes = sum_all("bytes_sent", TRANSPORT_PAYLOADS)
     sink_sent = sum_all("sent", SINK_PAYLOADS)
     sink_bytes = sum_all("bytes_sent", SINK_PAYLOADS)
-    payload_sent = load_messages["sent"] - sink_sent
-    payload_bytes = load_messages["bytes_sent"] - sink_bytes
+    payload_sent = workload_messages["sent"] - sink_sent
+    payload_bytes = workload_messages["bytes_sent"] - sink_bytes
 
     resources = resource_metrics(run_dir / "resources" / f"{system}.jsonl", windows)
 
@@ -580,6 +608,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "max_on_a_pair": max((len(revision) for revision in scan.verdicts.values()), default=0),
             "revisions_total": sum(len(revision) for revision in scan.verdicts.values()),
             "histogram": revision_histogram,
+            "highest_revision_number": highest_revision,
+            "by_trigger": verdicts_by_trigger,
             "final_after_send_end": final_after_send_end,
         },
         "resources": {
@@ -588,10 +618,12 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
         },
         "messages": {
             "load": load_messages,
+            "settle": settle_messages,
+            "workload": workload_messages,
             "idle": idle_messages,
             "derived": {
-                "messages_per_event": load_messages["sent"] / events,
-                "bytes_per_event": load_messages["bytes_sent"] / events,
+                "messages_per_event": workload_messages["sent"] / events,
+                "bytes_per_event": workload_messages["bytes_sent"] / events,
                 "messages_per_event_excl_sink": payload_sent / events,
                 "bytes_per_event_excl_sink": payload_bytes / events,
                 "messages_per_event_coordination": coordination_sent / events,
@@ -604,7 +636,12 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                                                        if coordination_sent else 0.0,
                 "mean_bytes_per_transport_message": (transport_bytes / transport_sent)
                                                     if transport_sent else 0.0,
-                "messages_per_case": load_messages["sent"] / cases_count,
+                "messages_per_case": workload_messages["sent"] / cases_count,
+                "settle_share_of_messages": (settle_messages["sent"] / workload_messages["sent"]) if workload_messages["sent"] else 0.0,
+                "settle_share_of_bytes": (settle_messages["bytes_sent"] / workload_messages["bytes_sent"])
+                                         if workload_messages["bytes_sent"] else 0.0,
+                "idle_overlay_bytes_during_settle": (idle_messages["bytes_sent"] / idle_seconds
+                                                     * settle_seconds) if idle_seconds else 0.0,
                 "coordination_ratio": (coordination_sent / payload_sent)
                                       if payload_sent else 0.0,
                 "idle_bytes_per_second": (idle_messages["bytes_sent"] / idle_seconds)
@@ -683,28 +720,31 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
             all_facts.add(f"watch({event_id})")
             all_facts.add(f"place({constraint_id},{role},{node_id})")
 
-    # which node watches which activity, so a coordination message can be turned into  "the counterpart activity of this constraint occurred in this case"
-    constraint_events = {constraint_id: sorted({event for _n, _r, event in placements})
-                         for constraint_id, placements in constraint_roles.items()}
-
     # make sure only the desired case fraction is used if a case limit is configured
     def keep(case_id: str) -> bool:
         return case_limit is None or case_id_hash_fraction(case_id) < case_limit
 
+    # what a node learns locally
     local = {str(node): {case: sorted(events) for case, events in cases.items() if keep(case)}
              for node, cases in scan.local.items()}
-    inferred: dict[str, dict[str, list[str]]] = {} # node id -> (case -> [event ids])
-    for node, pairs in scan.msg_case_constraint.items():
-        per_case: dict[str, set[str]] = {}
-        for case_id, constraint_id in pairs:
+
+    # what a node learns from coordination traffic
+    inferred_partners: dict[str, dict[str, list[list]]] = {} # node id -> (case -> [[constraint, partner node]])
+    for node, observed in scan.msg_case_constraint.items():
+        per_case: dict[str, set[tuple]] = {}
+        for case_id, constraint_id, peer_address in observed:
             if not keep(case_id):
                 continue
-            per_case.setdefault(case_id, set()).update(constraint_events.get(constraint_id, []))
-        inferred[str(node)] = {case: sorted(events) for case, events in per_case.items()}
+            partner = peer_address_to_node_id.get(peer_address)
+            if partner is None or partner == node:
+                continue
+            per_case.setdefault(case_id, set()).add((constraint_id, partner))
+        inferred_partners[str(node)] = {case: sorted([list(pair) for pair in pairs])
+                                        for case, pairs in per_case.items()}
+    # gossip without a constraint id still reveals that the case exists
+    cases_known_to_exist: dict[str, list[str]] = {} # node id -> [case ids]
     for node, cases in scan.msg_case_only.items():
-        per_case = inferred.setdefault(str(node), {})
-        for case_id in cases:
-            per_case.setdefault(case_id, [])
+        cases_known_to_exist[str(node)] = sorted(case for case in cases if keep(case))
 
     case_end = {str(node): cases for node, cases in scan.case_end_seen.items()}
 
@@ -722,7 +762,8 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
         "model_facts": {"total": len(all_facts), "per_node": facts_per_node,
                         "all": sorted(all_facts)},
         "local_events": local,
-        "inferred_events": inferred,
+        "inferred_partners": inferred_partners,
+        "cases_known_to_exist": cases_known_to_exist,
         "case_end_seen": case_end,
         "case_end_truth": {case: node for case, node in scan.case_end_truth.items()
                            if keep(case)},
@@ -781,8 +822,8 @@ def process_run(run_dir: Path, args) -> str:
                     "experiment": run_spec.get("experiment"), "params": params, "systems": {}}
 
     for timeline in run_spec.get("systems_timeline", []):
-        metrics, observation = system_metrics(run_dir, timeline, params, args)
-        metrics["systems"][timeline["system"]] = metrics
+        system_metrics_out, observation = system_metrics(run_dir, timeline, params, args)
+        metrics["systems"][timeline["system"]] = system_metrics_out
         observations["systems"][timeline["system"]] = observation
 
     metrics_out_path.write_text(json.dumps(metrics, indent=2, default=str))

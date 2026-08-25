@@ -9,21 +9,26 @@ writes privacy.json
 
   python3.11 simulation/compute_privacy.py --results results/
   python3.11 simulation/compute_privacy.py --results results/ --seed 7 --draws 500 --out privacy_seed7.json
+  python3.11 simulation/compute_privacy.py --results results/ --bk-type set mult seq
 
 metrics per compromise size
 
-  case_exposure = fraction of a case visible to the attacker (by distinct activity and weighted by event occurrences)
-  full_cases = fraction of cases the attacker can reconstruct completely
+  case_exposure_named = fraction of a case's distinct activities the attacker can name
+  case_exposure_occurrence = the same, weighted by how often each activity occurs in the case
+  case_exposure_with_anonymous = named plus anonymous occurrences
+  full_case_fraction = fraction of cases whose activities are all named
+  total_reconstruction_probability = fraction of draws in which every case is fully named
   model_fact_disclosure = fraction of the process model facts the attacker learns
-  case_disclosure = fraction of cases for which the attacker links a case to its trace (case/attribute disclosure in the sense of rafiei and van der aalst)
-  trace_disclosure = fraction of distinct traces the attacker can single out
-  first_spy = precision and recall of guessing the origin of the case end gossip as the source_peer of the earliest sighting among compromised nodes
+  case_disclosure_<type> = identity disclosure (rafiei and van der aalst (2021))
+  trace_disclosure_<type> = attribute disclosure (rafiei and van der aalst (2021))
+  first_spy = precision and recall of guessing the origin of the case end gossip as the source_peer of the earliest observation among the compromised nodes
 """
 from __future__ import annotations
 
 import argparse
 import gzip
 import json
+import math
 import random
 import sys
 from collections import Counter
@@ -31,7 +36,8 @@ from pathlib import Path
 from helpers import percentiles, discover_runs
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+BK_TYPES = ("set", "mult", "seq")
 
 
 # loads the actual event stream (event log) as ground truth
@@ -55,21 +61,142 @@ def load_ground_truth(manifest: Path) -> dict:
             for case_id, case in cases.items()}
 
 
+
+# the disclosure measures of rafiei and van der aalst (2021) evaluated against the ground truth log
+#
+# the log is collapsed to its variants (unique traces) with their frequencies
+# a candidate background knowledge selects a subset of variants and the multiset of matching traces comes from their frequencies
+# the variants containing a given activity are precomputed as bitmasks, so resolving a candidate intersects a few integers instead of scanning the log
+class DisclosureIndex:
+
+    def __init__(self, ground_truth_event_log: dict):
+        variant_counts = Counter(case["trace"] for case in ground_truth_event_log.values())
+        self.variants = list(variant_counts.keys())
+        self.counts = [variant_counts[variant] for variant in self.variants]
+        self.total_traces = sum(self.counts)
+
+        self.activity_mask: dict[str, int] = {} # activity -> bitmask of variants containing it
+        self.count_mask: dict[tuple[str, int], int] = {} # (activity, k) -> variants with >= k of it
+        for index, variant in enumerate(self.variants):
+            bit = 1 << index
+            for activity, occurrences in Counter(variant).items():
+                self.activity_mask[activity] = self.activity_mask.get(activity, 0) | bit
+                for k in range(1, occurrences + 1):
+                    self.count_mask[(activity, k)] = self.count_mask.get((activity, k), 0) | bit
+
+        self._mask_cache: dict[tuple, int] = {}
+        self._stats_cache: dict[int, tuple[int, float]] = {}
+
+    # bitmask of the variants matching a candidate background knowledge
+    def _mask(self, bk_type: str, candidate) -> int:
+        cache_key = (bk_type, candidate)
+        cached = self._mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        mask = (1 << len(self.variants)) - 1
+        if bk_type == "set":
+            for activity in candidate:
+                mask &= self.activity_mask.get(activity, 0)
+                if not mask:
+                    break
+        elif bk_type == "mult":
+            for activity, occurrences in candidate:
+                mask &= self.count_mask.get((activity, occurrences), 0)
+                if not mask:
+                    break
+        else: # seq: prune with the set mask first, then verify the subsequence directly
+            for activity in set(candidate):
+                mask &= self.activity_mask.get(activity, 0)
+                if not mask:
+                    break
+            for index in list(_bits(mask)):
+                if not _is_subsequence(candidate, self.variants[index]):
+                    mask &= ~(1 << index)
+
+        self._mask_cache[cache_key] = mask
+        return mask
+
+    # |proj(x)| and ent(proj(x)) / max_ent(proj(x)) for one candidate
+    def stats(self, bk_type: str, candidate) -> tuple[int, float]:
+        mask = self._mask(bk_type, candidate)
+        cached = self._stats_cache.get(mask)
+        if cached is not None:
+            return cached
+
+        matching = [self.counts[index] for index in _bits(mask)]
+        total = sum(matching)
+        if total == 0:
+            result = (0, 0.0)
+        elif len(matching) <= 1:
+            # a single matching variant: no uncertainty about the trace is left (entropy ratio = 0, trace disclosure contribution = 1)
+            result = (total, 0.0)
+        else:
+            entropy = 0.0
+            for count in matching:
+                frequency = count / total
+                entropy -= frequency * math.log2(frequency)
+            result = (total, entropy / math.log2(len(matching)))
+
+        self._stats_cache[mask] = result
+        return result
+
+
+# iterate the set bit positions of a bitmask
+def _bits(mask: int):
+    while mask:
+        lowest = mask & -mask
+        yield lowest.bit_length() - 1
+        mask ^= lowest
+
+
+def _is_subsequence(candidate: tuple, trace: tuple) -> bool:
+    position = 0
+    for activity in trace:
+        if position < len(candidate) and activity == candidate[position]:
+            position += 1
+    return position == len(candidate)
+
+
+# the background knowledge that a set of named activities gives about one case, per type
+def build_candidates(named: set[str], truth_case: dict, bk_types) -> dict:
+    candidates = {}
+    if "set" in bk_types:
+        candidates["set"] = frozenset(named)
+    if "mult" in bk_types:
+        candidates["mult"] = tuple(sorted((activity, count)
+                                          for activity, count in truth_case["activities"].items()
+                                          if activity in named))
+    if "seq" in bk_types:
+        candidates["seq"] = tuple(activity for activity in truth_case["trace"] if activity in named)
+    return candidates
+
+
 # observations about one system
 class SystemView:
 
-    def __init__(self, observations: dict, truth: dict, use_inferred: bool):
+    def __init__(self, observations: dict, truth: dict, index: "DisclosureIndex", use_coordination: bool, bk_types):
         self.system = observations["system"]
         self.pool = list(observations["attacker_pool"])
         self.node_roles = observations.get("node_roles", {})
         self.truth = truth
+        self.index = index
+        self.bk_types = tuple(bk_types)
+        self.use_coordination = use_coordination
 
-        self.visible: dict[int, dict[str, set[str]]] = {} # node id -> (case -> event ids)
-        for source in ("local_events",) + (("inferred_events",) if use_inferred else ()):
-            for node, cases in observations.get(source, {}).items():
-                per_node = self.visible.setdefault(int(node), {})
-                for case_id, events in cases.items():
-                    per_node.setdefault(case_id, set()).update(events)
+        # activities a node can name because they were routed to it
+        self.local: dict[int, dict[str, set[str]]] = {} # node id -> (case -> event ids)
+        for node, cases in observations.get("local_events", {}).items():
+            per_node = self.local.setdefault(int(node), {})
+            for case_id, events in cases.items():
+                per_node.setdefault(case_id, set()).update(events)
+
+        # occurrences a node learns about from coordination traffic without the activity name
+        self.partners: dict[int, dict[str, set[tuple]]] = {}
+        for node, cases in observations.get("inferred_partners", {}).items():
+            per_node = self.partners.setdefault(int(node), {})
+            for case_id, pairs in cases.items():
+                per_node.setdefault(case_id, set()).update((constraint_id, int(partner)) for constraint_id, partner in pairs)
 
         self.facts: dict[int, set[str]] = {int(node): set(facts) for node, facts in observations["model_facts"]["per_node"].items()}
         self.facts_total = observations["model_facts"]["total"]
@@ -79,47 +206,62 @@ class SystemView:
         self.peer_to_node = {address: int(node) for address, node in observations.get("peer_to_node", {}).items()}
 
         # cases that appear anywhere in this run and in the ground truth
-        seen = {case for cases in self.visible.values() for case in cases}
+        seen = {case for cases in self.local.values() for case in cases}
+        seen |= {case for cases in self.partners.values() for case in cases}
         self.cases = sorted(seen & set(truth))
-
-        # trace multiplicity: a trace shared by many cases hides them from each other
-        trace_counts = Counter(truth[case]["trace"] for case in self.cases)
-        self.trace_counts = trace_counts
 
 
     # evaluate a draw of compromised nodes
     def evaluate(self, compromised: list[int]) -> dict:
         compromised_set = set(compromised)
 
-        merged: dict[str, set[str]] = {} # case -> [event ids]
+        named_per_case: dict[str, set[str]] = {} # case -> named activities
         for node in compromised_set:
-            for case_id, events in self.visible.get(node, {}).items():
-                merged.setdefault(case_id, set()).update(events)
+            for case_id, events in self.local.get(node, {}).items():
+                named_per_case.setdefault(case_id, set()).update(events)
 
-        by_activity, by_occurrence = [], []
+        anonymous_per_case: dict[str, set[tuple]] = {} # case -> (constraint, partner node)
+        if self.use_coordination:
+            for node in compromised_set:
+                for case_id, pairs in self.partners.get(node, {}).items():
+                    # a compromised partner contributes its activities by name
+                    outside = {pair for pair in pairs if pair[1] not in compromised_set}
+                    if outside:
+                        anonymous_per_case.setdefault(case_id, set()).update(outside)
+
+        by_activity, by_occurrence, with_anonymous = [], [], []
         full_cases = 0
-        case_disclosed = 0
-        traces_singled: set[tuple] = set()
+        disclosure = {bk_type: {"uniqueness": [], "entropy_ratio": []} for bk_type in self.bk_types}
+        knowledge_sizes = []
+
         for case_id in self.cases:
             truth_case = self.truth[case_id]
             activities = truth_case["activities"]
-            visible = merged.get(case_id, set())
-            if not visible:
-                by_activity.append(0.0)
-                by_occurrence.append(0.0)
-                continue
-            fraction_activity = len(visible & set(activities)) / len(activities)
+            named = named_per_case.get(case_id, set()) & set(activities)
             occurrences = sum(activities.values())
-            fraction_occurrence = sum(count for event, count in activities.items()
-                                      if event in visible) / occurrences
-            by_activity.append(fraction_activity)
+
+            fraction_named = len(named) / len(activities)
+            fraction_occurrence = sum(count for activity, count in activities.items() if activity in named) / occurrences
+            # every anonymous occurrence says that one more activity of this case happened without saying which one
+            anonymous = len(anonymous_per_case.get(case_id, set()))
+            fraction_with_anonymous = min(1.0, (len(named) + anonymous) / len(activities))
+
+            by_activity.append(fraction_named)
             by_occurrence.append(fraction_occurrence)
-            if fraction_activity >= 1.0:
+            with_anonymous.append(fraction_with_anonymous)
+            if fraction_named >= 1.0:
                 full_cases += 1
-                # check if trace is unique
-                if self.trace_counts[truth_case["trace"]] == 1:
-                    case_disclosed += 1
-                    traces_singled.add(truth_case["trace"])
+
+            # anonymous occurrences cannot match a trace, so they do not count
+            if not named:
+                continue
+            knowledge_sizes.append(len(named))
+            for bk_type, candidate in build_candidates(named, truth_case, self.bk_types).items():
+                matching_traces, entropy_ratio = self.index.stats(bk_type, candidate)
+                if matching_traces == 0:
+                    continue
+                disclosure[bk_type]["uniqueness"].append(1.0 / matching_traces)
+                disclosure[bk_type]["entropy_ratio"].append(entropy_ratio)
 
         learned_facts: set[str] = set()
         for node in compromised_set:
@@ -130,19 +272,28 @@ class SystemView:
         total_reconstruction = 1.0 if (self.cases and full_cases == len(self.cases)) else 0.0
         any_full_case = 1.0 if full_cases else 0.0
 
-        return {
+        result = {
             "total_reconstruction_probability": total_reconstruction,
             "any_full_case_probability": any_full_case,
-            "case_exposure_activity": (sum(by_activity) / len(by_activity)) if by_activity else 0.0,
+            "case_exposure_named": (sum(by_activity) / len(by_activity)) if by_activity else 0.0,
             "case_exposure_occurrence": (sum(by_occurrence) / len(by_occurrence)) if by_occurrence else 0.0,
+            "case_exposure_with_anonymous": (sum(with_anonymous) / len(with_anonymous)) if with_anonymous else 0.0,
             "full_case_fraction": (full_cases / len(self.cases)) if self.cases else 0.0,
-            "case_disclosure": (case_disclosed / len(self.cases)) if self.cases else 0.0,
-            "trace_disclosure": (len(traces_singled) / len(self.trace_counts))
-                                if self.trace_counts else 0.0,
             "model_fact_disclosure": (len(learned_facts) / self.facts_total)
                                      if self.facts_total else 0.0,
+            "cases_with_knowledge_fraction": (len(knowledge_sizes) / len(self.cases))
+                                             if self.cases else 0.0,
+            "background_knowledge_size": (sum(knowledge_sizes) / len(knowledge_sizes))
+                                         if knowledge_sizes else 0.0,
             **first_spy,
         }
+
+        for bk_type in self.bk_types:
+            uniqueness = disclosure[bk_type]["uniqueness"]
+            entropy_ratios = disclosure[bk_type]["entropy_ratio"]
+            result[f"case_disclosure_{bk_type}"] = (sum(uniqueness) / len(uniqueness)) if uniqueness else 0.0
+            result[f"trace_disclosure_{bk_type}"] = (1.0 - sum(entropy_ratios) / len(entropy_ratios)) if entropy_ratios else 0.0
+        return result
 
     def _first_spy(self, compromised: set[int]) -> dict:
         guesses = 0
@@ -172,13 +323,13 @@ class SystemView:
         }
 
 
-    # greedy set cover per case to find out how many nodes are enough to see the whole case
+    # greedy set cover per case to find out how many nodes are enough to name the whole case
     def min_nodes_per_case(self) -> dict:
 
         counts = []
         for case_id in self.cases:
             needed = set(self.truth[case_id]["activities"])
-            available = {node: self.visible.get(node, {}).get(case_id, set()) & needed for node in self.pool}
+            available = {node: self.local.get(node, {}).get(case_id, set()) & needed for node in self.pool}
             chosen = 0
             remaining = set(needed)
             while remaining:
@@ -268,6 +419,25 @@ def global_attacker(observations: dict) -> dict:
     }
 
 
+# the disclosure risk of the ground truth log itself
+def log_baseline_disclosure(ground_truth_event_log: dict, index: "DisclosureIndex", bk_types) -> dict:
+    baseline = {"cases": len(ground_truth_event_log),
+                "distinct_traces": len(index.variants),
+                "trace_uniqueness": (len(index.variants) / len(ground_truth_event_log))
+                                    if ground_truth_event_log else 0.0}
+    for bk_type in bk_types:
+        uniqueness, entropy_ratios = [], []
+        for case in ground_truth_event_log.values():
+            candidate = build_candidates(set(case["activities"]), case, (bk_type,))[bk_type]
+            matching_traces, entropy_ratio = index.stats(bk_type, candidate)
+            if matching_traces:
+                uniqueness.append(1.0 / matching_traces)
+                entropy_ratios.append(entropy_ratio)
+        baseline[f"case_disclosure_{bk_type}"] = (sum(uniqueness) / len(uniqueness)) if uniqueness else 0.0
+        baseline[f"trace_disclosure_{bk_type}"] = (1.0 - sum(entropy_ratios) / len(entropy_ratios)) if entropy_ratios else 0.0
+    return baseline
+
+
 def process_run(run_dir: Path, args) -> str:
     observations_path = run_dir / "observations.json.gz"
     if not observations_path.exists():
@@ -283,6 +453,7 @@ def process_run(run_dir: Path, args) -> str:
     if manifest is None or not Path(manifest).exists():
         return f"skip {run_dir.name}: no manifest (pass --manifest)"
     ground_truth_event_log = load_ground_truth(Path(manifest))
+    index = DisclosureIndex(ground_truth_event_log)
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -290,16 +461,17 @@ def process_run(run_dir: Path, args) -> str:
         "experiment": observations.get("experiment"),
         "params": observations.get("params"),
         "settings": {"seed": args.seed, "draws": args.draws,
-                     "use_inferred_events": not args.local_events_only,
+                     "use_coordination_traffic": not args.local_events_only,
+                     "bk_types": list(args.bk_type),
                      "compromise_sizes": args.sizes,
                      "manifest": str(manifest)},
-        "ground_truth": {"cases": len(ground_truth_event_log),
-                         "distinct_traces": len({case["trace"] for case in ground_truth_event_log.values()})},
+        "ground_truth": log_baseline_disclosure(ground_truth_event_log, index, args.bk_type),
         "systems": {},
     }
 
     for system, system_observations in observations.get("systems", {}).items():
-        view = SystemView(system_observations, ground_truth_event_log, use_inferred=not args.local_events_only)
+        view = SystemView(system_observations, ground_truth_event_log, index,
+                          use_coordination=not args.local_events_only, bk_types=args.bk_type)
         payload["systems"][system] = {
             "local_attacker": evaluate_system(view, args.draws, args.seed, args.sizes),
             "global_attacker": global_attacker(system_observations),
@@ -319,6 +491,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=1234, help="seed for drawing compromised nodes")
     parser.add_argument("--draws", type=int, default=200, help="random subsets per compromise size")
     parser.add_argument("--sizes", type=int, nargs="*", default=None, help="explicit compromise sizes (default: spaced over the pool)")
+    parser.add_argument("--bk-type", nargs="+", choices=BK_TYPES, default=["set"], help="background knowledge types for the disclosure measures (default: set)")
     parser.add_argument("--local-events-only", action="store_true", help="ignore what coordination traffic reveals (lower bound on exposure)")
     parser.add_argument("--out", default="privacy.json", help="output file name inside the run dir")
     args = parser.parse_args()
