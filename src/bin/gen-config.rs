@@ -671,7 +671,9 @@ fn catalog_traffic_fines() -> Vec<Template> {
                         mode: MinMaxMode::Max,
                     },
                     CREATE_FINE,
-                    None,
+                    Some(ResultBufferConfig::Revocable {
+                        duration: Duration::from_hours(24),
+                    }),
                 ),
                 (Role::TimeStop { start: 0 }, SEND_FINE, None),
             ],
@@ -685,7 +687,9 @@ fn catalog_traffic_fines() -> Vec<Template> {
                         mode: MinMaxMode::Min,
                     },
                     INSERT_FINE_NOTIFICATION,
-                    None,
+                    Some(ResultBufferConfig::Revocable {
+                        duration: Duration::from_hours(24),
+                    }),
                 ),
                 (Role::TimeStop { start: 0 }, ADD_PENALTY, None),
             ],
