@@ -33,7 +33,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction
+from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs
 
 SCHEMA_VERSION = 1
 
@@ -792,13 +792,6 @@ def process_run(run_dir: Path, args) -> str:
     return f"wrote {metrics_out_path.relative_to(args.results) if args.results else metrics_out_path}"
 
 
-def discover_runs(results: Path, pattern: str | None) -> list[Path]:
-    runs = [path.parent for path in sorted(results.rglob("run.json"))]
-    if pattern:
-        runs = [run for run in runs if fnmatch.fnmatch(run.parent.name, pattern)]
-    return runs
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results", type=Path, help="results directory to walk")
@@ -816,7 +809,7 @@ def main() -> None:
 
     runs = list(args.run)
     if args.results:
-        runs += discover_runs(args.results, args.experiment)
+        runs += discover_runs(args.results, args.experiment, "run.json")
     if not runs:
         sys.exit("nothing to do: pass --results and/or --run")
 

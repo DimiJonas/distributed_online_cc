@@ -20,10 +20,11 @@ import sys
 import math
 import threading
 import time
+import fnmatch
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterator
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
@@ -855,3 +856,11 @@ def slope_per_second(points: list[tuple[float, float]]) -> float:
 def case_id_hash_fraction(case_id: str) -> float:
     digest = hashlib.blake2b(case_id.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big") / float(1 << 64)
+
+
+# discover runs from run specs or observations
+def discover_runs(results: Path, pattern: str | None, filename: str) -> list[Path]:
+    runs = [path.parent for path in sorted(results.rglob(filename))]
+    if pattern:
+        runs = [run for run in runs if fnmatch.fnmatch(run.parent.name, pattern)]
+    return runs
