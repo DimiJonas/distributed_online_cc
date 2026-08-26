@@ -265,11 +265,7 @@ def ensure_stream(plan: dict, repo: Path, paths: RunPaths, params: dict, kind: s
         stream_dir = (repo / params["stream_dir"]).resolve()
         manifest = stream_dir / params.get("manifest", "manifest.jsonl")
         catalog_key = stable_key({"catalog": params["catalog"], "repeat": params["repeat"], "stream": str(stream_dir)})
-        expected = streams / f"expected_{catalog_key}.jsonl"
-        if not expected.exists():
-            compute_expected_cmd = binary_cmd(repo, plan["defaults"].get("bin_dir"), "compute-expected-results", plan["defaults"].get("use_cargo", False))
-            compute_expected_cmd += ["--config-dir", str(paths.configs("decentralized").resolve()), "--manifest", str(manifest), "--out", str(expected), "--summary"]
-            run_logged(compute_expected_cmd, repo, paths.root / "compute-expected-results.out")
+        expected = streams / f"prepared_{catalog_key}" / "expected_results.jsonl"
     else:
         # generate an event stream
         key = stable_key({key: params.get(key) for key in
@@ -295,6 +291,12 @@ def ensure_stream(plan: dict, repo: Path, paths: RunPaths, params: dict, kind: s
                 gen_events_cmd += ["--no-jitter"]
             run_logged(gen_events_cmd, repo, paths.root / "gen-events.out")
             tmp.rename(stream_dir)
+
+    if not expected.exists():
+        expected.parent.mkdir(parents=True, exist_ok=True)
+        compute_expected_cmd = binary_cmd(repo, plan["defaults"].get("bin_dir"), "compute-expected-results", plan["defaults"].get("use_cargo", False))
+        compute_expected_cmd += ["--config-dir", str(paths.configs("decentralized").resolve()), "--manifest", str(manifest), "--out", str(expected), "--summary"]
+        run_logged(compute_expected_cmd, repo, paths.root / "compute-expected-results.out")
 
     events = sum(1 for _ in open(manifest))
     cases = len({row["case_id"] for row in read_jsonl(manifest)})

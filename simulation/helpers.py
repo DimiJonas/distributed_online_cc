@@ -864,3 +864,87 @@ def discover_runs(results: Path, pattern: str | None, filename: str) -> list[Pat
     if pattern:
         runs = [run for run in runs if fnmatch.fnmatch(run.parent.name, pattern)]
     return runs
+
+
+# lightweight progress reporting for the long running evaluation scripts
+class Progress:
+
+    def __init__(self, total: int, label: str = "", stream=sys.stderr, enabled: bool = True, quiet_interval_s: float = 5.0):
+        self.total = max(0, int(total))
+        self.label = label
+        self.stream = stream
+        self.enabled = enabled and self.total > 0
+        self.quiet_interval_s = quiet_interval_s
+        self.done = 0
+        self.started_at = time.monotonic()
+        self.last_emit = 0.0
+        self.interactive = bool(getattr(stream, "isatty", lambda: False)())
+        self._line_open = False
+
+    @staticmethod
+    def _duration(seconds: float) -> str:
+        seconds = int(max(0, seconds))
+        if seconds < 60:
+            return f"{seconds}s"
+        if seconds < 3600:
+            return f"{seconds // 60}m{seconds % 60:02d}s"
+        return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
+
+    def _render(self, detail: str, force: bool) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not force and not self.interactive and (now - self.last_emit) < self.quiet_interval_s:
+            return
+        self.last_emit = now
+
+        elapsed = now - self.started_at
+        width = len(str(self.total))
+        percent = (self.done / self.total * 100.0) if self.total else 0.0
+        text = f"[{self.done:>{width}}/{self.total}] {percent:3.0f}%"
+        if self.label:
+            text += f" {self.label}"
+        if detail:
+            text += f" {detail}"
+        text += f"  ({self._duration(elapsed)} elapsed"
+        if self.done:
+            remaining = elapsed / self.done * (self.total - self.done)
+            if self.total - self.done > 0:
+                text += f", ~{self._duration(remaining)} left"
+        text += ")"
+
+        if self.interactive:
+            self.stream.write("\r\033[2K" + text[:200])
+            self._line_open = True
+        else:
+            self.stream.write(text + "\n")
+        self.stream.flush()
+
+    # one unit of work finished
+    def step(self, detail: str = "") -> None:
+        self.done += 1
+        self._render(detail, force=(self.done >= self.total))
+
+    # progress inside the current unit (does not advance the counter)
+    def note(self, detail: str = "") -> None:
+        self._render(detail, force=False)
+
+    def finish(self, detail: str = "") -> None:
+        if not self.enabled:
+            return
+        if self.interactive and self._line_open:
+            self.stream.write("\r\033[2K")
+            self._line_open = False
+        elapsed = time.monotonic() - self.started_at
+        message = f"{self.label or 'done'}: {self.done}/{self.total} in {self._duration(elapsed)}"
+        if detail:
+            message += f" {detail}"
+        self.stream.write(message + "\n")
+        self.stream.flush()
+
+    # print a normal line without destroying the progress line
+    def log(self, message: str) -> None:
+        if self.interactive and self._line_open:
+            self.stream.write("\r\033[2K")
+            self._line_open = False
+        print(message)

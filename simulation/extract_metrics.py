@@ -33,7 +33,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs
+from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs, Progress
 
 SCHEMA_VERSION = 1
 
@@ -434,9 +434,15 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     scan = Scan(windows, node_roles, None)
     records_dir = run_dir / "records" / system
     record_files = sorted(records_dir.glob("node-*.jsonl"))
-    for record_file in record_files:
+    reporter = getattr(args, "_progress", None)
+    total_bytes = sum(record_file.stat().st_size for record_file in record_files) or 1
+    read_bytes = 0
+    for index, record_file in enumerate(record_files, start=1):
         for line in read_jsonl(record_file):
             scan.feed(line)
+        read_bytes += record_file.stat().st_size
+        if reporter is not None:
+            reporter.note(f"{run_dir.name} {system}: records {index}/{len(record_files)} ({read_bytes / total_bytes * 100:.0f}% of {total_bytes / 1e6:.0f}MB)")
 
     end_event_arrival: dict[str, int] = {}
     for _, cases in scan.case_end_seen.items():
@@ -856,6 +862,7 @@ def main() -> None:
                         help="keep this fraction of cases in observations.json.gz, chosen by a hash of the case id so the same cases are kept in both systems "
                         "and across re-runs (default 1.0 = every case)")
     parser.add_argument("--no-observations", action="store_true", help="skip observations.json.gz (metrics only)")
+    parser.add_argument("--quiet", action="store_true", help="no progress output")
     args = parser.parse_args()
 
     runs = list(args.run)
@@ -864,13 +871,19 @@ def main() -> None:
     if not runs:
         sys.exit("nothing to do: pass --results and/or --run")
 
+    progress = Progress(len(runs), "extracting", enabled=not args.quiet)
     if args.jobs > 1 and len(runs) > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-            for message in pool.map(process_run, runs, [args] * len(runs)):
-                print(message)
+            for run_dir, message in zip(runs, pool.map(process_run, runs, [args] * len(runs))):
+                progress.step(run_dir.name)
+                progress.log(message)
     else:
+        args._progress = progress
         for run_dir in runs:
-            print(process_run(run_dir, args))
+            message = process_run(run_dir, args)
+            progress.step(run_dir.name)
+            progress.log(message)
+    progress.finish()
 
 
 if __name__ == "__main__":

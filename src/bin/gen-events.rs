@@ -1,37 +1,29 @@
 //! generate a realistic XES event stream from a systems node configs
 //!
-//! the configs are read to build a constraint catalog. from that catalog the
-//! generator derives a satisfying base trace per case: producers before consumers,
-//! order-first before order-second, at most one of the not-coexistence pair,
-//! counter frequencies within their limits, sensor values inside their
-//! thresholds, timer gaps respecting their durations, and the end activity at
-//! the end.
-//! cases are mostly this happy trace (with randomized internal order,
-//! counts, values and timing jitter), but a configurable fraction of cases deviate:
-//! events get swapped or dropped, counters over/undershoot, sensor values go
-//! out of range, timers get squeezed, both not-coexistence events appear, or
-//! the end activity comes early. every deviation has a known effect, so the
-//! generator also writes the 'ground truth' per (case, constraint).
+//! the configs are read to build a constraint catalog.
+//! from the catalog the generator derives a satisfying base trace per case: producers before consumers,
+//! order-first before order-second, at most one of the not-coexistence pair, counter frequencies within their limits,
+//! sensor values inside their thresholds, timer gaps respecting their durations, and the end activity at the end.
+//! cases are mostly this happy trace (with randomized internal order, counts, values and timing jitter), but a configurable fraction of cases deviate:
+//! events get swapped or dropped, counters over/undershoot, sensor values go out of range, timers get squeezed, both not-coexistence events appear
+//! or the end activity comes early.
 //!
 //! output (into --out-dir):
 //!   * one .xes file per event
-//!   * manifest.jsonl - one line per event (seq, case_id, event_id, file,
-//!     attributes, timestamp); the global stream order (by timestamp)
-//!   * expected_results.jsonl - {case_id, constraint_id, expected} ground
-//!     truth for comparing result databases against
+//!   * manifest.jsonl - one line per event (seq, case_id, event_id, file, attributes, timestamp); the global stream order (by timestamp)
 //!   * cases.jsonl - which deviations were applied to which case
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use clap::Parser;
 use online_cc::config::node_config::{MinMaxMode, SensorConstraintMode};
-use online_cc::types::{ConstraintId, EventId, SensorAttributeThreshold};
+use online_cc::types::{EventId, SensorAttributeThreshold};
 use online_cc::util::constraint_catalog::{Catalog, SensorSpec, build_catalog, load_configs};
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -255,18 +247,9 @@ impl Planned {
 struct CasePlan {
     events: Vec<Planned>,
     deviations: Vec<Deviation>,
-    /// constraint_id -> expected latest result
-    expected: BTreeMap<ConstraintId, &'static str>,
 }
 
 fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -> CasePlan {
-    // default expectation: everything satisfied
-    let mut expected: BTreeMap<ConstraintId, &'static str> = catalog
-        .result_constraint_ids()
-        .into_iter()
-        .map(|c| (c, "Satisfied"))
-        .collect();
-
     let mut early: Vec<Planned> = Vec::new(); // producers / setup
     let mut mid: Vec<Planned> = Vec::new(); // counters / independent events
     let mut late: Vec<Planned> = Vec::new(); // consumers / triggers
@@ -278,7 +261,6 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
         if dev(&|deviation| matches!(deviation, Deviation::OrderSwap(j) if *j == i)) {
             late.push(Planned::plain(&pair_spec.event_id_1));
             early.push(Planned::plain(&pair_spec.event_id_2));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else {
             early.push(Planned::plain(&pair_spec.event_id_1));
             late.push(Planned::plain(&pair_spec.event_id_2));
@@ -288,11 +270,9 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
     for (i, pair_spec) in catalog.response.iter().enumerate() {
         if dev(&|deviation| matches!(deviation, Deviation::ResponseDropConsumer(j) if *j == i)) {
             early.push(Planned::plain(&pair_spec.event_id_1));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else if dev(&|deviation| matches!(deviation, Deviation::ResponseSwap(j) if *j == i)) {
             early.push(Planned::plain(&pair_spec.event_id_2));
             late.push(Planned::plain(&pair_spec.event_id_1));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else {
             early.push(Planned::plain(&pair_spec.event_id_1));
             late.push(Planned::plain(&pair_spec.event_id_2));
@@ -302,11 +282,9 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
     for (i, pair_spec) in catalog.precedence.iter().enumerate() {
         if dev(&|d| matches!(d, Deviation::PrecedenceDropProducer(j) if *j == i)) {
             late.push(Planned::plain(&pair_spec.event_id_2));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else if dev(&|d| matches!(d, Deviation::PrecedenceSwap(j) if *j == i)) {
             early.push(Planned::plain(&pair_spec.event_id_2));
             late.push(Planned::plain(&pair_spec.event_id_1));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else {
             early.push(Planned::plain(&pair_spec.event_id_1));
             late.push(Planned::plain(&pair_spec.event_id_2));
@@ -317,7 +295,6 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
         if dev(&|d| matches!(d, Deviation::Coexist(j) if *j == i)) {
             mid.push(Planned::plain(&pair_spec.event_id_1));
             mid.push(Planned::plain(&pair_spec.event_id_2));
-            expected.insert(pair_spec.constraint_id.clone(), "Violated");
         } else {
             match rng.random_range(0..3) {
                 0 => mid.push(Planned::plain(&pair_spec.event_id_1)),
@@ -343,9 +320,6 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
             mid.push(Planned::plain(&appear_spec.counter_event_id));
         }
         late.push(Planned::plain(&appear_spec.trigger_event_id));
-        if off {
-            expected.insert(appear_spec.constraint_id.clone(), "Violated");
-        }
     }
     // distributed appearance counters
     for (i, dist_appear_spec) in catalog.dist_appearance.iter().enumerate() {
@@ -367,17 +341,12 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
             mid.push(Planned::plain(&event_id));
         }
         late.push(Planned::plain(&dist_appear_spec.trigger_event_id));
-        if off {
-            expected.insert(dist_appear_spec.constraint_id.clone(), "Violated");
-        }
     }
     // sensors
     for (i, sensor_spec) in catalog.sensor.iter().enumerate() {
         let missing = dev(&|d| matches!(d, Deviation::SensorMissingValue(j) if *j == i));
         let bad = dev(&|d| matches!(d, Deviation::SensorBadValue(j) if *j == i));
-        if missing {
-            expected.insert(sensor_spec.constraint_id.clone(), "Violated");
-        } else {
+        if !missing {
             let value = if bad {
                 violating_sensor_value(sensor_spec)
             } else {
@@ -388,12 +357,6 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
                 .attributes
                 .insert(sensor_spec.attribute_key.clone(), value);
             early.push(event);
-            if !sensor_spec
-                .mode
-                .evaluate_condition(value, sensor_spec.threshold)
-            {
-                expected.insert(sensor_spec.constraint_id.clone(), "Violated");
-            }
         }
         late.push(Planned::plain(&sensor_spec.trigger_event_id));
     }
@@ -422,9 +385,6 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
             early.push(start);
             late.push(stop);
         }
-        if off {
-            expected.insert(time_spec.constraint_id.clone(), "Violated");
-        }
     }
 
     // shuffle within phases while cross-phase requirements stay intact
@@ -451,11 +411,7 @@ fn build_case(catalog: &Catalog, deviations: Vec<Deviation>, rng: &mut StdRng) -
         }
     }
 
-    CasePlan {
-        events,
-        deviations,
-        expected,
-    }
+    CasePlan { events, deviations }
 }
 
 // shuffle a list but keep (start, stop) timer pairs that were inserted next to each other
@@ -565,7 +521,6 @@ fn main() {
     }
     let mut stream: Vec<EventWithTimestamp> = Vec::new();
     let mut cases_meta = String::new();
-    let mut expected_out = String::new();
 
     for case_number in 0..args.cases {
         let case_id = format!("{}-{}", args.case_prefix, case_number);
@@ -639,13 +594,6 @@ fn main() {
             });
         }
 
-        for (constraint_id, result) in &case_plan.expected {
-            expected_out.push_str(
-                &json!({"case_id": case_id, "constraint_id": constraint_id, "expected": result})
-                    .to_string(),
-            );
-            expected_out.push('\n');
-        }
         let names: Vec<&str> = case_plan.deviations.iter().map(deviation_name).collect();
         cases_meta.push_str(&json!({"case_id": case_id, "deviations": names}).to_string());
         cases_meta.push('\n');
@@ -685,12 +633,11 @@ fn main() {
     seed_text.push('\n');
 
     fs::write(args.out_dir.join(&args.manifest), manifest).unwrap();
-    fs::write(args.out_dir.join("expected_results.jsonl"), expected_out).unwrap();
     fs::write(args.out_dir.join("cases.jsonl"), cases_meta).unwrap();
     fs::write(args.out_dir.join("seed.txt"), seed_text).unwrap();
 
     println!(
-        "wrote {} events across {} case(s), {} deviant ({} constraints, seed {}) to {}\n  manifest: {}\n  ground truth: expected_results.jsonl, cases.jsonl",
+        "wrote {} events across {} case(s), {} deviant ({} constraints, seed {}) to {}\n  manifest: {}\n  deviations: cases.jsonl",
         stream.len(),
         args.cases,
         deviant_cases.len(),

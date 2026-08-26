@@ -39,6 +39,9 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from helpers import Progress  # noqa: E402
+
 SYSTEMS = ("decentralized", "central")
 
 # swept parameters where a bigger value means more resource, so saturation is indirectly proportional
@@ -773,6 +776,7 @@ def main() -> int:
     parser.add_argument("experiment_dir", type=Path, help="results/<experiment_id>")
     parser.add_argument("--x-param", default="rate", help="the swept parameter (default: rate)")
     parser.add_argument("--systems", nargs="*", default=list(SYSTEMS))
+    parser.add_argument("--quiet", action="store_true", help="no progress output")
     parser.add_argument("--achieved-ratio", type=float, default=0.95, help="saturated below this effective/target ratio (default 0.95)")
     parser.add_argument("--cpu-threshold", type=float, default=85.0, help="saturated above this cpu%% of one core on the busiest process (default 85)")
     parser.add_argument("--queue-fill", type=float, default=0.25, help="saturated above this peak queue depth / capacity (default 0.25)")
@@ -810,15 +814,19 @@ def main() -> int:
         return 0
 
     points_by_system: dict[str, list[dict]] = {system: [] for system in args.systems}
+    progress = Progress(len(run_directories) * len(args.systems), "collecting", enabled=not args.quiet)
     for run_directory in run_directories:
         for system in args.systems:
+            progress.note(f"{run_directory.name} {system}")
             point = collect_point(run_directory, system, args.x_param, tuple(args.infra_roles), tuple(args.infra_queues))
+            progress.step(f"{run_directory.name} {system}")
             if point is None:
                 continue
             point["_class"] = classify(point, thresholds)
             if args.include_invalid:
                 point["_class"]["invalid"] = []
             points_by_system[system].append(point)
+    progress.finish()
 
     for points in points_by_system.values():
         points.sort(key=lambda point: (point.get("x") is None, point.get("x"), point.get("run_id")))
