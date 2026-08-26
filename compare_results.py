@@ -216,18 +216,18 @@ def report_single(name, final, revisions, expected, args) -> tuple[dict, int]:
     wrong, absent, spurious, matches = [], [], [], []
     for key in keys:
         actual = final[key][0] if key in final else None
-        expected = expected.get(key)
-        if actual is None:
-            absent.append((key, expected))
-        elif key not in expected:
+        expected_result = expected.get(key)
+        if key not in expected:
             spurious.append((key, actual))
-        elif actual != expected:
-            wrong.append((key, expected, actual))
+        elif actual is None:
+            absent.append((key, expected_result))
+        elif actual != expected_result:
+            wrong.append((key, expected_result, actual))
         else:
             matches.append((key, actual))
 
-    for (case, constraint_id), expected, actual in wrong:
-        print(f"WRONG     {case}/{constraint_id}: {name} says {actual}, ground truth expects {expected}")
+    for (case, constraint_id), expected_result, actual in wrong:
+        print(f"WRONG     {case}/{constraint_id}: {name} says {actual}, ground truth expects {expected_result}")
         if args.show_info:
             final_row = final[(case, constraint_id)]
             print(f"    {name}: {final_row[1]}  (rev {final_row[3]}, {final_row[2]}, {final_row[4]} revision(s)"
@@ -235,9 +235,9 @@ def report_single(name, final, revisions, expected, args) -> tuple[dict, int]:
         if args.show_history:
             print("    revision history:")
             print_history(name, revisions.get((case, constraint_id), []))
-    for (case, constraint_id), expected in absent:
+    for (case, constraint_id), expected_result in absent:
         print(f"ABSENT    {case}/{constraint_id}: {name} produced no result "
-              f"(ground truth expects {expected})")
+              f"(ground truth expects {expected_result})")
     for (case, constraint_id), actual in spurious:
         print(f"SPURIOUS  {case}/{constraint_id}: {name} says {actual}, "
               f"the ground truth has no such pair")

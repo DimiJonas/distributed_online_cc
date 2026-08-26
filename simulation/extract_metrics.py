@@ -29,7 +29,7 @@ import math
 import os
 import sys
 from bisect import bisect_left
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -112,6 +112,7 @@ class Scan:
         # privacy observations
         self.local: dict[int, dict[str, set[str]]] = {} # node id -> (case -> {event ids})
         self.msg_case_constraint: dict[int, set[tuple[str, str, str]]] = {} # node id -> {(case, constraint, peer address)}
+        self.messages_without_peer = 0   # coordination messages whose peer address could not be read
         self.msg_case_only: dict[int, set[str]] = {} # node id -> {case} --- from gossip, so no constraint
         self.case_end_seen: dict[int, dict[str, dict]] = {} # node id -> (case -> case end seen record)
         self.case_end_truth: dict[str, int] = {} # case -> node id
@@ -209,7 +210,10 @@ class Scan:
         if case_id and payload_type in ("conformance", "ce_gossip") and self._keep_case(case_id):
             constraint_id = line.get("constraint_id")
             if constraint_id:
-                self.msg_case_constraint.setdefault(node_id, set()).add((case_id, constraint_id, line.get("peer_address")))
+                peer = line.get("address") or line.get("peer_address")
+                self.msg_case_constraint.setdefault(node_id, set()).add((case_id, constraint_id, peer))
+                if peer is None:
+                    self.messages_without_peer += 1
             else:
                 self.msg_case_only.setdefault(node_id, set()).add(case_id)
 
@@ -746,17 +750,28 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
 
     # what a node learns from coordination traffic
     inferred_partners: dict[str, dict[str, list[list]]] = {} # node id -> (case -> [[constraint, partner node]])
+    unresolved_peers: set = set()
+    resolved_pairs = 0
     for node, observed in scan.msg_case_constraint.items():
         per_case: dict[str, set[tuple]] = {}
         for case_id, constraint_id, peer_address in observed:
             if not keep(case_id):
                 continue
             partner = peer_address_to_node_id.get(peer_address)
-            if partner is None or partner == node:
+            if partner is None:
+                unresolved_peers.add(peer_address)
+                continue
+            if partner == node:
                 continue
             per_case.setdefault(case_id, set()).add((constraint_id, partner))
+            resolved_pairs += 1
         inferred_partners[str(node)] = {case: sorted([list(pair) for pair in pairs])
                                         for case, pairs in per_case.items()}
+
+    coordination_quality = {"observed_pairs": sum(len(observed) for observed in scan.msg_case_constraint.values()),
+                            "resolved_pairs": resolved_pairs,
+                            "messages_without_peer_address": scan.messages_without_peer,
+                            "unresolved_peer_addresses": sorted(str(peer) for peer in unresolved_peers)[:10]}
     # gossip without a constraint id still reveals that the case exists
     cases_known_to_exist: dict[str, list[str]] = {} # node id -> [case ids]
     for node, cases in scan.msg_case_only.items():
@@ -775,8 +790,8 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
         "attacker_pool": sorted(attacker_node_pool),
         "node_roles": {str(node_id): node_role for node_id, node_role in node_roles.items()},
         "peer_to_node": peer_address_to_node_id,
-        "model_facts": {"total": len(all_facts), "per_node": facts_per_node,
-                        "all": sorted(all_facts)},
+        "coordination_quality": coordination_quality,
+        "model_facts": {"total": len(all_facts), "per_node": facts_per_node, "all": sorted(all_facts)},
         "local_events": local,
         "inferred_partners": inferred_partners,
         "cases_known_to_exist": cases_known_to_exist,
@@ -874,15 +889,19 @@ def main() -> None:
     progress = Progress(len(runs), "extracting", enabled=not args.quiet)
     if args.jobs > 1 and len(runs) > 1:
         with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-            for run_dir, message in zip(runs, pool.map(process_run, runs, [args] * len(runs))):
+            submitted = {pool.submit(process_run, run_dir, args): run_dir for run_dir in runs}
+            progress.note(f"{len(runs)} run(s) over {args.jobs} worker(s)")
+            for future in as_completed(submitted):
+                run_dir = submitted[future]
+                progress.log(future.result())
                 progress.step(run_dir.name)
-                progress.log(message)
     else:
         args._progress = progress
         for run_dir in runs:
+            progress.note(run_dir.name)
             message = process_run(run_dir, args)
-            progress.step(run_dir.name)
             progress.log(message)
+            progress.step(run_dir.name)
     progress.finish()
 
 

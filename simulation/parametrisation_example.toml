@@ -72,7 +72,7 @@ external_central_sink = true      # give the central system its own sink node in
 [baseline]
 event_queue_size = 8192               # events are enqueued here after parsing
 loopback_queue_size = 8192            # used to skip tcp if the destination is the nodes own address (predominantly used by the central node)
-case_end_grace_period = "1s"          # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
+case_end_grace_period = "5s"          # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
 case_end_ttl = "60s"                  # how long a case end is gossiped -> should be bigger than gossip convergence time
 case_janitor_cleanup_interval = "1s"  # prunes completed cases from the node state
 

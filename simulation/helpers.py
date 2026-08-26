@@ -880,6 +880,8 @@ class Progress:
         self.last_emit = 0.0
         self.interactive = bool(getattr(stream, "isatty", lambda: False)())
         self._line_open = False
+        self._last_detail = ""
+        self._partial = 0.0     # progress inside the unit currently in flight
 
     @staticmethod
     def _duration(seconds: float) -> str:
@@ -893,6 +895,7 @@ class Progress:
     def _render(self, detail: str, force: bool) -> None:
         if not self.enabled:
             return
+        self._last_detail = detail
         now = time.monotonic()
         if not force and not self.interactive and (now - self.last_emit) < self.quiet_interval_s:
             return
@@ -900,17 +903,17 @@ class Progress:
 
         elapsed = now - self.started_at
         width = len(str(self.total))
-        percent = (self.done / self.total * 100.0) if self.total else 0.0
+        effective = min(float(self.total), self.done + self._partial)
+        percent = (effective / self.total * 100.0) if self.total else 0.0
         text = f"[{self.done:>{width}}/{self.total}] {percent:3.0f}%"
         if self.label:
             text += f" {self.label}"
         if detail:
             text += f" {detail}"
         text += f"  ({self._duration(elapsed)} elapsed"
-        if self.done:
-            remaining = elapsed / self.done * (self.total - self.done)
-            if self.total - self.done > 0:
-                text += f", ~{self._duration(remaining)} left"
+        if effective > 0 and self.total - effective > 0:
+            remaining = elapsed / effective * (self.total - effective)
+            text += f", ~{self._duration(remaining)} left"
         text += ")"
 
         if self.interactive:
@@ -923,10 +926,12 @@ class Progress:
     # one unit of work finished
     def step(self, detail: str = "") -> None:
         self.done += 1
+        self._partial = 0.0
         self._render(detail, force=(self.done >= self.total))
 
-    # progress inside the current unit (does not advance the counter)
-    def note(self, detail: str = "") -> None:
+    def note(self, detail: str = "", fraction: float | None = None) -> None:
+        if fraction is not None:
+            self._partial = min(1.0, max(0.0, float(fraction)))
         self._render(detail, force=False)
 
     def finish(self, detail: str = "") -> None:
@@ -946,5 +951,7 @@ class Progress:
     def log(self, message: str) -> None:
         if self.interactive and self._line_open:
             self.stream.write("\r\033[2K")
+            self.stream.flush()
             self._line_open = False
-        print(message)
+        print(message, flush=True)
+        self._render(self._last_detail, force=True)
