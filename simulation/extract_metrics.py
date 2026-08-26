@@ -102,7 +102,7 @@ class Scan:
         self.messages = {"idle": self._msg_bucket(), "load": self._msg_bucket(), "settle": self._msg_bucket()}
         self.drops = {"total": 0, "by_reason": {}, "by_kind": {}}
         self.queues: dict[str, list[tuple[float, float]]] = {} # name -> (timestamp, fill)
-        self.queue_capacity: dict[str, int] = {} # name -> capacity
+        self.queue_node_max: dict[str, dict[int, int]] = {} # queue name -> (node id -> peak depth) # name -> capacity
         self.tcp_queue_max = 0 # highest fill of a tcp channel queue
         self.peer_churn = {"created": 0, "removed": 0}
         self.meta: dict[int, dict] = {} # meta infos at node startup
@@ -160,7 +160,7 @@ class Scan:
             payload_kind = str(line.get("kind"))
             self.drops["by_kind"][payload_kind] = self.drops["by_kind"].get(payload_kind, 0) + 1
         elif record_type == "queues":
-            self._queues(line, wallclock_time)
+            self._queues(line, node_id, wallclock_time)
         elif record_type == "tcp_channel_queue_depth":
             self.tcp_queue_max = max(self.tcp_queue_max, int(line.get("depth", 0)))
         elif record_type == "case_end_seen":
@@ -232,15 +232,16 @@ class Scan:
             wallclock_time, line.get("result"), line.get("trigger"), line.get("instance_id"))
         self.constraint_type[line["constraint_id"]] = line.get("constraint_type")
 
-    def _queues(self, line: dict, wallclock_time: int) -> None:
+    def _queues(self, line: dict, node_id: int, wallclock_time: int) -> None:
         if not self.windows.contains(self.windows.load, wallclock_time):
             return
         for name in ("event_q", "loopback_q", "result_sink_q", "gossip_out_q", "gossip_in_q"):
             depth_sample = line.get(name) # (current fill, peak fill since last report, max capacity)
             if not depth_sample:
                 continue
-            self.queues.setdefault(name, []).append((wallclock_time, depth_sample[1]))  # peak since last report
-            self.queue_capacity[name] = depth_sample[2]
+            self.queues.setdefault(name, []).append((wallclock_time, depth_sample[1], depth_sample[2]))
+            per_node = self.queue_node_max.setdefault(name, {})
+            per_node[node_id] = max(per_node.get(node_id, 0), depth_sample[1])
 
     def _case_end(self, line: dict, node_id: int, wallclock_time: int) -> None:
         case_id = line["case_id"]
@@ -527,10 +528,20 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     steady_duration_s = windows.seconds(windows.steady)
     queues_out = {}
     for queue_name, samples in scan.queues.items():
-        depth_values = [depth_value for _t, depth_value in samples]
+        depth_values = [depth_value for _t, depth_value, _capacity in samples]
+        capacities = {capacity for _t, _d, capacity in samples if capacity}
+        utilizations = [depth_value / capacity for _t, depth_value, capacity in samples if capacity]
+        per_node_max = scan.queue_node_max.get(queue_name, {})
+        busiest = max(per_node_max.items(), key=lambda item: item[1], default=(None, 0))
         queues_out[queue_name] = {**percentiles(depth_values, (50, 95, 99)),
-                            "capacity": scan.queue_capacity.get(queue_name),
-                            "slope_per_s": slope_per_second(samples)}
+                            "capacity_min": min(capacities) if capacities else None,
+                            "capacity_max": max(capacities) if capacities else None,
+                            "max_utilization": max(utilizations) if utilizations else 0.0,
+                            "busiest_node_id": busiest[0],
+                            "busiest_node_max_depth": busiest[1],
+                            "nodes_reporting": len(per_node_max),
+                            "slope_per_s": slope_per_second([(t, depth_value)
+                                                             for t, depth_value, _c in samples])}
 
     saturation_reasons = []
     if (send.get("pacer_max_lag_ms") or 0) > 100:
@@ -538,8 +549,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     if scan.drops["total"] > 0:
         saturation_reasons.append(f"{scan.drops['total']} message drops")
     for queue_name, queue_stats in queues_out.items():
-        capacity = queue_stats.get("capacity") or 0
-        if capacity and queue_stats.get("max", 0) > 0.5 * capacity:
+        if queue_stats.get("max_utilization", 0.0) > 0.5:
             saturation_reasons.append(f"{queue_name} above half capacity")
         if queue_stats.get("slope_per_s", 0) > 1.0:
             saturation_reasons.append(f"{queue_name} growing")
