@@ -706,39 +706,41 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
         if node.overlay:
             peer_address_to_node_id[node.overlay] = node.node_id
 
-    # the process model as a set of facts and which facts each node can read off its own config
-    all_facts: set[str] = set()
-    facts_per_node: dict[str, list[str]] = {} # node id -> [facts]
+    model_facts: set[str] = set()
+    placement_facts: set[str] = set()
+    model_facts_per_node: dict[str, list[str]] = {}     # node id -> [model facts]
+    placement_facts_per_node: dict[str, list[str]] = {} # node id -> [placement facts]
     constraint_roles: dict[str, list[tuple[int, str, str]]] = {} # constraint id -> [(node id, role, event id)]
     for node in nodes:
-        facts: set[str] = set()
+        node_model: set[str] = set()
+        node_placement: set[str] = set()
         for constraint in node.constraints:
             constraint_id = constraint.get("constraint_id")
             role = constraint.get("constraint_role")
             event_id = constraint.get("event_id")
             constraint_roles.setdefault(constraint_id, []).append((node.node_id, role, event_id))
-            facts.add(f"exists({constraint_id})")
-            facts.add(f"type({constraint_id},{role})")
-            facts.add(f"watch({event_id})")
-            facts.add(f"place({constraint_id},{role},{node.node_id})")
-            # peer lists leak where the counterpart roles of this constraint were placed
+            node_model.add(f"exists({constraint_id})")
+            node_model.add(f"type({constraint_id},{role})")
+            node_model.add(f"watch({event_id})")
+            node_placement.add(f"place({constraint_id},{role},{node.node_id})")
             for constraint_config_key, constraint_config_value in constraint.items():
                 if not constraint_config_key.endswith("_peer") and not constraint_config_key.endswith("_peers"):
                     continue
                 for address in ([constraint_config_value] if isinstance(constraint_config_value, str) else (constraint_config_value or [])):
                     partner = peer_address_to_node_id.get(address)
                     if partner is not None:
-                        facts.add(f"place({constraint_id},partner,{partner})")
-        facts_per_node[str(node.node_id)] = sorted(facts)
-        all_facts |= facts
+                        node_placement.add(f"place({constraint_id},partner,{partner})")
+        model_facts_per_node[str(node.node_id)] = sorted(node_model)
+        placement_facts_per_node[str(node.node_id)] = sorted(node_placement)
+        model_facts |= node_model
+        placement_facts |= node_placement
 
-    # the full fact universe also contains the placements nobody advertises
     for constraint_id, placements in constraint_roles.items():
-        all_facts.add(f"exists({constraint_id})")
+        model_facts.add(f"exists({constraint_id})")
         for node_id, role, event_id in placements:
-            all_facts.add(f"type({constraint_id},{role})")
-            all_facts.add(f"watch({event_id})")
-            all_facts.add(f"place({constraint_id},{role},{node_id})")
+            model_facts.add(f"type({constraint_id},{role})")
+            model_facts.add(f"watch({event_id})")
+            placement_facts.add(f"place({constraint_id},{role},{node_id})")
 
     # make sure only the desired case fraction is used if a case limit is configured
     def keep(case_id: str) -> bool:
@@ -791,7 +793,11 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
         "node_roles": {str(node_id): node_role for node_id, node_role in node_roles.items()},
         "peer_to_node": peer_address_to_node_id,
         "coordination_quality": coordination_quality,
-        "model_facts": {"total": len(all_facts), "per_node": facts_per_node, "all": sorted(all_facts)},
+        "model_facts": {"total": len(model_facts), "per_node": model_facts_per_node, "all": sorted(model_facts),
+                        "by_type": {"exists": sum(1 for fact in model_facts if fact.startswith("exists(")),
+                                    "type": sum(1 for fact in model_facts if fact.startswith("type(")),
+                                    "watch": sum(1 for fact in model_facts if fact.startswith("watch("))}},
+        "placement_facts": {"total": len(placement_facts), "per_node": placement_facts_per_node, "all": sorted(placement_facts)},
         "local_events": local,
         "inferred_partners": inferred_partners,
         "cases_known_to_exist": cases_known_to_exist,

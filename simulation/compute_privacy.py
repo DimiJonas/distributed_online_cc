@@ -19,7 +19,8 @@ metrics per compromise size
   case_exposure_with_anonymous = named plus anonymous occurrences
   full_case_fraction = fraction of cases whose activities are all named
   total_reconstruction_probability = fraction of draws in which every case is fully named
-  model_fact_disclosure = fraction of the process model facts the attacker learns
+  model_fact_disclosure = fraction of the declarative model the attacker learns (exists(c), type(c, role) and watch(event))
+  placement_fact_disclosure = fraction of the placement the attacker learns (place(c, role, node) and place(c, partner, node))
   case_disclosure_<type> = identity disclosure (rafiei and van der aalst (2021))
   trace_disclosure_<type> = attribute disclosure (rafiei and van der aalst (2021))
   first_spy = precision and recall of guessing the origin of the case end gossip as the source_peer of the earliest observation among the compromised nodes
@@ -200,8 +201,11 @@ class SystemView:
             for case_id, pairs in cases.items():
                 per_node.setdefault(case_id, set()).update((constraint_id, int(partner)) for constraint_id, partner in pairs)
 
-        self.facts: dict[int, set[str]] = {int(node): set(facts) for node, facts in observations["model_facts"]["per_node"].items()}
-        self.facts_total = observations["model_facts"]["total"]
+        self.model_facts: dict[int, set[str]] = {int(node): set(facts) for node, facts in observations["model_facts"]["per_node"].items()}
+        self.model_facts_total = observations["model_facts"]["total"]
+        placement = observations.get("placement_facts") or {"per_node": {}, "total": 0}
+        self.placement_facts: dict[int, set[str]] = {int(node): set(facts) for node, facts in placement["per_node"].items()}
+        self.placement_facts_total = placement["total"]
 
         self.case_end: dict[int, dict[str, dict]] = {int(node): cases for node, cases in observations.get("case_end_seen", {}).items()}
         self.case_end_truth = observations.get("case_end_truth", {})
@@ -265,9 +269,11 @@ class SystemView:
                 disclosure[bk_type]["uniqueness"].append(1.0 / matching_traces)
                 disclosure[bk_type]["entropy_ratio"].append(entropy_ratio)
 
-        learned_facts: set[str] = set()
+        learned_model: set[str] = set()
+        learned_placement: set[str] = set()
         for node in compromised_set:
-            learned_facts |= self.facts.get(node, set())
+            learned_model |= self.model_facts.get(node, set())
+            learned_placement |= self.placement_facts.get(node, set())
 
         first_spy = self._first_spy(compromised_set)
 
@@ -281,12 +287,10 @@ class SystemView:
             "case_exposure_occurrence": (sum(by_occurrence) / len(by_occurrence)) if by_occurrence else 0.0,
             "case_exposure_with_anonymous": (sum(with_anonymous) / len(with_anonymous)) if with_anonymous else 0.0,
             "full_case_fraction": (full_cases / len(self.cases)) if self.cases else 0.0,
-            "model_fact_disclosure": (len(learned_facts) / self.facts_total)
-                                     if self.facts_total else 0.0,
-            "cases_with_knowledge_fraction": (len(knowledge_sizes) / len(self.cases))
-                                             if self.cases else 0.0,
-            "background_knowledge_size": (sum(knowledge_sizes) / len(knowledge_sizes))
-                                         if knowledge_sizes else 0.0,
+            "model_fact_disclosure": (len(learned_model) / self.model_facts_total) if self.model_facts_total else 0.0,
+            "placement_fact_disclosure": (len(learned_placement) / self.placement_facts_total) if self.placement_facts_total else 0.0,
+            "cases_with_knowledge_fraction": (len(knowledge_sizes) / len(self.cases)) if self.cases else 0.0,
+            "background_knowledge_size": (sum(knowledge_sizes) / len(knowledge_sizes)) if knowledge_sizes else 0.0,
             **first_spy,
         }
 
@@ -414,7 +418,8 @@ def evaluate_system(view: SystemView, draws: int, seed: int, sizes: list[int] | 
         "pool_size": len(pool),
         "node_roles": view.node_roles,
         "cases_evaluated": len(view.cases),
-        "model_facts_total": view.facts_total,
+        "model_facts_total": view.model_facts_total,
+        "placement_facts_total": view.placement_facts_total,
         "compromise_sizes": points,
         "background_knowledge_size_observed": {str(entry["compromised"]):
                                                entry.get("background_knowledge_size", {}).get("mean")
