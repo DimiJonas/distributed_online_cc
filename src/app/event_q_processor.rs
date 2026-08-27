@@ -1,7 +1,10 @@
 use std::time::Instant;
 
 use crate::{
-    measurement::api::{event_dequeue, event_handled},
+    measurement::{
+        self,
+        api::{event_dequeue, event_handled},
+    },
     state::app_state::AppState,
     types::TracedEvent,
 };
@@ -44,6 +47,12 @@ pub fn spawn_event_processor(state: AppState, mut event_q: mpsc::Receiver<Traced
                         log::warn!(
                             "the case of event {} is already closed. dropping event",
                             event
+                        );
+                        measurement::api::event_dropped(
+                            "case closed",
+                            event.instance_id,
+                            &event.case_id,
+                            &event.event_id,
                         );
                         continue;
                     }

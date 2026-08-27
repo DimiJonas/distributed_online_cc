@@ -6,13 +6,14 @@
 use std::net::SocketAddr;
 
 use crate::conformance_checking::constraint_logic::constraint_handler_trait::ConstraintHandler;
+use crate::measurement;
 use crate::network::message_types::{
     CCMessage, CCResultMessage, CEGossipMessage, CliTestMessage, MessageKind, OverlayMessage,
     PeerMessage,
 };
 use crate::network::tcp_router::{send_to_conformance_peer, send_to_overlay_peer};
 use crate::state::app_state::AppState;
-use crate::types::{ConstraintRole, MessageId, RequestId, TracedEvent};
+use crate::types::{ConstraintRole, MessageId, PeerAddress, RequestId, TracedEvent};
 
 pub async fn handle_cli_message(
     msg: CliTestMessage,
@@ -95,6 +96,11 @@ pub async fn handle_cc_message(
             log::warn!(
                 "the case of message {} is already closed. dropping message",
                 msg
+            );
+            measurement::api::dropped_message(
+                "case closed",
+                &PeerMessage::conformance(msg.clone()),
+                msg.sender_address.map(PeerAddress::new_conformance_address),
             );
             return;
         }

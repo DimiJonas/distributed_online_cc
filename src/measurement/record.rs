@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use crate::{
     state::result_revision_store::RevisionNumber,
-    types::{CaseId, ConstraintId, EventInstanceId, PeerAddress},
+    types::{CaseId, ConstraintId, EventId, EventInstanceId, PeerAddress},
 };
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -87,7 +87,7 @@ pub enum Record {
 
     EventInput {
         case_id: CaseId,
-        event_id: String,
+        event_id: EventId,
         instance_id: EventInstanceId,
         /// time spent parsing XES for the whole socket payload in microseconds
         parse_us: u64,
@@ -112,6 +112,13 @@ pub enum Record {
         instance_id: EventInstanceId,
         /// in microseconds
         duration_us: u64,
+    },
+
+    DroppedEvent {
+        reason: &'static str,
+        instance_id: EventInstanceId,
+        case_id: CaseId,
+        event_id: EventId,
     },
 
     /// a result was produced (not yet written to db)

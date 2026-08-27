@@ -12,7 +12,8 @@ use crate::network::message_types::{PeerMessage, PeerMessagePayload};
 use crate::state::result_revision_store::RevisionNumber;
 use crate::state::result_send_buffer::ResultBufferPolicy;
 use crate::types::{
-    CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventInstanceId, PeerAddress,
+    CaseId, ConstraintId, ConstraintResultType, ConstraintType, EventId, EventInstanceId,
+    PeerAddress,
 };
 
 /// record one message
@@ -92,7 +93,7 @@ pub fn event_input(
 
 pub fn event_dequeue(
     case_id: &CaseId,
-    event_id: &str,
+    event_id: &EventId,
     instance_id: EventInstanceId,
     handlers: usize,
     q_length: usize,
@@ -117,6 +118,19 @@ pub fn event_handled(
         constraint_id: constraint_id.clone(),
         instance_id,
         duration_us,
+    });
+}
+pub fn event_dropped(
+    reason: &'static str,
+    instance_id: EventInstanceId,
+    case_id: &CaseId,
+    event_id: &EventId,
+) {
+    record(Record::DroppedEvent {
+        reason,
+        instance_id,
+        case_id: case_id.clone(),
+        event_id: event_id.clone(),
     });
 }
 
