@@ -99,6 +99,8 @@ class Row:
         self.params["netem_ms"] = self.params.get("netem_ms", 0)
 
     def value(self, path: str):
+        if path.startswith("correctness."):
+            return find_nested_value(self.correctness, path.split(".", 1)[1])
         return find_nested_value(self.metrics, path)
 
     # a run with a workload sent nothing if the pacer never ran
@@ -283,6 +285,8 @@ MESSAGE_PANELS = [
     ("messages.derived.coordination_ratio", "coordination share of traffic", "fraction", 1.0, False),
 ]
 CORRECTNESS_PANELS = [
+    ("correctness.wrong", "wrong verdicts", "pairs", 1.0, False),
+    ("correctness.absent", "missing verdicts", "pairs", 1.0, False),
     ("revisions.pairs_with_multiple", "pairs with more than one revision", "pairs", 1.0, False),
     ("revisions.revisions_total", "revisions in total", "revisions", 1.0, False),
     ("revisions.final_after_send_end", "verdicts finalised after the stream ended", "pairs", 1.0, False),
@@ -633,38 +637,47 @@ def write_privacy_csv(privacy: dict, out_path: Path) -> None:
                                  + [entry.get(name, {}).get("mean") for name in metric_names])
 
 
-# feasibility: correctness over all runs
+# feasibility: correctness over all runs split into nominal, overloaded and incomplete runs
+# the feasibility table, split by operating regime
+def run_regime(row: Row) -> str:
+    if not row.value("quality.complete"):
+        return "incomplete"
+    return "overload" if row.value("throughput.saturated") else "nominal"
+
+
+FEASIBILITY_FIELDS = ("expected_pairs", "produced_pairs", "correct", "wrong", "absent", "spurious")
+
+
 def write_feasibility(rows: list[Row], out_path: Path) -> dict:
-    per_experiment: dict = defaultdict(lambda: defaultdict(int))
+    per_group: dict = defaultdict(lambda: defaultdict(int))
     for row in rows:
-        target = per_experiment[(row.experiment, row.system)]
+        target = per_group[(run_regime(row), row.experiment, row.system)]
         target["runs"] += 1
         target["events"] += row.value("throughput.events_sent") or 0
-        for field in ("expected_pairs", "produced_pairs", "correct", "wrong", "absent", "spurious"):
+        for field in FEASIBILITY_FIELDS:
             target[field] += row.correctness.get(field) or 0
-        if not row.value("quality.complete"):
-            target["incomplete_runs"] += 1
 
+    def line(writer, regime, experiment, system, values):
+        accuracy = (values["correct"] / values["expected_pairs"]) if values["expected_pairs"] else None
+        writer.writerow([regime, experiment, system, values["runs"], values["events"],
+                         values["expected_pairs"], values["produced_pairs"], values["correct"],
+                         values["wrong"], values["absent"], values["spurious"],
+                         f"{accuracy:.6f}" if accuracy is not None else ""])
+
+    by_regime: dict = defaultdict(lambda: defaultdict(int))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["experiment", "system", "runs", "events", "expected_pairs", "produced_pairs",
-                         "correct", "wrong", "absent", "spurious", "accuracy", "incomplete_runs"])
-        totals: dict = defaultdict(int)
-        for (experiment, system), values in sorted(per_experiment.items()):
-            accuracy = (values["correct"] / values["expected_pairs"]) if values["expected_pairs"] else None
-            writer.writerow([experiment, system, values["runs"], values["events"],
-                             values["expected_pairs"], values["produced_pairs"], values["correct"],
-                             values["wrong"], values["absent"], values["spurious"],
-                             f"{accuracy:.6f}" if accuracy is not None else "", values["incomplete_runs"]])
+        writer.writerow(["regime", "experiment", "system", "runs", "events", "expected_pairs",
+                         "produced_pairs", "correct", "wrong", "absent", "spurious", "accuracy"])
+        for (regime, experiment, system), values in sorted(per_group.items()):
+            line(writer, regime, experiment, system, values)
             for key, value in values.items():
-                totals[key] += value
-        accuracy = (totals["correct"] / totals["expected_pairs"]) if totals["expected_pairs"] else None
-        writer.writerow(["ALL", "ALL", totals["runs"], totals["events"], totals["expected_pairs"],
-                         totals["produced_pairs"], totals["correct"], totals["wrong"],
-                         totals["absent"], totals["spurious"],
-                         f"{accuracy:.6f}" if accuracy is not None else "", totals["incomplete_runs"]])
-    return totals
+                by_regime[regime][key] += value
+        for regime in ("nominal", "overload", "incomplete"):
+            if by_regime.get(regime):
+                line(writer, regime, "ALL", "ALL", by_regime[regime])
+    return {regime: dict(values) for regime, values in by_regime.items()}
 
 
 def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Path, formats, progress: Progress | None) -> list[Path]:
@@ -801,14 +814,19 @@ def main() -> None:
         progress.step(experiment)
     progress.finish()
 
-    accuracy = (totals["correct"] / totals["expected_pairs"]) if totals.get("expected_pairs") else None
     tables = 3 * len(by_experiment) + (1 if args.experiment else 3)
     print(f"\n{written} figure(s) and {tables} table(s) in {out_dir}")
-    print(f"feasibility over all runs: {totals.get('runs', 0)} (run, system) pair(s), "
-          f"{totals.get('events', 0)} events, {totals.get('expected_pairs', 0)} expected pairs, "
-          f"{totals.get('wrong', 0)} wrong, {totals.get('absent', 0)} absent, "
-          f"{totals.get('spurious', 0)} spurious"
-          + (f", accuracy {accuracy:.6f}" if accuracy is not None else ""))
+    for regime, label in (("nominal", "within capacity"), ("overload", "saturated"),
+                          ("incomplete", "truncated records")):
+        values = totals.get(regime)
+        if not values:
+            continue
+        accuracy = (values["correct"] / values["expected_pairs"]) if values.get("expected_pairs") else None
+        print(f"feasibility [{regime}: {label}]: {values.get('runs', 0)} (run, system) pair(s), "
+              f"{values.get('events', 0)} events, {values.get('expected_pairs', 0)} expected pairs, "
+              f"{values.get('wrong', 0)} wrong, {values.get('absent', 0)} absent, "
+              f"{values.get('spurious', 0)} spurious"
+              + (f", accuracy {accuracy:.6f}" if accuracy is not None else ""))
 
 
 if __name__ == "__main__":
