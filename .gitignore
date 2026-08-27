@@ -6,6 +6,8 @@
 /results
 
 .vscode
+.venv
+
 *.zip
 *.log
 *.lock
