@@ -260,6 +260,7 @@ THROUGHPUT_PANELS = [
     ("throughput.pacer_max_lag_ms", "pacer lag (max)", "ms", 1.0, False),
     ("throughput.queues.event_q.max", "event queue peak depth", "events", 1.0, False),
     ("throughput.message_drops.total", "message drops", "messages", 1.0, False),
+    ("throughput.closed_case_drops", "dropped after the case closed", "events + messages", 1.0, False),
 ]
 LATENCY_PANELS = [
     ("latency_us.detection_t1_t3.p50", "detection latency p50 (t1 to t3)", "ms", 1e-3, False),
@@ -573,6 +574,8 @@ CSV_METRICS = [
     ("offered_rate", "throughput.offered_rate", 1.0),
     ("pacer_max_lag_ms", "throughput.pacer_max_lag_ms", 1.0),
     ("message_drops", "throughput.message_drops.total", 1.0),
+    ("event_drops", "throughput.event_drops.total", 1.0),
+    ("closed_case_drops", "throughput.closed_case_drops", 1.0),
     ("event_q_max", "throughput.queues.event_q.max", 1.0),
     ("detection_p50_ms", "latency_us.detection_t1_t3.p50", 1e-3),
     ("detection_p95_ms", "latency_us.detection_t1_t3.p95", 1e-3),
@@ -638,7 +641,6 @@ def write_privacy_csv(privacy: dict, out_path: Path) -> None:
 
 
 # feasibility: correctness over all runs split into nominal, overloaded and incomplete runs
-# the feasibility table, split by operating regime
 def run_regime(row: Row) -> str:
     if not row.value("quality.complete"):
         return "incomplete"

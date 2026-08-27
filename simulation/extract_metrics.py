@@ -38,6 +38,7 @@ from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_pe
 SCHEMA_VERSION = 1
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
+CASE_CLOSED_REASON = "case closed"
 TRANSPORT_PAYLOADS = ("event")
 SINK_PAYLOADS = ("result")
 
@@ -101,6 +102,7 @@ class Scan:
 
         self.messages = {"idle": self._msg_bucket(), "load": self._msg_bucket(), "settle": self._msg_bucket()}
         self.drops = {"total": 0, "by_reason": {}, "by_kind": {}}
+        self.event_drops = {"total": 0, "by_reason": {}}   # events discarded before they were handled
         self.queues: dict[str, list[tuple[float, float]]] = {} # name -> (timestamp, fill)
         self.queue_node_max: dict[str, dict[int, int]] = {} # queue name -> (node id -> peak depth) # name -> capacity
         self.tcp_queue_max = 0 # highest fill of a tcp channel queue
@@ -160,6 +162,10 @@ class Scan:
             self.drops["by_reason"][reason] = self.drops["by_reason"].get(reason, 0) + 1
             payload_kind = str(line.get("kind"))
             self.drops["by_kind"][payload_kind] = self.drops["by_kind"].get(payload_kind, 0) + 1
+        elif record_type == "dropped_event":
+            self.event_drops["total"] += 1
+            reason = str(line.get("reason"))
+            self.event_drops["by_reason"][reason] = self.event_drops["by_reason"].get(reason, 0) + 1
         elif record_type == "queues":
             self._queues(line, node_id, wallclock_time)
         elif record_type == "tcp_channel_queue_depth":
@@ -553,11 +559,23 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                             "slope_per_s": slope_per_second([(t, depth_value)
                                                              for t, depth_value, _c in samples])}
 
+    closed_case_message_drops = scan.drops["by_reason"].get(CASE_CLOSED_REASON, 0)
+    closed_case_event_drops = scan.event_drops["by_reason"].get(CASE_CLOSED_REASON, 0)
+    closed_case_drops = closed_case_message_drops + closed_case_event_drops
+    other_message_drops = scan.drops["total"] - closed_case_message_drops
+    other_event_drops = scan.event_drops["total"] - closed_case_event_drops
+
     saturation_reasons = []
     if (send.get("pacer_max_lag_ms") or 0) > 100:
         saturation_reasons.append("pacer lag over 100ms")
-    if scan.drops["total"] > 0:
-        saturation_reasons.append(f"{scan.drops['total']} message drops")
+    if closed_case_drops > 0:
+        saturation_reasons.append(f"{closed_case_drops} item(s) dropped after the case was closed "
+                                  f"({closed_case_event_drops} event(s), {closed_case_message_drops} "
+                                  f"message(s)): processing slower than the case end grace period")
+    if other_message_drops > 0:
+        saturation_reasons.append(f"{other_message_drops} message drops")
+    if other_event_drops > 0:
+        saturation_reasons.append(f"{other_event_drops} events dropped")
     for queue_name, queue_stats in queues_out.items():
         if queue_stats.get("max_utilization", 0.0) > 0.5:
             saturation_reasons.append(f"{queue_name} above half capacity")
@@ -603,6 +621,10 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                                     if steady_duration_s else 0.0,
             "events_with_input_record": len(scan.t1),
             "message_drops": scan.drops,
+            "event_drops": scan.event_drops,
+            "closed_case_drops": closed_case_drops,
+            "closed_case_event_drops": closed_case_event_drops,
+            "closed_case_message_drops": closed_case_message_drops,
             "queues": queues_out,
             "tcp_channel_queue_max": scan.tcp_queue_max,
             "saturated": bool(saturation_reasons),
