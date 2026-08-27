@@ -72,7 +72,7 @@ external_central_sink = true      # give the central system its own sink node in
 [baseline]
 event_queue_size = 8192               # events are enqueued here after parsing
 loopback_queue_size = 8192            # used to skip tcp if the destination is the nodes own address (predominantly used by the central node)
-case_end_grace_period = "5s"          # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
+case_end_grace_period = "10s"          # wait after seeing to case end before the case will be closed. has to cover late events after an early end activity
 case_end_ttl = "60s"                  # how long a case end is gossiped -> should be bigger than gossip convergence time
 case_janitor_cleanup_interval = "1s"  # prunes completed cases from the node state
 
@@ -85,6 +85,10 @@ reconnect_start_delay = "200ms"         # start delay of the exponential backoff
 reconnect_max_delay = "5s"              # max delay of the exponential backoff when trying to reconnect to a peer
 wait_for_response_timeout = "60s"       # timeout for when a peer waits for a response from another peer
 connect_timeout = "5s"                  # wait this long when trying to connect to a peer
+
+[baseline.default_result_buffer]
+policy = "Revocable"                # default result buffer policy (Immediate | GracePeriod | Revocable)
+duration = "10s"                    # period for which a verdict will stay revocable or in grace period
 
 [baseline.result_sink]
 mpsc_channel_size = 65536       # internal mpsc channel to pass a message containing a result to the result sink
