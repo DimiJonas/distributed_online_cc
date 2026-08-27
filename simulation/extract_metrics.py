@@ -868,7 +868,6 @@ def process_run(run_dir: Path, args) -> str:
         "experiment": run_spec.get("experiment"),
         "run_id": run_spec.get("run_id"),
         "replicate": run_spec.get("replicate"),
-        "kind": run_spec.get("kind"),
         "params": params,
         "host": run_spec.get("host"),
         "cpu_count": run_spec.get("cpu_count"),

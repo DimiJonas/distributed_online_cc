@@ -133,7 +133,6 @@ def expand_experiment(exp: dict, defaults: dict) -> list[dict]:
                     "experiment": exp["id"],
                     "run_id": run_id,
                     "replicate": replicate,
-                    "kind": exp.get("kind", "scalability"),
                     "systems": exp.get("systems", ["decentralized", "central"]),
                     "params": params,
                 })
@@ -255,12 +254,12 @@ def generate_configs(plan: dict, repo: Path, paths: RunPaths, params: dict) -> N
 
 
 # returns all the components of the event stream (dir, manifest, expected_results.jsonl, number of events, number of cases)
-def ensure_stream(plan: dict, repo: Path, paths: RunPaths, params: dict, kind: str) -> dict:
+def ensure_stream(plan: dict, repo: Path, paths: RunPaths, params: dict) -> dict:
 
     streams = Path(plan["defaults"]["results_dir"]) / "_streams"
     streams.mkdir(parents=True, exist_ok=True)
 
-    if kind == "privacy" or params.get("stream_dir"):
+    if params.get("stream_dir"):
         # a prepared event stream (e.g. sepsis) - only the ground truth may have to be derived
         stream_dir = (repo / params["stream_dir"]).resolve()
         manifest = stream_dir / params.get("manifest", "manifest.jsonl")
@@ -579,7 +578,7 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
     netem = params.get("netem_ms")
     try:
         generate_configs(plan, repo, paths, params)
-        stream = ensure_stream(plan, repo, paths, params, run["kind"])
+        stream = ensure_stream(plan, repo, paths, params)
         run_record["stream"] = stream
         if netem:
             netem_apply(float(netem), float(params.get("netem_jitter_ms", 0)), dev=plan["defaults"].get("netem_dev", "lo"),

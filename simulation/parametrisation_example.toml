@@ -10,8 +10,6 @@
 #   [experiment.sensitivity]  one factor at a time around the base point
 #
 #           id                        name of the experiment (sets the name of the directory under results/) e.g. "saturation test"
-#           kind                      "scalability"  will generate configs and stream (default)
-#                                     "privacy"      will take a prepared stream from params.stream_dir and mark runs for privacy evaluation
 #           seeds                     seeds for generating event streams (one stream per seed) e.g. [22, 5551, 4040412]
 #           systems                   whih deployments to run (sequentially) (default: ["decentralized", "central"])
 #           replicates                repeat the identical run n times (in case of measurement noise) (default: 1)
@@ -122,7 +120,6 @@ queue_sample_resolution = "2ms"     # how often queue depth are sampled (the pea
 # 1) find some saturation signals
 [[experiment]]
 id = "find_saturation"
-kind = "scalability"
 seeds = [29]
 systems = ["decentralized", "central"]
   [experiment.grid]
@@ -133,10 +130,10 @@ systems = ["decentralized", "central"]
   violation_rate = 0.4
 
 
-# 2) this could be a privacy evaluation run
+# 2) this could be a privacy evaluation run: naming params.stream_dir is what makes it use a
+#    prepared stream instead of a generated one
 #[[experiment]] 
 #id = "use_sepsis"
-#kind = "privacy"
 #seeds = [29]
 #systems = ["decentralized", "central"]
 #  [experiment.grid] 
