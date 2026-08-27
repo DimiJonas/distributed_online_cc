@@ -1987,7 +1987,7 @@ fn main() {
         let value: toml::Value = toml::from_str(&text)
             .unwrap_or_else(|error| panic!("cannot parse --baseline {}: {error}", path.display()));
         // list of sections of the config toml, to reject wrong sections realy
-        const SECTIONS: [&str; 7] = [
+        const SECTIONS: [&str; 8] = [
             "tcp_channels",
             "result_sink",
             "overlay",
@@ -1995,6 +1995,7 @@ fn main() {
             "forwarder",
             "result_buffers",
             "metrics",
+            "default_result_buffer",
         ];
         for (key, entry) in value.as_table().expect("--baseline must be a toml table") {
             assert!(
