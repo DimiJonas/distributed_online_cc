@@ -185,8 +185,7 @@ def is_sensitivity(rows: list[Row], varied: list[str]) -> bool:
     return True
 
 
-# filter parameters of sensitivity runs such that they dont multiply
-# the base point of a parameter has to be used when another parameter varies
+# restricts each panel to its own spoke (each sensitivity parameter is a spoke from the base config)
 def ofat_rows(rows: list[Row], varied: list[str], parameter: str) -> list[Row]:
     base = base_configuration(rows, varied)
     selected = []
@@ -671,6 +670,12 @@ def write_feasibility(rows: list[Row], out_path: Path) -> dict:
 def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Path, formats, progress: Progress | None) -> list[Path]:
     written: list[Path] = []
     target = out_dir / experiment.replace("/", "_")
+
+    experiment_privacy = {key: value for key, value in privacy.items() if key[0] == experiment}
+    write_runs_csv(rows, target / "runs.csv")
+    write_privacy_csv(experiment_privacy, target / "privacy.csv")
+    write_feasibility(rows, target / "feasibility.csv")
+
     varied = find_varying_params(rows)
     numeric = [key for key in varied if is_numeric(rows, key)]
     workload_rows = [row for row in rows if row.has_workload]
@@ -773,9 +778,15 @@ def main() -> None:
     if not rows:
         sys.exit("no metrics.json found: run extract_metrics.py first")
 
-    write_runs_csv(rows, out_dir / "runs.csv")
-    write_privacy_csv(privacy, out_dir / "privacy.csv")
-    totals = write_feasibility(rows, out_dir / "feasibility.csv")
+    if args.experiment:
+        suffix = args.experiment.replace("*", "x").replace("/", "_").replace("?", "q")
+        totals = write_feasibility(rows, out_dir / f"feasibility.{suffix}.csv")
+        print(f"--experiment is set: campaign wide runs.csv and privacy.csv were left untouched, "
+              f"the per experiment tables are under {out_dir}", file=sys.stderr)
+    else:
+        write_runs_csv(rows, out_dir / "runs.csv")
+        write_privacy_csv(privacy, out_dir / "privacy.csv")
+        totals = write_feasibility(rows, out_dir / "feasibility.csv")
 
     by_experiment: dict[str, list[Row]] = defaultdict(list)
     for row in rows:
@@ -791,7 +802,8 @@ def main() -> None:
     progress.finish()
 
     accuracy = (totals["correct"] / totals["expected_pairs"]) if totals.get("expected_pairs") else None
-    print(f"\n{written} figure(s) and 3 table(s) in {out_dir}")
+    tables = 3 * len(by_experiment) + (1 if args.experiment else 3)
+    print(f"\n{written} figure(s) and {tables} table(s) in {out_dir}")
     print(f"feasibility over all runs: {totals.get('runs', 0)} (run, system) pair(s), "
           f"{totals.get('events', 0)} events, {totals.get('expected_pairs', 0)} expected pairs, "
           f"{totals.get('wrong', 0)} wrong, {totals.get('absent', 0)} absent, "

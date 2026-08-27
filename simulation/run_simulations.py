@@ -329,7 +329,8 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
         raise RuntimeError(f"node binary {node_bin} not found - build with `cargo build --release`")
 
     cpu_cap = parse_cpu_cap(params, plan["defaults"])
-    cpu_cap_info = ensure_cpu_cap_possible(cpu_cap, len(nodes))
+    capped_node_count = sum(1 for node in nodes if node.role not in cpu_cap.exclude_roles)
+    cpu_cap_info = ensure_cpu_cap_possible(cpu_cap, capped_node_count)
 
     tokio_runtime_sizing = params.get("worker_threads", plan["defaults"].get("worker_threads"))
     worker_nodes = sum(1 for node in nodes if node.role not in cpu_cap.exclude_roles)
@@ -355,12 +356,16 @@ def launch_system(plan: dict, repo: Path, paths: RunPaths, system: str, params: 
     log_dir = paths.logs(system).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
-        for index, node in enumerate(nodes):
+        capped_index = 0
+        for node in nodes:
             stderr_file = open(log_dir / f"node-{node.node_id}-{node.role}.stderr", "w")
             node_env = dict(env)
             workers = worker_threads_for_node(cpu_cap, tokio_runtime_sizing, worker_nodes, node.role)
             if workers is not None:
                 node_env["CC_WORKER_THREADS"] = str(workers)
+            index = capped_index
+            if node.role not in cpu_cap.exclude_roles:
+                capped_index += 1
             proc = subprocess.Popen(
                 cpu_cap_prefix(cpu_cap, node.role, index)
                 + [str(node_bin), "-c", node.path, "-l", str(log_dir)],
@@ -483,8 +488,11 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         time.sleep(idle)
         timeline["idle_end_us"] = now_us()
 
-        timeline.update(send_stream(plan, repo, paths, system, params, stream, sampler=sampler, cap=cpu_cap))
-        timeline.update(wait_for_system_settlement(paths, system, stream.get("expected_pairs"), params))
+        if params.get("idle_only"):
+            log(f"  idle_only: no event stream is sent ({idle:.0f}s idle window measured)")
+        else:
+            timeline.update(send_stream(plan, repo, paths, system, params, stream, sampler=sampler, cap=cpu_cap))
+            timeline.update(wait_for_system_settlement(paths, system, stream.get("expected_pairs"), params))
     finally:
         problems: list[str] = []
         try:
