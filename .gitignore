@@ -5,6 +5,8 @@
 /simulation/__pycache__
 /results
 
+/simulation/test_plan.toml
+
 .vscode
 .venv
 

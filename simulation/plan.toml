@@ -1,0 +1,580 @@
+# stream plan for thesis experiments
+
+#  there are 3 stream tiers such that the load window stays in the 15-65 s range instead of varying too much (up  to 100x with rate 500 vs 50.000):
+#  - S  cases =  2500  (~65k events)   rates <= 2000
+#  - M  cases = 10000  (~260k events)  rates 4000 .. 16000
+#  - L  cases = 30000  (~780k events)  rates >= 24000
+#  an experiment that needs more than one tier can then be written as multiple [[experiment]] blocks with the same id
+
+[defaults]
+repo_root = "."
+results_dir = "results"
+bin_dir = "target/release"
+node_bin = "target/release/node"
+python = "python3.11"
+send_script = "send_event_stream.py"
+compare_script = "compare_results.py"
+rust_log = "warn"
+rust_log_file = "warn"
+resource_interval_s = 0.25
+resource_per_thread = true
+netem_dev = "lo"
+netem_sudo = true
+node_start_stagger_s = 0.05
+ready_timeout_s = 120
+stop_grace_s = 15
+between_systems_s = 5
+send_timeout_s = 7200
+run_order = "shuffle"
+system_order = "shuffle"
+order_seed = 29
+cpu_cap_mode = "off"
+cpu_cap_scope = "system"
+cpu_cap_cores = 0
+cpu_cap_isolate_tooling = true
+cpu_cap_tooling_cores = 2
+cpu_cap_exclude_roles = ["sink"]
+
+##############
+## BASELINE ##
+##############
+
+[baseline]
+event_queue_size = 8192
+loopback_queue_size = 8192
+case_end_grace_period = "10s"
+case_janitor_cleanup_interval = "1s"
+
+[baseline.tcp_channels]
+tcp_channel_mpsc_channel_size = 1024
+peer_manager_mpsc_channel_size = 1024
+message_queue_size = 4096
+internal_message_ttl = "120s"
+reconnect_start_delay = "200ms"
+reconnect_max_delay = "5s"
+wait_for_response_timeout = "60s"
+connect_timeout = "5s"
+
+[baseline.default_result_buffer]
+policy = "Revocable"
+duration = "10s"
+
+[baseline.result_sink]
+mpsc_channel_size = 65536
+retry_interval = "5s"
+retry_buffer_size = 32768
+max_batch_size = 4096
+flush_interval = "100ms"
+
+[baseline.gossip]
+gossip_outbound_mpsc_channel_size = 1024
+gossip_inbound_mpsc_channel_size = 1024
+
+[baseline.metrics]
+queue_report_interval = "20ms"
+queue_sample_resolution = "2ms"
+
+[defaults.params]
+catalog = "default"
+role_assignment = "round-robin"
+repeat = 1                        # 22 roles
+nodes = 23                        # 22 constraint nodes + 1 sink -> 1 role per node
+rate = 4000
+cases = 10000                     # tier M
+violation_rate = 0.2
+violation_sampling = "exact"
+step_secs = 1.0
+case_gap_secs = 2.0               # ~13 concurrent cases (~26 roles/events per case in default synthetic streams)
+burst = 16
+msgtrace = true
+idle_window_s = 20
+quiescence_s = 20
+max_wait_for_settlement_s = 240
+external_central_sink = true
+idle_only = false
+push_fanout = 5
+anti_entropy_secs = 2
+anti_entropy_fanout = 1
+case_end_ttl = 120
+shuffle_secs = 5
+shuffle_length = 4
+cache_size = 20
+ring_degree = 2
+
+
+# E0a - find sender ceiling and have coarse saturation info to fix rate sweeps
+# no saturation below sender ceiling motivates E1 capped load sweeps
+[[experiment]]
+id = "E0a"
+seeds = [2]
+replicates = 1
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 20000
+  msgtrace = false
+  burst = 32
+  [experiment.grid]
+  rate = [8000, 16000, 24000, 32000, 40000, 50000]
+
+# E0b - find suitable tokio worker thread policy (answers: is thread oversubscription a problem in decentralized?)
+[[experiment]]
+id = "E0b"
+seeds = [2]
+replicates = 2
+systems = ["decentralized", "central"]
+  [experiment.params]
+  msgtrace = false
+  [experiment.grid]
+  worker_threads = ["per-cpu", "share", "2"]
+  rate = [4000, 16000]
+
+# E0c - find system cpu cap (cap has to be small enough such that both systems can saturate)
+# use saturation report script with --x-param cpu_cap_cores --x-direction decreasing
+[[experiment]]
+id = "E0c"
+seeds = [2, 3]
+replicates = 2
+systems = ["decentralized", "central"]
+  [experiment.params]
+  msgtrace = false
+  burst = 8
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "system"
+  [experiment.grid]
+  cpu_cap_cores = [20, 16, 12, 10, 8, 6, 4]
+  rate = [8000, 16000]
+
+# E0d - smoke run for sanity checks
+# check model facts are comparable between systems, deployment facts are different (denominator/total amount) so probably only compare within system,
+#   forwarders should also disclose model facts, check size of records/ with msg trace on, confirm gossip reach = 1 (othwerise raise case end ttl)
+[[experiment]]
+id = "E0d"
+seeds = [2]
+replicates = 1
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 5000
+  rate = 4000
+  msgtrace = true
+
+# E0e - msgtrace overhead (check how big the impact is)
+[[experiment]]
+id = "E0e"
+seeds = [2, 3]
+replicates = 2
+systems = ["decentralized", "central"]
+  [experiment.grid]
+  msgtrace = [true, false]
+  rate = [4000, 16000]
+
+#########
+## VM1 ##
+#########
+
+# E1a: uncapped load sweep
+[[experiment]]
+id = "E1a"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 2500                    # tier S
+  msgtrace = false
+  burst = 32
+  [experiment.grid]
+  rate = [1000, 2000]
+
+[[experiment]]
+id = "E1a"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000                   # tier M
+  msgtrace = false
+  burst = 32
+  [experiment.grid]
+  rate = [4000, 8000, 12000, 16000]
+
+[[experiment]]
+id = "E1a"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 30000                   # tier L
+  msgtrace = false
+  burst = 32
+  [experiment.grid]
+  rate = [24000, 32000, 40000, 50000]   # TODO: adjust to E0a sender limit
+
+# E1b: system capped load sweep
+# metrics: pacer lag, queue depths, message drops, p50/p95/p99 of t1-t3 and t3-t4, revisions per (case, constraint)
+[[experiment]]
+id = "E1b"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 2500                    # tier S
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "system"
+  cpu_cap_cores = 12              # TODO: set from E0c
+  [experiment.grid]
+  rate = [1000, 2000]
+
+[[experiment]]
+id = "E1b"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000                   # tier M
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "system"
+  cpu_cap_cores = 12              # TODO: set from E0c
+  [experiment.grid]
+  rate = [4000, 8000, 12000, 16000]
+
+[[experiment]]
+id = "E1b"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 30000                   # tier L
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "system"
+  cpu_cap_cores = 12              # TODO: set from E0c
+  [experiment.grid]
+  rate = [24000, 32000]
+
+# --- E1d: node capped load sweep
+# metrics: cpu_max (busiest process), cpu_total
+[[experiment]]
+id = "E1c"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 2500                    # tier S
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "node"
+  cpu_cap_cores = 1
+  [experiment.grid]
+  rate = [1000, 2000]
+
+[[experiment]]
+id = "E1c"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000                   # tier M
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "node"
+  cpu_cap_cores = 1
+  [experiment.grid]
+  rate = [4000, 8000, 12000, 16000]
+
+[[experiment]]
+id = "E1c"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 30000                   # tier L
+  msgtrace = false
+  burst = 16
+  cpu_cap_mode = "cpuset"
+  cpu_cap_scope = "node"
+  cpu_cap_cores = 1
+  [experiment.grid]
+  rate = [24000, 32000]
+
+# E4: model size sweep
+# cases swept inverse to repeat to achieve similar run lengths
+# metrics: cpu_seconds_per_event on the busiest node, messages/event, detection latency
+[[experiment]]
+id = "E4"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  repeat = 1
+  cases = 10000
+  rate = 4000
+
+[[experiment]]
+id = "E4"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  repeat = 2
+  cases = 5000
+  rate = 4000
+
+[[experiment]]
+id = "E4"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  repeat = 4
+  cases = 2500
+  rate = 4000
+
+[[experiment]]
+id = "E4"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  repeat = 8
+  cases = 1250
+  rate = 4000
+
+[[experiment]]
+id = "E4"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  repeat = 10
+  cases = 1000
+  rate = 4000
+
+# E7: network delay
+# run id naming only includes parameters that vary so different experiment ids are needed here (rate does not vary for the 2 stream tiers)
+# metrics: margin, detection latency, whether the system ranking flips
+[[experiment]]
+id = "E7a"
+seeds = [2, 3]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 2500                    # tier S
+  rate = 2000
+  [experiment.grid]
+  netem_ms = [0, 1, 2, 4, 8]
+
+[[experiment]]
+id = "E7b"
+seeds = [2, 3]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000                   # tier M
+  rate = 16000
+  [experiment.grid]
+  netem_ms = [0, 1, 2, 4, 8]
+
+# E8: case concurrency (memory load, problem scale)
+# metrics: rss per node, peak event queue depth, case janitor behaviour.
+[[experiment]]
+id = "E8"
+seeds = [2, 3, 5]
+replicates = 2
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 5000
+  rate = 4000
+  [experiment.grid]
+  case_gap_secs = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1]
+
+#########
+## VM2 ##
+#########
+
+# E2: idle cost
+# sould be excluded from any correctness aggregation in plot_results.py because idle only produces no results (all results missing in db)
+# metrics: cpu/node, rss/node, msg/s and bytes/s by payload class (overlay vs ce_gossip), idle_bytes_per_node_second
+[[experiment]]
+id = "E2"
+seeds = [1]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 1
+  idle_window_s = 120
+  idle_only = true
+  msgtrace = true
+  [experiment.grid]
+  nodes = [3, 5, 7, 12, 23, 32, 46]
+
+# E3a: system scale round robin
+# metrics: messages/case, messages/event, cpu total, cpu max (busiest node), idle-normalized overhead, detection latency
+[[experiment]]
+id = "E3a"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000
+  rate = 4000
+  role_assignment = "round-robin"
+  [experiment.grid]
+  nodes = [3, 5, 7, 12, 23, 46, 92]
+
+# E3b: system scale blocked
+# metrics: (same as E3a)
+[[experiment]]
+id = "E3b"
+seeds = [2, 3, 5]
+replicates = 3
+systems = ["decentralized", "central"]
+  [experiment.params]
+  cases = 10000
+  rate = 4000
+  role_assignment = "blocked"
+  [experiment.grid]
+  nodes = [3, 5, 7, 12]
+
+# E5a: main privacy run sepsis
+# metrics: all privacy metrics, bytes/event by payload class
+[[experiment]]
+id = "E5a"
+seeds = [1]
+replicates = 8                          # many replicates to rule out cyclon/gossip randomness for first spy
+systems = ["decentralized", "central"]
+  [experiment.params]
+  catalog = "sepsis"
+  role_assignment = "by-event"
+  stream_dir = "sepsis/events/"
+  msgtrace = true
+  burst = 8
+  [experiment.grid]
+  nodes = [2, 4, 8, 13, 17, 18]         # sepsis has 17 activities -> 17 nodes constraint nodes + 1 sink = 18 (with by-event assignment) 
+  rate = [500, 1000]
+
+# E5b: main privacy run traffic fines
+# ~561k events so depending on E0c extract_metrics.py --observation-case-fraction 0.2 might be needed, but this sampling of cases can increase trace uniqueness
+# metrics: all privacy metrics, bytes/event by payload class
+[[experiment]]
+id = "E5b"
+seeds = [1]
+replicates = 6                          # many replicates to rule out cyclon/gossip randomness for first spy (less than for sepsis because the event log is much bigger)
+systems = ["decentralized", "central"]
+  [experiment.params]
+  catalog = "traffic-fines"
+  role_assignment = "by-event"
+  stream_dir = "traffic_fines/events/" 
+  msgtrace = true
+  burst = 8
+  rate = 4000
+  [experiment.grid]
+  nodes = [2, 4, 6, 8, 10, 13]           # traffic fines has 12 activities -> 12 nodes constraint nodes + 1 sink = 13 (with by-event assignment) 
+
+# E6a: gossip sensitivity
+# towards R2: message overhead and case end verdict latency
+# towards R1: first-spy source anonymity since hop count varies with fanout
+[[experiment]]
+id = "E6a"
+seeds = [2]
+replicates = 5
+systems = ["decentralized"]
+  [experiment.params]
+  cases = 10000
+  rate = 4000
+  msgtrace = true
+  [experiment.sensitivity]
+  push_fanout = [1, 2, 4, 8, 16]
+  anti_entropy_secs = [1, 2, 4, 8]
+  anti_entropy_fanout = [1, 2, 4]
+  case_end_ttl = [20, 60, 120]
+
+# E6b: overlay sensitivity
+# metrics: idle_bytes_per_node_second, peer_churn, first-spy precision/recall, gossip_dissemination reach_fraction
+[[experiment]]
+id = "E6b"
+seeds = [2]
+replicates = 5
+systems = ["decentralized"]
+  [experiment.params]
+  cases = 2500
+  rate = 1000
+  msgtrace = true
+  [experiment.sensitivity]
+  shuffle_secs = [1, 2, 5, 10, 20]
+  shuffle_length = [2, 4, 8, 16]
+  cache_size = [4, 8, 20, 40]
+  ring_degree = [1, 2, 4]
+
+################
+## ADDITIONAL ##
+################
+
+# investigate decentralized saturation point with fine grained rate around the E1b result
+#[[experiment]]
+#id = "E1b"
+#seeds = [2, 3, 5]
+#replicates = 3
+#systems = ["decentralized"]
+#  [experiment.params]
+#  cases = 10000
+#  msgtrace = false
+#  burst = 16
+#  cpu_cap_mode = "cpuset"
+#  cpu_cap_scope = "system"
+#  cpu_cap_cores = 12
+#  [experiment.grid]
+#  rate = [14000, 18000, 20000]   # TODO: bracket the decentralized knee from E1b
+
+# investigate central saturation point with fine grained rate around the E1b result
+#[[experiment]]
+#id = "E1b"
+#seeds = [2, 3, 5]
+#replicates = 3
+#systems = ["central"]
+#  [experiment.params]
+#  cases = 30000
+#  msgtrace = false
+#  burst = 16
+#  cpu_cap_mode = "cpuset"
+#  cpu_cap_scope = "system"
+#  cpu_cap_cores = 12
+#  [experiment.grid]
+#  rate = [26000, 28000, 30000]   # TODO: bracket the central knee from E1b
+
+# investigate decentralized saturation point with fine grained rate around the E1c result
+#[[experiment]]
+#id = "E1c"
+#seeds = [2, 3, 5]
+#replicates = 3
+#systems = ["decentralized"]
+#  [experiment.params]
+#  cases = 30000
+#  msgtrace = false
+#  burst = 16
+#  cpu_cap_mode = "cpuset"
+#  cpu_cap_scope = "node"
+#  cpu_cap_cores = 1
+#  [experiment.grid]
+#  rate = [20000, 28000, 36000]   # TODO: bracket the decentralized knee from E1c
+
+# investigate central saturation point with fine grained rate around the E1c result
+#[[experiment]]
+#id = "E1c"
+#seeds = [2, 3, 5]
+#replicates = 3
+#systems = ["central"]
+#  [experiment.params]
+#  cases = 10000
+#  msgtrace = false
+#  burst = 16
+#  cpu_cap_mode = "cpuset"
+#  cpu_cap_scope = "node"
+#  cpu_cap_cores = 1
+#  [experiment.grid]
+#  rate = [5000, 6000, 7000]      # TODO: bracket the decentralized knee from E1c (probably very low since central only has 1 core)

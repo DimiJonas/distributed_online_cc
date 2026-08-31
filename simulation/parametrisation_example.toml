@@ -67,6 +67,7 @@ quiescence_s = 20                 # no new db row for this long = the system has
 max_wait_for_settlement_s = 240   # max time to wait for settlement of the system after the event stream has finished
 external_central_sink = true      # give the central system its own sink node instead of hosting the sink inside the central node
 idle_only = false                 # skip the event stream and result comparison
+# netem_ms = 1                    # set netem delay
 
 [baseline]
 event_queue_size = 8192               # events are enqueued here after parsing
