@@ -446,6 +446,12 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
     point["target_rate"] = float(target) if target is not None else None
     point["effective_rate"] = effective
     point["achieved_ratio"] = (effective / target) if (effective and target) else None
+
+    per_second_median = point.get("rate_per_s_p50")
+    point["sustained_ratio"] = (per_second_median / target) if (per_second_median and target) else None
+    sent = point.get("events_sent")
+    elapsed = point.get("send_log_span_s") or point.get("elapsed_s")
+    point["excess_over_ideal_s"] = (elapsed - sent / target) if (sent and target and elapsed) else None
     point["rate_source"] = "; ".join(sources)
     point["rate_source_exact"] = "rounded" not in point["rate_source"]
 
@@ -479,9 +485,22 @@ def classify(point: dict, thresholds: dict) -> dict:
         reasons.append(f"max_send={max_send:.1f}ms > {thresholds['max_send_ms']}ms - a node stopped reading its socket long enough to block the sender")
 
     ratio = point.get("achieved_ratio")
+    sustained = point.get("sustained_ratio")
+    excess = point.get("excess_over_ideal_s")
     achieved_ratio_fired = ratio is not None and ratio < thresholds["achieved_ratio"]
+    stall_explained = (achieved_ratio_fired and sustained is not None
+                       and sustained >= thresholds["sustained_ratio"])
+    if stall_explained:
+        achieved_ratio_fired = False
+        warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but the median second "
+                              f"delivered {sustained:.3f} of the target"
+                              + (f" and the run ran {excess:.2f}s over its ideal duration" if excess else "")
+                              + " - a one-off stall, not a sustained deficit, so it is NOT counted as saturation")
+    else:
+        warnings_from_rate = None
     if achieved_ratio_fired:
-        reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}")
+        reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}"
+                       + (f" (median second at {sustained:.3f} of target)" if sustained is not None else ""))
 
     if point.get("message_drops"):
         reasons.append(f"message_drops={point['message_drops']} {point.get('drop_reasons')}")
@@ -517,6 +536,8 @@ def classify(point: dict, thresholds: dict) -> dict:
 
     # check if the sender is the limit
     warnings: list[str] = []
+    if warnings_from_rate:
+        warnings.append(warnings_from_rate)
     sender_cpu = point.get("sender_cpu_pct")
     # check if the tooling (sender) is reaching its limit
     tooling_limited: list[str] = []
@@ -778,6 +799,9 @@ def main() -> int:
     parser.add_argument("--systems", nargs="*", default=list(SYSTEMS))
     parser.add_argument("--quiet", action="store_true", help="no progress output")
     parser.add_argument("--achieved-ratio", type=float, default=0.95, help="saturated below this effective/target ratio (default 0.95)")
+    parser.add_argument("--sustained-ratio", type=float, default=0.95,
+                        help="a level whose overall achieved ratio is low but whose MEDIAN per second rate is at least "
+                             "this fraction of target is treated as stalled once, not saturated (default 0.95). set to 0 to always trust the overall ratio")
     parser.add_argument("--cpu-threshold", type=float, default=85.0, help="saturated above this cpu%% of one core on the busiest process (default 85)")
     parser.add_argument("--queue-fill", type=float, default=0.25, help="saturated above this peak queue depth / capacity (default 0.25)")
     parser.add_argument("--blocked-frac", type=float, default=0.001, help="saturated above this fraction of sends blocked >1ms (default 0.001)")
@@ -802,7 +826,8 @@ def main() -> int:
     parser.add_argument("--csv", type=Path, default=None, help="write a flat per point table here")
     args = parser.parse_args()
 
-    thresholds = {"achieved_ratio": args.achieved_ratio, "cpu_pct": args.cpu_threshold,
+    thresholds = {"achieved_ratio": args.achieved_ratio, "sustained_ratio": args.sustained_ratio,
+                  "cpu_pct": args.cpu_threshold,
                   "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
                   "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold,
                   "infra_queue_fill_warn": args.infra_queue_fill_warn}
