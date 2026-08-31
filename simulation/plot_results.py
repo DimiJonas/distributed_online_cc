@@ -13,6 +13,7 @@ output (under <results>/_plots/ unless --out says otherwise)
 
   runs.csv = one row per (run, system): parameters and the headline metrics
   privacy.csv = one row per (run, system, compromise size)
+  fact_universe.csv = the denominators behind the disclosure fractions (one row per (run, system))
   feasibility.csv = correctness aggregated over all runs
   <experiment>/*.png = the figures of that experiment
 
@@ -399,8 +400,9 @@ PRIVACY_PANELS = [
     ("case_exposure_with_anonymous", "case exposure incl. anonymous occurrences", "fraction of a case"),
     ("total_reconstruction_probability", "probability of reconstructing every case", "probability"),
     ("full_case_fraction", "cases fully named", "fraction of cases"),
-    ("model_fact_disclosure", "process model disclosed", "fraction of model facts"),
-    ("placement_fact_disclosure", "placement disclosed", "fraction of placement facts"),
+    ("model_disclosure", "process model disclosed", "fraction of model atoms"),
+    ("model_disclosure_binding", "bindings disclosed", "fraction of binding atoms"),
+    ("deployment_disclosure", "deployment disclosed", "fraction of deployment atoms"),
     ("first_spy_precision", "first spy precision", "precision"),
     ("case_disclosure_set", "case disclosure (set knowledge)", "cd"),
     ("trace_disclosure_set", "trace disclosure (set knowledge)", "td"),
@@ -474,11 +476,134 @@ def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=Fa
     return write_figure(figure, out_path, formats)
 
 
+# per atom kind facts
+FACT_KIND_PANELS = [
+    ("model_disclosure_activity", "activity(a)", "model"),
+    ("model_disclosure_constraint", "constraint(c)", "model"),
+    ("model_disclosure_constraint_type", "constraint_type(c, T)", "model"),
+    ("model_disclosure_binding", "binding(c, r, a)", "model"),
+    ("model_disclosure_param", "param(c, k, v)", "model"),
+    ("model_disclosure_balanced", "balanced mean over kinds", "model"),
+    ("deployment_disclosure_place", "place(c, r, n)", "deployment"),
+    ("deployment_disclosure_counterpart", "counterpart(c, r, n)", "deployment"),
+    ("deployment_disclosure_watch", "watch(a, n)", "deployment"),
+]
+
+
+def fact_breakdown_figure(privacy, experiment, x_key, out_path, formats):
+    collected, pools = privacy_curves(privacy, experiment, x_key)
+    if not collected:
+        return None
+    usable = [panel for panel in FACT_KIND_PANELS
+              if any(panel[0] in per_size for per_x in collected.values() for per_size in per_x.values())]
+    if not usable:
+        return None
+
+    columns = min(3, len(usable))
+    figure_rows = math.ceil(len(usable) / columns)
+    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.6 * columns, 3.4 * figure_rows), squeeze=False)
+    linestyle_of: dict = {}
+    for index, (metric, title, layer) in enumerate(usable):
+        axes = axes_grid[index // columns][index % columns]
+        for (system, x), per_size in sorted(collected.items(), key=lambda item: str(item[0])):
+            points = []
+            for compromised, metrics in sorted(per_size.items()):
+                if metric in metrics:
+                    median, low, high = summarize(metrics[metric])
+                    points.append((compromised / (pools.get((system, x)) or 1), median, low, high))
+            if not points:
+                continue
+            style = SYSTEM_STYLE.get(system, {"color": "#444444", "marker": "^", "label": system})
+            if x not in linestyle_of:
+                linestyle_of[x] = SERIES_LINESTYLES[len(linestyle_of) % len(SERIES_LINESTYLES)]
+            axes.plot([p[0] for p in points], [p[1] for p in points], color=style["color"],
+                      marker=style["marker"], markersize=4, linewidth=1.6, linestyle=linestyle_of[x],
+                      label=style["label"] + (f" ({x_key}={x})" if x_key and x is not None else ""))
+            axes.fill_between([p[0] for p in points], [p[2] for p in points], [p[3] for p in points],
+                              color=style["color"], alpha=0.15, linewidth=0)
+        style_axes(axes, f"{title}  [{layer}]", "compromised fraction of the pool", "fraction learned")
+        axes.set_ylim(-0.02, 1.05)
+    for index in range(len(usable), figure_rows * columns):
+        axes_grid[index // columns][index % columns].axis("off")
+
+    handles, labels = axes_grid[0][0].get_legend_handles_labels()
+    if handles:
+        figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=9,
+                      frameon=False, bbox_to_anchor=(0.5, -0.01))
+    figure.suptitle(f"{experiment}: disclosure per atom kind", fontsize=12)
+    figure.tight_layout(rect=(0, 0.03, 1, 0.96))
+    return write_figure(figure, out_path, formats)
+
+
+# what observing the coordination traffic adds on top of the configs
+def fact_traffic_figure(privacy, experiment, x_key, out_path, formats):
+    collected, pools = privacy_curves(privacy, experiment, x_key)
+    if not collected:
+        return None
+    conditions = [("_config_only", "config only", ":"), ("", "with coordination traffic", "-")]
+    panels = [("model_disclosure", "process model", "fraction of model atoms"),
+              ("deployment_disclosure", "deployment", "fraction of deployment atoms")]
+    if not any(f"{panels[1][0]}_config_only" in per_size for per_x in collected.values() for per_size in per_x.values()):
+        return None  # no msgtrace in this experiment so there is nothing to compare
+
+    figure, axes_grid = plt.subplots(1, 2, figsize=(9.6, 3.6), squeeze=False)
+    for index, (base_metric, title, ylabel) in enumerate(panels):
+        axes = axes_grid[0][index]
+        for (system, x), per_size in sorted(collected.items(), key=lambda item: str(item[0])):
+            for suffix, condition, linestyle in conditions:
+                metric = base_metric + suffix
+                points = []
+                for compromised, metrics in sorted(per_size.items()):
+                    if metric in metrics:
+                        median, _low, _high = summarize(metrics[metric])
+                        points.append((compromised / (pools.get((system, x)) or 1), median))
+                if not points:
+                    continue
+                style = SYSTEM_STYLE.get(system, {"color": "#444444", "marker": "^", "label": system})
+                axes.plot([p[0] for p in points], [p[1] for p in points], color=style["color"],
+                          marker=style["marker"], markersize=4, linewidth=1.6, linestyle=linestyle,
+                          label=f"{style['label']}, {condition}")
+        style_axes(axes, title, "compromised fraction of the pool", ylabel)
+        axes.set_ylim(-0.02, 1.05)
+    handles, labels = axes_grid[0][1].get_legend_handles_labels()
+    if handles:
+        figure.legend(handles, labels, loc="lower center", ncol=2, fontsize=9, frameon=False,
+                      bbox_to_anchor=(0.5, -0.02))
+    figure.suptitle(f"{experiment}: what the coordination traffic adds", fontsize=12)
+    figure.tight_layout(rect=(0, 0.06, 1, 0.95))
+    return write_figure(figure, out_path, formats)
+
+
+FACT_KINDS = ("activity", "constraint", "constraint_type", "binding", "param", "place", "counterpart", "watch")
+
+
+# the denominators for every fact disclosure fraction
+def write_fact_universe_csv(privacy: dict, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["experiment", "run_id", "system", "nodes", "pool_size", "activities", "constraints", "roles",
+                         "model_total", "deployment_total"] + [f"total_{kind}" for kind in FACT_KINDS]
+                        + ["coordination_traffic_available"])
+        for (experiment, run_id, system), block in sorted(privacy.items(), key=str):
+            facts = (block["local"] or {}).get("facts")
+            if not facts:
+                continue
+            totals = {**facts["model_totals_by_kind"], **facts["deployment_totals_by_kind"]}
+            writer.writerow([experiment, run_id, system, block["params"].get("nodes"),
+                             block["local"].get("pool_size"), facts["catalog"]["activities"],
+                             facts["catalog"]["constraints"], facts["catalog"]["roles"],
+                             facts["model_total"], facts["deployment_total"]]
+                            + [totals.get(kind) for kind in FACT_KINDS]
+                            + [facts.get("coordination_traffic_available")])
+
+
 # privacy against the swept parameter
 PRIVACY_VS_PARAMETER = [
     ("case_exposure_named", "case exposure (named)", "fraction of a case"),
     ("case_exposure_with_anonymous", "case exposure incl. anonymous", "fraction of a case"),
-    ("model_fact_disclosure", "process model disclosed", "fraction of model facts"),
+    ("model_disclosure", "process model disclosed", "fraction of model atoms"),
+    ("deployment_disclosure", "deployment disclosed", "fraction of deployment atoms"),
     ("first_spy_precision", "first spy precision", "precision"),
 ]
 PRIVACY_LEVELS = [("1 node", None, 1), ("25% of pool", 0.25, None), ("50% of pool", 0.5, None)]
@@ -688,6 +813,33 @@ def write_feasibility(rows: list[Row], out_path: Path) -> dict:
     return {regime: dict(values) for regime, values in by_regime.items()}
 
 
+def privacy_figures(experiment, privacy, experiment_privacy, target, formats, privacy_x, sensitivity, note) -> list[Path]:
+    written: list[Path] = []
+    if not any(key[0] == experiment for key in privacy):
+        return written
+    note("privacy curves")
+    for name, kwargs in (("privacy", {}), ("privacy_by_fraction", {"by_fraction": True})):
+        figure = privacy_figure(privacy, experiment, privacy_x, target / name, formats, **kwargs)
+        if figure:
+            written.append(figure)
+    if not sensitivity:
+        figure = privacy_vs_parameter_figure(privacy, experiment, privacy_x,
+                                             target / "privacy_vs_parameter", formats)
+        if figure:
+            written.append(figure)
+    figure = min_nodes_figure(privacy, experiment, target / "privacy_min_nodes", formats)
+    if figure:
+        written.append(figure)
+
+    note("fact disclosure per atom kind")
+    for name, builder in (("privacy_facts_breakdown", fact_breakdown_figure), ("privacy_facts_traffic", fact_traffic_figure)):
+        figure = builder(privacy, experiment, privacy_x, target / name, formats)
+        if figure:
+            written.append(figure)
+    write_fact_universe_csv(experiment_privacy, target / "fact_universe.csv")
+    return written
+
+
 def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Path, formats, progress: Progress | None) -> list[Path]:
     written: list[Path] = []
     target = out_dir / experiment.replace("/", "_")
@@ -728,7 +880,8 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
     x_key = numeric[0] if numeric else (varied[0] if varied else None)
     series_key = numeric[1] if len(numeric) > 1 and not is_sensitivity(rows, numeric) else None
     if x_key is None:
-        return written
+        # nothing varies so there are no scalability panels to draw, except for the privacy figures per compromise size
+        return written + privacy_figures(experiment, privacy, experiment_privacy, target, formats, None, sensitivity, note)
 
     distinct_x = len({row.params.get(x_key) for row in rows})
     logx = bool(x_key in ("rate", "nodes", "repeat", "cases") and distinct_x > 3)
@@ -759,24 +912,8 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
                 written.append(figure)
 
     # check if compute_privacy.py has run for this experiment
-    if any(key[0] == experiment for key in privacy):
-        note("privacy curves")
-        privacy_x = None if sensitivity else (x_key if distinct_x > 1 else None)
-        figure = privacy_figure(privacy, experiment, privacy_x, target / "privacy", formats)
-        if figure:
-            written.append(figure)
-        figure = privacy_figure(privacy, experiment, privacy_x, target / "privacy_by_fraction",
-                                formats, by_fraction=True)
-        if figure:
-            written.append(figure)
-        if not sensitivity:
-            figure = privacy_vs_parameter_figure(privacy, experiment, privacy_x,
-                                                 target / "privacy_vs_parameter", formats)
-            if figure:
-                written.append(figure)
-        figure = min_nodes_figure(privacy, experiment, target / "privacy_min_nodes", formats)
-        if figure:
-            written.append(figure)
+    privacy_x = None if sensitivity else (x_key if distinct_x > 1 else None)
+    written += privacy_figures(experiment, privacy, experiment_privacy, target, formats, privacy_x, sensitivity, note)
 
     return written
 
@@ -807,6 +944,7 @@ def main() -> None:
     else:
         write_runs_csv(rows, out_dir / "runs.csv")
         write_privacy_csv(privacy, out_dir / "privacy.csv")
+        write_fact_universe_csv(privacy, out_dir / "fact_universe.csv")
         totals = write_feasibility(rows, out_dir / "feasibility.csv")
 
     by_experiment: dict[str, list[Row]] = defaultdict(list)
