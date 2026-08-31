@@ -422,7 +422,9 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
         "seconds_to_all_expected": timeline.get("seconds_to_all_expected"),
         "pairs_in_db": timeline.get("pairs_in_db"),
         "expected_pairs": timeline.get("expected_pairs"),
-        "run_problems": list(run_file.get("problems") or []) + list(timeline.get("problems") or []),
+        "run_problems": [problem for problem in (list(run_file.get("problems") or [])
+                                                 + list(timeline.get("problems") or []))
+                         if not _problem_is_other_system(problem, system)],
     }
     point.update(parse_sender(run_dir, system))
     point.update(parse_send_log(run_dir, system))
@@ -471,6 +473,17 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
 
 
 # decide if the point shows saturation
+SYSTEMS_FOR_PROBLEM_PREFIX = ("decentralized", "central")
+
+
+def _problem_is_other_system(problem, system: str) -> bool:
+    text = str(problem)
+    for other in SYSTEMS_FOR_PROBLEM_PREFIX:
+        if other != system and text.startswith(f"{other}:"):
+            return True
+    return False
+
+
 def classify(point: dict, thresholds: dict) -> dict:
 
     reasons: list[str] = []
@@ -506,10 +519,23 @@ def classify(point: dict, thresholds: dict) -> dict:
         reasons.append(f"message_drops={point['message_drops']} {point.get('drop_reasons')}")
 
     fill = point.get("queue_fill_max")
-    if fill is not None and fill > thresholds["queue_fill"]:
+    queue_reason_fired = fill is not None and fill > thresholds["queue_fill"]
+    if queue_reason_fired:
         reasons.append(f"peak {point.get('queue_fill_max_queue')} depth on "
                        f"{point.get('queue_fill_max_node')} at {fill:.0%} of capacity "
                        f"> {thresholds['queue_fill']:.0%}")
+
+    capacity = point.get("event_q_capacity")
+    depth_p95, depth_p99 = point.get("dequeue_depth_p95"), point.get("dequeue_depth_p99")
+    if capacity:
+        point["event_q_p95_fill"] = (depth_p95 / capacity) if depth_p95 is not None else None
+        point["event_q_p99_fill"] = (depth_p99 / capacity) if depth_p99 is not None else None
+    sustained_fill = point.get("event_q_p95_fill")
+    if (queue_reason_fired and point.get("queue_fill_max_queue") == "event_q"
+            and sustained_fill is not None and sustained_fill < thresholds["queue_fill"]):
+        reasons.append(f"  (but the event_q p95 depth is only {sustained_fill:.1%} of capacity"
+                       + (f", p99 {point['event_q_p99_fill']:.0%}" if point.get("event_q_p99_fill") else "")
+                       + " - tail excursions, not a standing backlog)")
 
     thread_cpu = point.get("sys_thread_max_pct")
     process_cpu = point.get("sys_cpu_max_pct")

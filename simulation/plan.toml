@@ -60,10 +60,10 @@ policy = "Revocable"
 duration = "10s"
 
 [baseline.result_sink]
-mpsc_channel_size = 65536
+mpsc_channel_size = 262144
 retry_interval = "5s"
 retry_buffer_size = 32768
-max_batch_size = 4096
+max_batch_size = 16384
 flush_interval = "100ms"
 
 [baseline.gossip]
@@ -88,7 +88,7 @@ case_gap_secs = 2.0               # ~13 concurrent cases (~26 roles/events per c
 burst = 16
 msgtrace = true
 idle_window_s = 20
-quiescence_s = 20
+quiescence_s = 120
 max_wait_for_settlement_s = 240
 external_central_sink = true
 idle_only = false
@@ -100,6 +100,7 @@ shuffle_secs = 5
 shuffle_length = 4
 cache_size = 20
 ring_degree = 2
+worker_threads = 2                # determined with E0b
 
 
 # E0a - find sender ceiling and have coarse saturation info to fix rate sweeps

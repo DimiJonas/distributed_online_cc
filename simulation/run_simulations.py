@@ -426,11 +426,12 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
             "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
 
 
-# wait for the system to settle (it stops producing results for a configured amount of time) or time out
+# wait for the system to settle or time out
 def wait_for_system_settlement(paths: RunPaths, system: str, expected_pairs: int | None, params: dict) -> dict:
- 
+
     quiescence = float(params.get("quiescence_s", 20))
     max_wait_for_settlement = float(params.get("max_wait_for_settlement_s", 240))
+    settle_after_complete = float(params.get("settle_after_complete_s", 2.0))
     db = paths.db(system)
     start = time.monotonic()
     last_change = start
@@ -444,6 +445,10 @@ def wait_for_system_settlement(paths: RunPaths, system: str, expected_pairs: int
             last, last_change = current, now
         if expected_pairs and current[0] >= expected_pairs and complete_at is None:
             complete_at = now
+        # short grace period for the system to settle after all results arrived
+        if complete_at is not None and now - complete_at >= settle_after_complete:
+            reason = "complete"
+            break
         if now - last_change >= quiescence:
             reason = "quiescence"
             break
@@ -459,6 +464,7 @@ def wait_for_system_settlement(paths: RunPaths, system: str, expected_pairs: int
         "expected_pairs": expected_pairs,
         "seconds_to_all_expected": (complete_at - start) if complete_at else None,
         "quiescence_s": quiescence,
+        "settle_after_complete_s": settle_after_complete,
     }
 
 
@@ -509,6 +515,19 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         timeline["wal_checkpoint"] = checkpoint_wal(paths.db(system))
         if not timeline["wal_checkpoint"].get("checkpointed", False):
             problems.append(f"{system}: wal checkpoint incomplete: {timeline['wal_checkpoint']}")
+
+        try:
+            final_pairs, final_rows = db_progress(paths.db(system))
+            timeline["pairs_in_db_final"] = final_pairs
+            timeline["rows_in_db_final"] = final_rows
+            settlement_pairs = timeline.get("pairs_in_db")
+            if settlement_pairs is not None:
+                timeline["pairs_after_settlement"] = final_pairs - settlement_pairs
+                if final_pairs > settlement_pairs:
+                    log(f"  {final_pairs - settlement_pairs} pair(s) landed after settlement was declared "
+                        f"({settlement_pairs} -> {final_pairs})")
+        except Exception as error:
+            log(f"  !! could not re-read {paths.db(system)} after teardown: {error!r}")
 
         if timeline["hard_killed_nodes"]:
             problems.append(f"{system}: {len(timeline['hard_killed_nodes'])} node(s) ignored SIGTERM for {grace}s and were SIGKILLed: {timeline['hard_killed_nodes']}")
@@ -601,9 +620,14 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
         for timeline in run_record["systems_timeline"]:
             problems += timeline.get("problems", [])
             expected = timeline.get("expected_pairs")
-            pairs = timeline.get("pairs_in_db")
+            pairs = timeline.get("pairs_in_db_final", timeline.get("pairs_in_db"))
             if expected and pairs is not None and pairs < expected:
-                problems.append(f"{timeline['system']}: only {pairs}/{expected} pairs in the db at settlement (reason: {timeline.get('system_settlement_reason')})")
+                problems.append(f"{timeline['system']}: only {pairs}/{expected} pairs in the db after teardown "
+                                f"(reason: {timeline.get('system_settlement_reason')})")
+            elif expected and timeline.get("pairs_after_settlement"):
+                log(f"  !! {timeline['system']}: settlement was declared at "
+                    f"{timeline.get('pairs_in_db')}/{expected} pairs, the remaining "
+                    f"{timeline['pairs_after_settlement']} landed during teardown - raise quiescence_s")
             if timeline.get("system_settlement_reason") == "timeout":
                 problems.append(f"{timeline['system']}: settlement timed out, the system never went quiet")
             if timeline.get("sender_returncode") not in (0, None):
