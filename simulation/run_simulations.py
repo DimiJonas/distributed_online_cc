@@ -3,16 +3,16 @@
 run_simulations.py - execute a batch of measurement runs for the distributed online conformance checking system (both decentralized and central) 
 and collect everything an evaluation needs
 
-  python3.11 simulation/sim_run.py --plan simulation/experiments.toml
-  python3.11 simulation/sim_run.py --plan simulation/experiments.toml --list
-  python3.11 simulation/sim_run.py --plan simulation/experiments.toml --only throughput_ladder
-  python3.11 simulation/sim_run.py --plan simulation/experiments.toml --only 'sens_*' --force
+  python3.11 simulation/run_simulations.py --plan simulation/plan.toml
+  python3.11 simulation/run_simulations.py --plan simulation/plan.toml --list
+  python3.11 simulation/run_simulations.py --plan simulation/plan.toml --only throughput_ladder
+  python3.11 simulation/run_simulations.py --plan simulation/plan.toml --only 'sens_*' --force
 
 what one run does
 
   1. gen-config -> both systems from the same catalog into <run>/sys/
   2. patch configs -> the fixed baseline that will not change in the runs (includes configs like channel sizes, ttls and timeouts)
-  3. generate event stream -> gen-events (synthetic) or a prepared log stream (sepsis), cached under <results>/_streams/ and shared between runs
+  3. generate event stream -> gen-events (synthetic) or a prepared log stream (sepsis, traffic fines), cached under <results>/_streams/ and shared between runs
   4. per system, one after the other:
         launch nodes -> wait ready -> idle window -> send event stream -> system settlement -> stop
         while /proc is being sampled (cpu and rss of every node process) and the nodes write measurements to <roor>/records/
