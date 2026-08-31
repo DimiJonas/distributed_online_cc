@@ -196,15 +196,19 @@ class FactModel:
         pool_set = set(pool)
         self.pool = list(pool)
 
-        # address -> node id, so that peer fields and observed remotes resolve to the same identity as place()
-        self.peer_to_node: dict[str, int] = {} 
+        self.node_address: dict[int, str] = {}  # node id -> tcp address
+        self.address_owner: dict[str, int] = {} # any listen address -> node id
         for node in nodes:
+            address = str(node.tcp) if node.tcp else f"node-{node.node_id}"
+            self.node_address[node.node_id] = address
             if node.tcp:
-                self.peer_to_node[str(node.tcp)] = node.node_id
+                self.address_owner[str(node.tcp)] = node.node_id
             if node.overlay:
-                self.peer_to_node[str(node.overlay)] = node.node_id
+                self.address_owner[str(node.overlay)] = node.node_id
 
         self.diagnostics = {"unresolved_peer_addresses": 0, "forwarders_without_event_ids": 0,
+                            "nodes_without_tcp_address": sum(1 for node in nodes if not node.tcp),
+                            "peer_addresses_resolved_via_overlay": 0,
                             "unknown_roles": [], "coordination_pairs": 0,
                             "coordination_without_local_role": 0, "coordination_outside_universe": 0}
 
@@ -237,6 +241,7 @@ class FactModel:
     def _config_facts(self, node) -> set:
         facts: set = set()
         node_id = node.node_id
+        address = self.node_address[node_id]
         roles_here: dict[str, set] = {}
 
         for constraint in node.constraints:
@@ -251,11 +256,11 @@ class FactModel:
 
             facts.add(("constraint", constraint_id))
             facts.add(("role", constraint_id, role))
-            facts.add(("place", constraint_id, role, node_id))
+            facts.add(("place", constraint_id, role, address))
             if activity is not None:
                 facts.add(("binding", constraint_id, role, activity))
                 facts.add(("activity", activity))
-                facts.add(("watch", activity, node_id))
+                facts.add(("watch", activity, address))
 
             for key, value in constraint.items():
                 # skip event_id, constraint_id and constraint role
@@ -263,13 +268,16 @@ class FactModel:
                     continue
                 if is_peer_key(key):
                     # a peer address places the counterpart (the config form of R9)
-                    addresses = [value] if isinstance(value, str) else list(value or [])
-                    for address in addresses:
-                        peer = self.peer_to_node.get(str(address))
-                        if peer is None:
+                    peer_addresses = [value] if isinstance(value, str) else list(value or [])
+                    for peer_address in peer_addresses:
+                        owner = self.address_owner.get(str(peer_address))
+                        if owner is None:
                             self.diagnostics["unresolved_peer_addresses"] += 1
-                        elif peer != node_id:
-                            facts.add(("counterpart", constraint_id, role, peer))
+                            continue
+                        if str(peer_address) != self.node_address[owner]:
+                            self.diagnostics["peer_addresses_resolved_via_overlay"] += 1
+                        if owner != node_id:
+                            facts.add(("counterpart", constraint_id, role, self.node_address[owner]))
                     continue
                 facts.add(("param", constraint_id, key, param_value(value)))
 
@@ -278,7 +286,7 @@ class FactModel:
             if not node.event_ids:
                 self.diagnostics["forwarders_without_event_ids"] += 1
             for activity in node.event_ids:
-                facts.add(("watch", activity, node_id))
+                facts.add(("watch", activity, address))
                 facts.add(("activity", activity))
 
         self.roles_at_node[node_id] = roles_here
@@ -297,8 +305,12 @@ class FactModel:
                 continue
             if peer == node:
                 continue
+            peer_address = self.node_address.get(peer)
+            if peer_address is None:
+                self.diagnostics["unresolved_peer_addresses"] += 1
+                continue
             for role in roles:
-                atom = ("counterpart", constraint_id, role, peer)
+                atom = ("counterpart", constraint_id, role, peer_address)
                 if atom in self.universe:
                     facts.add(atom)
                 else:
@@ -363,12 +375,6 @@ class FactModel:
             "nodes_with_facts": len(self.config_facts),
             "coordination_traffic_available": self.has_traffic_facts,
             "diagnostics": self.diagnostics,
-            "note": "the universe is the closure of the union of all node configs in the attacker pool, so full "
-                    "compromise reaches 1.0 by construction: the metric is how fast an attacker gets there, not "
-                    "whether it can. role(c,r) is in the closure but in no denominator, it only re-encodes "
-                    "constraint_type. model totals are identical in both systems and comparable across them, "
-                    "deployment totals are not (central has no remote counterpart atoms and its watch count is "
-                    "inflated by the forwarders), so compare deployment within a system, or place across systems",
         }
 
 

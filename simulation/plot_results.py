@@ -773,6 +773,9 @@ def write_privacy_csv(privacy: dict, out_path: Path) -> None:
 
 # feasibility: correctness over all runs split into nominal, overloaded and incomplete runs
 def run_regime(row: Row) -> str:
+    # idle only runs send no events, so every expected pair is missing by construction and they should not be mixed with the other fasibility measurements
+    if not row.has_workload:
+        return "idle"
     if not row.value("quality.complete"):
         return "incomplete"
     return "overload" if row.value("throughput.saturated") else "nominal"
@@ -807,7 +810,7 @@ def write_feasibility(rows: list[Row], out_path: Path) -> dict:
             line(writer, regime, experiment, system, values)
             for key, value in values.items():
                 by_regime[regime][key] += value
-        for regime in ("nominal", "overload", "incomplete"):
+        for regime in ("nominal", "overload", "incomplete", "idle"):
             if by_regime.get(regime):
                 line(writer, regime, "ALL", "ALL", by_regime[regime])
     return {regime: dict(values) for regime, values in by_regime.items()}
@@ -962,8 +965,7 @@ def main() -> None:
 
     tables = 3 * len(by_experiment) + (1 if args.experiment else 3)
     print(f"\n{written} figure(s) and {tables} table(s) in {out_dir}")
-    for regime, label in (("nominal", "within capacity"), ("overload", "saturated"),
-                          ("incomplete", "truncated records")):
+    for regime, label in (("nominal", "within capacity"), ("overload", "saturated"), ("incomplete", "truncated records"), ("idle", "no workload, excluded from correctness")):
         values = totals.get(regime)
         if not values:
             continue
