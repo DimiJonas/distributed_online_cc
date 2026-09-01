@@ -65,6 +65,23 @@ def relative(new, base, metric: str):
     return change, better
 
 
+COLUMN_WIDTH = 24
+
+
+# the printed cell for one (metric, level): the value, and the change against the baseline when one is defined
+def format_cell(value, base_value, metric: str, is_baseline: bool) -> str:
+    if value is None:
+        return "-"
+    if is_baseline:
+        return f"{value:.4g}"
+    change, better = relative(value, base_value, metric)
+    if change is None:
+        # undefined against a zero or missing baseline
+        return f"{value:.4g} (vs 0)" if base_value == 0 else f"{value:.4g} (n/a)"
+    marker = "=" if change == 0 else ("+" if better else "!")
+    return f"{value:.4g} ({change:+.1%}){marker}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("runs_csv", type=Path, help="runs.csv from plot_results.py")
@@ -109,8 +126,8 @@ def main() -> None:
         if not base_cell:
             print("  no baseline run in this cell, skipped")
             continue
-        header = f"  {'metric':<22}" + "".join(f"{args.factor}={level:<14}" for level in levels)
-        print(header)
+        print(f"  {'metric':<22}" + "".join(f"{args.factor}={level}".ljust(COLUMN_WIDTH) for level in levels))
+        incomparable: list[str] = []
         for metric in args.metrics:
             base_value = median_of(base_cell.get(metric, []))
             if base_value is None:
@@ -118,21 +135,18 @@ def main() -> None:
             line = f"  {metric:<22}"
             for level in levels:
                 value = median_of(cells.get((system, held, level), {}).get(metric, []))
+                is_baseline = level == baseline_level
+                line += format_cell(value, base_value, metric, is_baseline).ljust(COLUMN_WIDTH)
                 if value is None:
-                    line += f"{'-':<15}"
                     continue
-                if level == baseline_level:
-                    line += f"{value:<15.4g}"
-                else:
-                    change, better = relative(value, base_value, metric)
-                    mark = "" if change is None else ("+" if better else "!")
-                    line += f"{value:.4g} ({change:+.1%}){mark:<3}"
-                out_rows.append({"system": system, "held": held_label, "level": level,
-                                 "metric": metric, "value": value,
-                                 "relative_to_baseline": None if level == baseline_level
-                                 else relative(value, base_value, metric)[0]})
+                change = None if is_baseline else relative(value, base_value, metric)[0]
+                if not is_baseline and change is None and metric not in incomparable:
+                    incomparable.append(metric)
+                out_rows.append({"system": system, "held": held_label, "level": level, "metric": metric, "value": value, "relative_to_baseline": change})
             print(line)
-        print("  (+ = better than baseline, ! = worse)")
+        print("  (+ = better than baseline, ! = worse, = unchanged)")
+        if incomparable:
+            print(f"  note: {', '.join(incomparable)} had a zero baseline, so no relative change is defined.")
 
     if args.rank_by:
         print(f"\n=== system ranking by {args.rank_by} (lower is better"
