@@ -396,6 +396,12 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
         send_stream_cmd += ["--rate", str(params["rate"])]
     if params.get("burst"):
         send_stream_cmd += ["--burst", str(params["burst"])]
+    if params.get("burst_ms"):
+        send_stream_cmd += ["--burst-ms", str(params["burst_ms"])]
+    if params.get("send_log_max_buffer") is not None:
+        send_stream_cmd += ["--log-max-buffer", str(params["send_log_max_buffer"])]
+    if params.get("send_log_flush_every"):
+        send_stream_cmd += ["--log-flush-every", str(params["send_log_flush_every"])]
     if params.get("send_jitter"):
         send_stream_cmd += ["--jitter", str(params["send_jitter"])]
 
@@ -420,10 +426,34 @@ def send_stream(plan: dict, repo: Path, paths: RunPaths, system: str, params: di
             sender_summary = json.loads(sender_summary_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
             log(f"  !! could not read the send summary {sender_summary_path}: {error}")
-    return {"send_start_us": stream_start_time, "send_end_us": stream_stop_time,
-            "sender_pid": sender_pid.get("pid"), "sender_returncode": proc.returncode,
-            "sender_summary": sender_summary,
-            "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
+    timing = {"send_start_us": stream_start_time, "send_end_us": stream_stop_time,
+              "sender_pid": sender_pid.get("pid"), "sender_returncode": proc.returncode,
+              "sender_summary": sender_summary,
+              "send_script_stdout": proc.stdout.strip().splitlines()[-3:]}
+    pacer = (sender_summary or {}).get("pacer") or {}
+    pacer_start, pacer_end = pacer.get("pacer_start_us"), pacer.get("pacer_end_us")
+    if pacer_start and pacer_end and pacer_end > pacer_start:
+        timing["pacer_start_us"] = pacer_start
+        timing["pacer_end_us"] = pacer_end
+        timing["load_window_source"] = "pacer"
+        preload_s = (pacer_start - stream_start_time) / 1e6
+        teardown_s = (stream_stop_time - pacer_end) / 1e6
+        timing["sender_preload_s"] = preload_s
+        timing["sender_teardown_s"] = teardown_s
+        log(f"  pacing window {(pacer_end - pacer_start) / 1e6:.2f}s "
+            f"(+{preload_s:.2f}s preload, +{teardown_s:.2f}s flush/teardown)")
+    else:
+        # old runs, or a sender that died before writing its summary
+        timing["load_window_source"] = "process"
+        log("  !! no pacer window in the send summary, falling back to the sender process bounds - "
+            "cpu and queue metrics will be diluted by preload and teardown")
+    send_log = (sender_summary or {}).get("send_log") or {}
+    if send_log.get("spills"):
+        timing["problems"] = list(timing.get("problems") or []) + [
+            f"{system}: the send log spilled {send_log['spills']}x mid stream "
+            f"({send_log.get('spill_us_total', 0) / 1000:.0f}ms of stall inside the pacing loop) - "
+            f"raise send_log_max_buffer"]
+    return timing
 
 
 # wait for the system to settle or time out
@@ -544,7 +574,7 @@ def run_one_system(plan: dict, repo: Path, paths: RunPaths, system: str, params:
         remove_quota_cgroups()
         for suffix in ("-wal", "-shm"):
             Path(str(paths.db(system)) + suffix).unlink(missing_ok=True)
-        timeline["problems"] = problems
+        timeline["problems"] = list(timeline.get("problems") or []) + problems
     timeline["nodes"] = [{"node_id": n.node_id, "role": n.role, "events": n.event_ids, "constraints": len(n.constraints)} for n in nodes]
     return timeline
 

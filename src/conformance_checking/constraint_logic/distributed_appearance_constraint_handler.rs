@@ -10,7 +10,10 @@ use crate::{
         result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
-    measurement::record::ResultTrigger,
+    measurement::{
+        self,
+        record::{CorrectionDropReason, ResultTrigger},
+    },
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage, PeerMessagePayload},
         tcp_router::{send_and_receive_conformance, send_to_conformance_peer},
@@ -340,6 +343,13 @@ impl DistributedAppearanceCounterHandler {
                 trigger_address,
                 e
             );
+            measurement::api::correction_dropped(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::DistributedAppearance,
+                CorrectionDropReason::CaseAlreadyClosed,
+                Some(trigger_address),
+            );
         }
     }
 }
@@ -370,17 +380,8 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             event
         );
 
-        let per_peer = self
-            .get_distributed_count(
-                state.clone(),
-                &event.case_id,
-                event.timestamp,
-                event.instance_id,
-            )
-            .await;
-        let distributed_count: u64 = per_peer.values().sum();
-
-        let pending = {
+        // record the evaluation before pulling with every configured peer seeded at 0
+        {
             let mut evaluations = state.evaluations.lock().unwrap();
             evaluations.insert(
                 &event.case_id,
@@ -388,17 +389,75 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
                 LastEvaluation {
                     trigger_time: event.timestamp,
                     triggering_event: Some(event.instance_id),
-                    detail: EvaluationDetail::DistributedCounterTotals { per_peer },
+                    detail: EvaluationDetail::DistributedCounterTotals {
+                        per_peer: self.counter_peers.iter().map(|peer| (*peer, 0)).collect(),
+                        pending_pull: true,
+                    },
                 },
             );
-            self.evaluate_count(distributed_count)
-                .map(|(info, result)| {
-                    (
-                        stamp_decision(&state, &event.case_id, &self.constraint_id),
-                        info,
-                        result,
-                    )
-                })
+        }
+
+        let (per_peer, failed_peers) = self
+            .get_distributed_count(
+                state.clone(),
+                &event.case_id,
+                event.timestamp,
+                event.instance_id,
+            )
+            .await;
+
+        // a peer that could not be reached contributed no count. report failure and stop evaluating
+        if !failed_peers.is_empty() {
+            log::error!(
+                "distributed appearance trigger handler: {} of {} counter peer(s) did not answer for ({}/{}): {:?}. \
+                 the distributed count is incomplete and no verdict is emitted from this trigger event; \
+                 case end will decide instead",
+                failed_peers.len(),
+                self.counter_peers.len(),
+                event.case_id,
+                self.constraint_id,
+                failed_peers
+            );
+            measurement::api::correction_dropped(
+                &event.case_id,
+                &self.constraint_id,
+                ConstraintType::DistributedAppearance,
+                CorrectionDropReason::IncompletePeerPull,
+                failed_peers.first().copied(),
+            );
+        }
+
+        let pending = {
+            let mut evaluations = state.evaluations.lock().unwrap();
+            let distributed_count = match evaluations.merge_peer_totals(
+                &event.case_id,
+                self.index,
+                per_peer.clone(),
+            ) {
+                Some(total) => total,
+                None => {
+                    // the case was cleaned up while the pull was ongoing
+                    log::warn!(
+                        "distributed appearance trigger handler: no recorded evaluation for ({}/{}) after the pull (the case was cleaned up mid pull). evaluating the pulled counts alone",
+                        event.case_id,
+                        self.constraint_id
+                    );
+                    per_peer.values().sum()
+                }
+            };
+
+            if failed_peers.is_empty() {
+                self.evaluate_count(distributed_count)
+                    .map(|(info, result)| {
+                        (
+                            stamp_decision(&state, &event.case_id, &self.constraint_id),
+                            info,
+                            result,
+                        )
+                    })
+            } else {
+                None
+            }
         };
 
         if let Some((stamp, info, result)) = pending {
@@ -467,17 +526,34 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         let (corrected, stamp) = {
             let mut evaluations = state.evaluations.lock().unwrap();
             match evaluations.add_to_peer_total(&message.case_id, self.index, peer, delta) {
-                Some(total) => (
-                    total,
+                Some(update) if update.pending_pull => {
+                    log::info!(
+                        "distributed appearance trigger handler: late delta of {} from {} for ({}/{}) arrived while the counter pull is still running. recorded, the pull will include it",
+                        delta,
+                        peer,
+                        message.case_id,
+                        self.constraint_id
+                    );
+                    return;
+                }
+                Some(update) => (
+                    update.total,
                     stamp_decision(&state, &message.case_id, &self.constraint_id),
                 ),
                 None => {
-                    // either the trigger event never fired here or the case was already cleaned up
+                    // the trigger event never fired here, or the case was already cleaned up
                     log::warn!(
                         "distributed appearance trigger handler: no recorded evaluation for ({}/{}). dropping late delta from {}",
                         message.case_id,
                         self.constraint_id,
                         peer
+                    );
+                    measurement::api::correction_dropped(
+                        &message.case_id,
+                        &self.constraint_id,
+                        ConstraintType::DistributedAppearance,
+                        CorrectionDropReason::NoRecordedEvaluation,
+                        Some(peer),
                     );
                     return;
                 }
@@ -540,25 +616,60 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         );
 
         let pending = {
-            let results = state.cc_results.lock().unwrap();
-            if results
-                .get_constraint(case_id, &self.constraint_id)
-                .is_some()
-            {
+            let recorded_total = {
+                let evaluations = state.evaluations.lock().unwrap();
+                match evaluations.get_cloned(case_id, self.index) {
+                    Some(LastEvaluation {
+                        detail: EvaluationDetail::DistributedCounterTotals { per_peer, .. },
+                        ..
+                    }) => Some(per_peer.values().sum::<u64>()),
+                    _ => None,
+                }
+            };
+
+            let result_exists = {
+                let results = state.cc_results.lock().unwrap();
+                results
+                    .get_constraint(case_id, &self.constraint_id)
+                    .is_some()
+            };
+
+            if result_exists {
                 None
             } else {
-                Some(stamp_decision(&state, case_id, &self.constraint_id))
+                // the pull could not reach every counter peer, so decide on the recorded total
+                let (result, info) = match recorded_total {
+                    Some(total) => match self.evaluate_count(total) {
+                        Some((info, result)) => (result, format!("{info} (decided at case end)")),
+                        None => (
+                            ConstraintResultType::Satisfied,
+                            format!(
+                                "counter {:?} within limit {:?} (decided at case end)",
+                                total, self.frequency
+                            ),
+                        ),
+                    },
+                    None => (
+                        ConstraintResultType::Satisfied,
+                        "counter evaluation was never triggered".to_string(),
+                    ),
+                };
+                Some((
+                    stamp_decision(&state, case_id, &self.constraint_id),
+                    result,
+                    info,
+                ))
             }
         };
-        if let Some(stamp) = pending {
+        if let Some((stamp, result, info)) = pending {
             // produce result because none was emitted yet
             emit_result_stamped(
                 stamp,
                 case_id,
                 &self.constraint_id,
                 ConstraintType::DistributedAppearance,
-                ConstraintResultType::Satisfied,
-                "counter evaluation was never triggered".to_string(),
+                result,
+                info,
                 state.clone(),
                 ResultTrigger::CaseEnd,
                 None,
@@ -576,8 +687,9 @@ impl DistributedAppearanceTriggerHandler {
         case_id: &CaseId,
         trigger_time: EventTime,
         triggering_event: EventInstanceId,
-    ) -> HashMap<SocketAddr, u64> {
+    ) -> (HashMap<SocketAddr, u64>, Vec<SocketAddr>) {
         let mut per_peer: HashMap<SocketAddr, u64> = HashMap::new();
+        let mut failed_peers: Vec<SocketAddr> = Vec::new();
         for counter_peer in &self.counter_peers {
             let mut cc_message = CCMessage::pull_token_request_with_creator(
                 case_id.clone(),
@@ -592,17 +704,25 @@ impl DistributedAppearanceTriggerHandler {
                 .await
             {
                 Ok(response) => match response.payload {
-                    PeerMessagePayload::Conformance(cc_msg) => {
-                        if let Some(token) = cc_msg.token {
+                    PeerMessagePayload::Conformance(cc_msg) => match cc_msg.token {
+                        Some(token) => {
                             *per_peer.entry(*counter_peer).or_insert(0) +=
                                 token.payload.get_count();
                         }
-                    }
+                        None => {
+                            log::error!(
+                                "distributed appearance trigger handler: {} answered without a counter token",
+                                counter_peer
+                            );
+                            failed_peers.push(*counter_peer);
+                        }
+                    },
                     _ => {
                         log::error!(
                             "distributed appearance trigger handler: received wrong message type: \"{}\"; expected type: \"conformance\"",
                             response.payload
                         );
+                        failed_peers.push(*counter_peer);
                         continue;
                     }
                 },
@@ -612,11 +732,12 @@ impl DistributedAppearanceTriggerHandler {
                         counter_peer,
                         e
                     );
+                    failed_peers.push(*counter_peer);
                     continue;
                 }
             }
         }
-        per_peer
+        (per_peer, failed_peers)
     }
 
     fn evaluate_count(&self, distributed_count: u64) -> Option<(String, ConstraintResultType)> {

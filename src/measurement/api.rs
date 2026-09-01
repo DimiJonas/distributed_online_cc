@@ -5,7 +5,8 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::measurement::record::{
-    CaseEndSource, ChurnEvent, Direction, QueueDepths, Record, ResultDropReason, ResultTrigger,
+    CaseEndSource, ChurnEvent, CorrectionDropReason, Direction, QueueDepths, Record,
+    ResultDropReason, ResultTrigger,
 };
 use crate::measurement::record_writer::{enabled, message_trace_enabled, record};
 use crate::network::message_types::{PeerMessage, PeerMessagePayload};
@@ -187,6 +188,22 @@ pub fn result_dropped(
         revision,
         trigger,
         decided_at,
+    })
+}
+
+pub fn correction_dropped(
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
+    reason: CorrectionDropReason,
+    peer: Option<SocketAddr>,
+) {
+    record(Record::CorrectionDropped {
+        case_id: case_id.clone(),
+        constraint_id: constraint_id.clone(),
+        constraint_type: constraint_type.to_string(),
+        reason,
+        peer,
     })
 }
 

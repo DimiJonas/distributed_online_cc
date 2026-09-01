@@ -46,6 +46,19 @@ pub enum ResultDropReason {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionDropReason {
+    /// the trigger has no recorded evaluation for the pair (never triggered, or already cleaned up)
+    NoRecordedEvaluation,
+    /// a counter peer did not answer, so the distributed count was incomplete
+    IncompletePeerPull,
+    /// the correcting token arrived but no local event had been seen to correct against
+    NoLocalDecision,
+    /// the case was closed before the correction could be applied
+    CaseAlreadyClosed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct QueueDepths {
     /// [depth_now, max_since_last_report, capacity]
     pub event_q: [usize; 3],
@@ -162,6 +175,17 @@ pub enum Record {
         revision: Option<RevisionNumber>,
         trigger: ResultTrigger,
         decided_at: DateTime<Utc>,
+    },
+
+    /// a late correction arrived but could not be applied
+    CorrectionDropped {
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        constraint_type: String,
+        reason: CorrectionDropReason,
+        /// the peer the correction came from (when it came over the network)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        peer: Option<SocketAddr>,
     },
 
     /// sampled link queue depth

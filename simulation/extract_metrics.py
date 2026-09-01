@@ -46,8 +46,17 @@ SINK_PAYLOADS = ("result")
 class Windows:
     def __init__(self, timeline: dict, warmup_fraction: float, cooldown_fraction: float):
         self.idle = (timeline.get("idle_start_us"), timeline.get("idle_end_us"))
-        self.load = (timeline.get("send_start_us"), timeline.get("send_end_us"))
-        self.settle = (timeline.get("send_end_us"), timeline.get("system_settled_us"))
+        # load window is the pacing loop so it doesnt include reading the event stream to memory at the start and flushing send log at the end
+        pacer_start, pacer_end = timeline.get("pacer_start_us"), timeline.get("pacer_end_us")
+        process_start, process_end = timeline.get("send_start_us"), timeline.get("send_end_us")
+        if pacer_start and pacer_end and pacer_end > pacer_start:
+            self.load = (pacer_start, pacer_end)
+            self.load_source = "pacer"
+        else:
+            self.load = (process_start, process_end)
+            self.load_source = "process"
+        self.process_load = (process_start, process_end)
+        self.settle = (self.load[1], timeline.get("system_settled_us"))
         self.warmup_fraction = warmup_fraction
         self.cooldown_fraction = cooldown_fraction
         send_start, send_end = self.load
@@ -68,12 +77,19 @@ class Windows:
         return (end - start) / 1e6
 
     def as_dict(self) -> dict:
-        return {"idle": list(self.idle), "load": list(self.load), "steady": list(self.steady),
-                "settle": list(self.settle),
-                "steady_seconds": self.seconds(self.steady),
-                "load_seconds": self.seconds(self.load),
-                "idle_seconds": self.seconds(self.idle),
-                "warmup_fraction": self.warmup_fraction, "cooldown_fraction": self.cooldown_fraction}
+        window = {"idle": list(self.idle), "load": list(self.load), "steady": list(self.steady),
+                  "settle": list(self.settle),
+                  "steady_seconds": self.seconds(self.steady),
+                  "load_seconds": self.seconds(self.load),
+                  "idle_seconds": self.seconds(self.idle),
+                  "load_source": self.load_source,
+                  "warmup_fraction": self.warmup_fraction, "cooldown_fraction": self.cooldown_fraction}
+        # how much sender-only work sits outside the load window (preload before, flush after)
+        process_start, process_end = self.process_load
+        if self.load_source == "pacer" and process_start and process_end:
+            window["sender_preload_seconds"] = (self.load[0] - process_start) / 1e6
+            window["sender_teardown_seconds"] = (process_end - self.load[1]) / 1e6
+        return window
 
 
 # a single pass over records/<system>/node-*.jsonl
@@ -104,6 +120,8 @@ class Scan:
         self.drops = {"total": 0, "by_reason": {}, "by_kind": {}}
         self.event_drops = {"total": 0, "by_reason": {}}   # events discarded before they were handled
         self.result_drops = {"total": 0, "by_reason": {}}
+        self.correction_drops = {"total": 0, "by_reason": {}, "by_constraint_type": {}}
+        self.correction_drop_pairs: set = set()
         self.queues: dict[str, list[tuple[float, float]]] = {} # name -> (timestamp, fill) during the load window
         self.queue_node_max: dict[str, dict[int, int]] = {} # queue name -> (node id -> peak depth) # name -> capacity
         self.queues_settle: dict[str, list[tuple[float, float]]] = {}
@@ -176,6 +194,16 @@ class Scan:
             self.result_drops["total"] += 1
             reason = line.get("reason") or "unknown"
             self.result_drops["by_reason"][reason] = self.result_drops["by_reason"].get(reason, 0) + 1
+        elif record_type == "correction_dropped":
+            self.correction_drops["total"] += 1
+            reason = str(line.get("reason") or "unknown")
+            self.correction_drops["by_reason"][reason] = self.correction_drops["by_reason"].get(reason, 0) + 1
+            constraint = str(line.get("constraint_type") or "unknown")
+            self.correction_drops["by_constraint_type"][constraint] = \
+                self.correction_drops["by_constraint_type"].get(constraint, 0) + 1
+            pair = (line.get("case_id"), line.get("constraint_id"))
+            if all(pair):
+                self.correction_drop_pairs.add(pair)
         elif record_type == "queues":
             self._queues(line, node_id, wallclock_time)
         elif record_type == "tcp_channel_queue_depth":
@@ -441,6 +469,11 @@ def send_metrics(send_dir: Path, system: str) -> dict:
             "blocked_sends_over_1ms": (send_summary.get("sends") or {}).get("blocked_over_1ms"),
             "max_send_us": (send_summary.get("sends") or {}).get("max_send_us"),
             "send_log_spills": (send_summary.get("send_log") or {}).get("spills"),
+            "send_log_spill_us_total": (send_summary.get("send_log") or {}).get("spill_us_total"),
+            "send_log_max_spill_us": (send_summary.get("send_log") or {}).get("max_spill_us"),
+            "send_log_peak_buffer": (send_summary.get("send_log") or {}).get("peak_buffer"),
+            "pacer_burst": pacer.get("burst"),
+            "pacer_burst_seconds": pacer.get("burst_seconds"),
         })
     else:
         send_summary_out["warning"] = "no send summary json (run with a send script that supports --json-summary)"
@@ -451,6 +484,12 @@ def send_metrics(send_dir: Path, system: str) -> dict:
 def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[dict, dict]:
     system = timeline["system"]
     windows = Windows(timeline, args.warmup_fraction, args.cooldown_fraction)
+    if windows.load_source == "process":
+        print(f"  !! {system}: no pacer_start_us/pacer_end_us in the timeline, using the sender "
+              f"process bounds instead. the load window then also contains the payload preload and "
+              f"the send log flush, during which the nodes are idle, so every cpu percentage and "
+              f"the steady window are diluted. re-run with the current send_event_stream.py",
+              file=sys.stderr)
     node_roles = {node["node_id"]: node["role"] for node in timeline.get("nodes", [])}
     observation_fraction = args.observation_case_fraction
     case_limit = None if observation_fraction is None or observation_fraction >= 1.0 else max(0.0, observation_fraction)
@@ -699,6 +738,10 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "by_trigger": verdicts_by_trigger,
             "final_after_send_end": final_after_send_end,
             "result_drops": scan.result_drops,
+            "correction_drops": {
+                **scan.correction_drops,
+                "affected_pairs": len(scan.correction_drop_pairs),
+            },
         },
         "resources": {
             **resources,

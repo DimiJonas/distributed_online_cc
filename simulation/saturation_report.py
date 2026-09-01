@@ -73,6 +73,37 @@ def quantile(sorted_values: list[float], q: float) -> float | None:
     return sorted_values[min(len(sorted_values) - 1, int(q * (len(sorted_values) - 1)))]
 
 
+# least squares slope of depth over time(in queue slots per second)
+def depth_slope_per_s(samples: list[tuple[int, int]]) -> float | None:
+    if len(samples) < 8:
+        return None
+    t0 = samples[0][0]
+    xs = [(t_us - t0) / 1e6 for t_us, _ in samples]
+    ys = [float(depth) for _, depth in samples]
+    span = xs[-1] - xs[0]
+    if span <= 0:
+        return None
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    variance = sum((x - mean_x) ** 2 for x in xs)
+    if variance <= 0:
+        return None
+    covariance = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    return covariance / variance
+
+
+# the slope expressed as a fraction of capacity gained over the whole measurement window (makes queues of different capacities comparable)
+def growth_over_window(samples: list[tuple[int, int]], capacity: int) -> float | None:
+    slope = depth_slope_per_s(samples)
+    if slope is None or not capacity:
+        return None
+    span_s = (samples[-1][0] - samples[0][0]) / 1e6
+    if span_s <= 0:
+        return None
+    return slope * span_s / capacity
+
+
 def read_jsonl(path: Path):
     with open(path) as jsonl_file:
         for line in jsonl_file:
@@ -297,6 +328,8 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
     # (node_id, queue) -> peak depth / capacity
     peak: dict[tuple[int, str], int] = {}
     capacity: dict[tuple[int, str], int] = {}
+    # (node_id, queue) -> [(t_us, depth), ...] so a standing backlog can be told apart from a spike
+    series: dict[tuple[int, str], list[tuple[int, int]]] = defaultdict(list)
     drops: dict[str, int] = defaultdict(int)
     incomplete: list[str] = []
     dequeue_depths: list[int] = []
@@ -324,6 +357,8 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
                     if value[1] > peak.get(key, -1):
                         peak[key] = value[1]
                     capacity[key] = value[2]
+                    if wallclock_time is not None:
+                        series[key].append((wallclock_time, value[1]))
             elif kind == "event_dequeue":
                 depth = row.get("q_length")
                 if depth is not None:
@@ -337,7 +372,7 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
                            "incomplete_record_files": incomplete,
                            "message_drops": sum(drops.values()), "drop_reasons": dict(drops)}
 
-    # worst fill per queue across nodes, and the overall worst that counts as a saturation signal
+    # worst fill per queue across nodes and the overall worst that counts as a saturation signal
     signal_fill = 0.0
     signal_queue = None
     signal_node = None
@@ -352,6 +387,20 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
         records_stats[f"{queue}_capacity"] = worst[3]
         records_stats[f"{queue}_fill"] = worst[0]
         records_stats[f"{queue}_worst_node"] = f"node-{worst[1]}"
+
+        worst_key = (worst[1], queue)
+        samples = sorted(series.get(worst_key, []))
+        capacity_of_worst = worst[3] or 0
+        depths = sorted(depth for _t, depth in samples)
+        p95_depth = quantile(depths, 0.95)
+        p99_depth = quantile(depths, 0.99)
+        slope = depth_slope_per_s(samples)
+        records_stats[f"{queue}_fill_p95"] = (p95_depth / capacity_of_worst) if (p95_depth is not None and capacity_of_worst) else None
+        records_stats[f"{queue}_fill_p99"] = (p99_depth / capacity_of_worst) if (p99_depth is not None and capacity_of_worst) else None
+        records_stats[f"{queue}_slope_per_s"] = slope
+        records_stats[f"{queue}_growth_over_window"] = growth_over_window(samples, capacity_of_worst)
+        records_stats[f"{queue}_samples"] = len(samples)
+
         # infra queues and infra nodes are measured but never used as a saturation signal
         if queue in infra_queues:
             continue
@@ -365,6 +414,33 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
     records_stats["queue_fill_max"] = signal_fill
     records_stats["queue_fill_max_queue"] = signal_queue
     records_stats["queue_fill_max_node"] = signal_node
+
+    # the queue that carries the saturation signal (the one with the highest p95 fill)
+    standing_best = (-1.0, None, None, None, None, None)
+    for queue in ALL_QUEUES:
+        if queue in infra_queues:
+            continue
+        entries = [(node_id, peak[(node_id, queue)], capacity[(node_id, queue)])
+                   for (node_id, q) in peak if q == queue and roles_by_node.get(node_id) not in infra_roles]
+        if not entries:
+            continue
+        for node_id, _depth, cap in entries:
+            samples = sorted(series.get((node_id, queue), []))
+            if not samples or not cap:
+                continue
+            depths = sorted(depth for _t, depth in samples)
+            p95_fill = quantile(depths, 0.95) / cap
+            if p95_fill > standing_best[0]:
+                standing_best = (p95_fill, queue, f"node-{node_id}",
+                                 depth_slope_per_s(samples), quantile(depths, 0.99) / cap,
+                                 growth_over_window(samples, cap))
+    if standing_best[1]:
+        records_stats["queue_fill_p95_max"] = standing_best[0]
+        records_stats["queue_fill_p95_max_queue"] = standing_best[1]
+        records_stats["queue_fill_p95_max_node"] = standing_best[2]
+        records_stats["queue_slope_at_p95_max"] = standing_best[3]
+        records_stats["queue_fill_p99_at_p95_max"] = standing_best[4]
+        records_stats["queue_growth_at_p95_max"] = standing_best[5]
     records_stats["queue_signal_excludes"] = {"roles": list(infra_roles), "queues": list(infra_queues)}
 
     infra_fills = [(records_stats.get(f"{queue}_fill") or 0.0, queue) for queue in infra_queues
@@ -401,8 +477,13 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
         return None
 
     window = None
-    if timeline.get("send_start_us") and timeline.get("send_end_us"):
+    window_source = "none"
+    if timeline.get("pacer_start_us") and timeline.get("pacer_end_us"):
+        window = (timeline["pacer_start_us"], timeline["pacer_end_us"])
+        window_source = "pacer"
+    elif timeline.get("send_start_us") and timeline.get("send_end_us"):
         window = (timeline["send_start_us"], timeline["send_end_us"])
+        window_source = "process"
 
     point: dict = {
         "run_id": run_file.get("run_id"),
@@ -417,6 +498,9 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
         "metrics": run_file.get("params", {}).get("metrics", True),
         "nodes": run_file.get("params", {}).get("nodes"),
         "hard_killed": len(timeline.get("hard_killed_nodes") or []),
+        "window_source": window_source,
+        "sender_preload_s": timeline.get("sender_preload_s"),
+        "sender_teardown_s": timeline.get("sender_teardown_s"),
         "settlement_reason": timeline.get("system_settlement_reason"),
         "settlement_s": timeline.get("system_settlement_seconds"),
         "seconds_to_all_expected": timeline.get("seconds_to_all_expected"),
@@ -426,6 +510,16 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
                                                  + list(timeline.get("problems") or []))
                          if not _problem_is_other_system(problem, system)],
     }
+    send_summary_path = run_dir / "send" / f"{system}.summary.json"
+    if send_summary_path.exists():
+        try:
+            send_summary = json.loads(send_summary_path.read_text())
+            point["send_log_spills"] = (send_summary.get("send_log") or {}).get("spills")
+            point["send_log_max_spill_us"] = (send_summary.get("send_log") or {}).get("max_spill_us")
+            point["pacer_burst"] = (send_summary.get("pacer") or {}).get("burst")
+            point["pacer_burst_seconds"] = (send_summary.get("pacer") or {}).get("burst_seconds")
+        except json.JSONDecodeError:
+            pass
     point.update(parse_sender(run_dir, system))
     point.update(parse_send_log(run_dir, system))
     point.update(parse_resources(run_dir, system, window, infra_roles))
@@ -454,6 +548,15 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
     sent = point.get("events_sent")
     elapsed = point.get("send_log_span_s") or point.get("elapsed_s")
     point["excess_over_ideal_s"] = (elapsed - sent / target) if (sent and target and elapsed) else None
+    # achieved_ratio = (1 - excess/elapsed) by construction, so a single fixed stall anywhere in the run makes it fall as the rate rises simply because the run gets shorter
+    # subtract the largest inter send gap: what is left is the deficit the system actually caused, and it is comparable across rates because it is expressed as a fraction of the run
+    largest_gap_s = (point.get("gap_max_us") or 0) / 1e6
+    excess = point.get("excess_over_ideal_s")
+    if excess is not None and elapsed:
+        point["residual_deficit_s"] = excess - largest_gap_s
+        point["residual_deficit_frac"] = point["residual_deficit_s"] / elapsed
+        point["largest_gap_s"] = largest_gap_s
+        point["largest_gap_frac_of_deficit"] = (largest_gap_s / excess) if excess > 0 else None
     point["rate_source"] = "; ".join(sources)
     point["rate_source_exact"] = "rounded" not in point["rate_source"]
 
@@ -487,6 +590,7 @@ def _problem_is_other_system(problem, system: str) -> bool:
 def classify(point: dict, thresholds: dict) -> dict:
 
     reasons: list[str] = []
+    warnings: list[str] = []
 
     blocked = point.get("blocked_sends")
     sent = point.get("events_sent")
@@ -497,45 +601,80 @@ def classify(point: dict, thresholds: dict) -> dict:
     if max_send is not None and max_send > thresholds["max_send_ms"]:
         reasons.append(f"max_send={max_send:.1f}ms > {thresholds['max_send_ms']}ms - a node stopped reading its socket long enough to block the sender")
 
+    # throughput. achieved_ratio = (1 - excess/elapsed) by construction, so any fixed stall makes it
+    # fall as the rate rises simply because the run gets shorter: a 1.9s stall is 3% of a 65s run at
+    # 8000/s and 15% of a 13s run at 50000/s, with nothing about the system having changed. so the
+    # rule is on the residual deficit (excess minus the single largest inter send gap), which is
+    # what is left after the worst stall is accounted for
     ratio = point.get("achieved_ratio")
     sustained = point.get("sustained_ratio")
     excess = point.get("excess_over_ideal_s")
-    achieved_ratio_fired = ratio is not None and ratio < thresholds["achieved_ratio"]
-    stall_explained = (achieved_ratio_fired and sustained is not None
-                       and sustained >= thresholds["sustained_ratio"])
-    if stall_explained:
-        achieved_ratio_fired = False
-        warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but the median second "
-                              f"delivered {sustained:.3f} of the target"
-                              + (f" and the run ran {excess:.2f}s over its ideal duration" if excess else "")
-                              + " - a one-off stall, not a sustained deficit, so it is NOT counted as saturation")
+    residual_frac = point.get("residual_deficit_frac")
+    largest_gap = point.get("largest_gap_s")
+    warnings_from_rate = None
+
+    achieved_ratio_fired = False
+    if residual_frac is not None:
+        achieved_ratio_fired = residual_frac > thresholds["residual_deficit_frac"]
+        if achieved_ratio_fired:
+            reasons.append(f"residual deficit {point['residual_deficit_s']:.2f}s = {residual_frac:.2%} of the run "
+                           f"> {thresholds['residual_deficit_frac']:.2%} (total {excess:.2f}s over ideal, of which "
+                           f"{largest_gap:.2f}s was the single largest inter send gap)")
+        elif ratio is not None and ratio < thresholds["achieved_ratio"]:
+            warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but "
+                                  f"{largest_gap:.2f}s of the {excess:.2f}s deficit is one single gap and the "
+                                  f"residual is only {residual_frac:.2%} of the run - a one-off stall, NOT "
+                                  f"counted as saturation. check the sender for a send log spill or a GC pause")
     else:
-        warnings_from_rate = None
-    if achieved_ratio_fired:
-        reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}"
-                       + (f" (median second at {sustained:.3f} of target)" if sustained is not None else ""))
+        achieved_ratio_fired = ratio is not None and ratio < thresholds["achieved_ratio"]
+        if achieved_ratio_fired and sustained is not None and sustained >= thresholds["sustained_ratio"]:
+            achieved_ratio_fired = False
+            warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but the median "
+                                  f"second delivered {sustained:.3f} of the target - a one-off stall, NOT counted "
+                                  f"as saturation (no send log, so the residual deficit is unavailable)")
+        elif achieved_ratio_fired:
+            reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}"
+                           + (f" (median second at {sustained:.3f} of target)" if sustained is not None else ""))
 
     if point.get("message_drops"):
         reasons.append(f"message_drops={point['message_drops']} {point.get('drop_reasons')}")
 
+    # queues. a peak is one sample and it is not comparable across queues of different capacity, so a peak alone never counts as saturation. 
+    # what counts is a standing backlog that is still growing: p95 fill above the threshold and a positive depth slope over the window.
+    # this is applied uniformly to every queue rather than only to event_q
+    standing_fill = point.get("queue_fill_p95_max")
+    standing_queue = point.get("queue_fill_p95_max_queue")
+    standing_node = point.get("queue_fill_p95_max_node")
+    standing_slope = point.get("queue_slope_at_p95_max")
+    standing_p99 = point.get("queue_fill_p99_at_p95_max")
+
+    standing_growth = point.get("queue_growth_at_p95_max")
+    queue_reason_fired = False
+    if standing_fill is not None and standing_fill > thresholds["queue_fill"]:
+        if standing_growth is not None and standing_growth > thresholds["queue_growth"]:
+            queue_reason_fired = True
+            reasons.append(f"{standing_queue} on {standing_node}: p95 depth at {standing_fill:.0%} of capacity "
+                           f"> {thresholds['queue_fill']:.0%} and still growing - the trend gains "
+                           f"{standing_growth:.0%} of capacity over the window "
+                           f"({standing_slope:+.2f} slots/s) - a standing, unbounded backlog"
+                           + (f" (p99 {standing_p99:.0%})" if standing_p99 is not None else ""))
+        else:
+            warnings.append(f"{standing_queue} on {standing_node}: p95 depth at {standing_fill:.0%} of capacity, "
+                            f"but the trend only gains {fmt(standing_growth, '.1%')} of capacity over the window "
+                            f"({fmt(standing_slope, '+.2f')} slots/s) - a deep but STABLE queue, so it is NOT "
+                            f"counted as saturation")
+
     fill = point.get("queue_fill_max")
-    queue_reason_fired = fill is not None and fill > thresholds["queue_fill"]
-    if queue_reason_fired:
-        reasons.append(f"peak {point.get('queue_fill_max_queue')} depth on "
-                       f"{point.get('queue_fill_max_node')} at {fill:.0%} of capacity "
-                       f"> {thresholds['queue_fill']:.0%}")
+    if fill is not None and fill > thresholds["queue_fill"] and not queue_reason_fired:
+        warnings.append(f"peak {point.get('queue_fill_max_queue')} depth on {point.get('queue_fill_max_node')} "
+                        f"reached {fill:.0%} of capacity, but the standing backlog is only "
+                        f"{fmt(standing_fill, '.0%')} (p95) - a tail excursion, not saturation")
 
     capacity = point.get("event_q_capacity")
     depth_p95, depth_p99 = point.get("dequeue_depth_p95"), point.get("dequeue_depth_p99")
     if capacity:
         point["event_q_p95_fill"] = (depth_p95 / capacity) if depth_p95 is not None else None
         point["event_q_p99_fill"] = (depth_p99 / capacity) if depth_p99 is not None else None
-    sustained_fill = point.get("event_q_p95_fill")
-    if (queue_reason_fired and point.get("queue_fill_max_queue") == "event_q"
-            and sustained_fill is not None and sustained_fill < thresholds["queue_fill"]):
-        reasons.append(f"  (but the event_q p95 depth is only {sustained_fill:.1%} of capacity"
-                       + (f", p99 {point['event_q_p99_fill']:.0%}" if point.get("event_q_p99_fill") else "")
-                       + " - tail excursions, not a standing backlog)")
 
     thread_cpu = point.get("sys_thread_max_pct")
     process_cpu = point.get("sys_cpu_max_pct")
@@ -561,9 +700,16 @@ def classify(point: dict, thresholds: dict) -> dict:
         invalid.append("run.json status=invalid")
 
     # check if the sender is the limit
-    warnings: list[str] = []
     if warnings_from_rate:
         warnings.append(warnings_from_rate)
+    if point.get("window_source") == "process":
+        warnings.append("no pacer window in run.json, so cpu was measured over the sender PROCESS bounds, which also cover the payload preload and the send log flush while the nodes are idle. every "
+                        "cpu percentage here is diluted by an unknown, run specific factor - re-run with the current send_event_stream.py before comparing cpu across levels")
+
+    if point.get("send_log_spills"):
+        warnings.append(f"the sender spilled its send log {point['send_log_spills']}x mid stream - that stalls the "
+                        f"pacing loop and shows up as pacer lag and a fake throughput dip, not as a system limit")
+
     sender_cpu = point.get("sender_cpu_pct")
     # check if the tooling (sender) is reaching its limit
     tooling_limited: list[str] = []
@@ -610,11 +756,12 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
     print("=" * 132)
     print(f"  {system.upper()}   ({len(points)} point(s), x = {x_param})")
     print("=" * 132)
-    header = (f"{x_param:>8} {'eff/tgt':>8} {'eff/s':>8} {'blkd':>5} {'maxsnd':>7} "
-              f"{'late%':>6} {'resync':>7} {'qfill':>6} {'bklog':>6} {'drops':>6} "
-              f"{'cpu_max':>8} {'thr_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>7}  verdict")
+    # resid% is the deficit left after the single largest inter send gap is removed
+    header = (f"{x_param:>8} {'eff/tgt':>8} {'resid%':>7} {'eff/s':>8} {'blkd':>5} {'maxsnd':>7} "
+              f"{'late%':>6} {'resync':>7} {'q_peak':>7} {'q_p95':>6} {'q_grow':>8} {'bklog':>6} {'drops':>6} "
+              f"{'cpu_max':>8} {'thr_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>8}  verdict")
     print(header)
-    print("-" * 132)
+    print("-" * 160)
     for point in points:
         verdict = point["_class"]
         if verdict["invalid"]:
@@ -625,14 +772,18 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
             tag = "SATURATED"
         else:
             tag = "ok"
+        residual_pct = (100 * point['residual_deficit_frac']) if point.get('residual_deficit_frac') is not None else None
         print(f"{fmt(point.get('x')):>8} "
               f"{fmt(point.get('achieved_ratio'), '.3f'):>8} "
+              f"{fmt(residual_pct, '.2f'):>7} "
               f"{fmt(point.get('effective_rate'), '.0f'):>8} "
               f"{fmt(point.get('blocked_sends')):>5} "
               f"{fmt(point.get('max_send_ms'), '.1f'):>7} "
               f"{fmt(100 * point['late_frac'] if point.get('late_frac') is not None else None, '.1f'):>6} "
               f"{fmt(point.get('resyncs')):>7} "
-              f"{fmt(point.get('queue_fill_max'), '.0%'):>6} "
+              f"{fmt(point.get('queue_fill_max'), '.0%'):>7} "
+              f"{fmt(point.get('queue_fill_p95_max'), '.0%'):>6} "
+              f"{fmt(point.get('queue_growth_at_p95_max'), '+.0%'):>8} "
               f"{fmt(point.get('dequeue_backlog_frac'), '.1%'):>6} "
               f"{fmt(point.get('message_drops')):>6} "
               f"{fmt(point.get('sys_cpu_max_pct'), '.1f'):>8} "
@@ -641,7 +792,7 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
               f"{fmt(point.get('sys_cpu_max_node')):>16} "
               f"{fmt(point.get('infra_cpu_max_pct'), '.0f'):>6} "
               f"{fmt(point.get('sender_cpu_pct'), '.1f'):>7} "
-              f"{fmt(point.get('accuracy'), '.4f'):>7}  {tag}")
+              f"{fmt(point.get('accuracy'), '.6f'):>8}  {tag}")
         for reason in verdict["reasons"]:
             print(f"{'':>8}   -> {reason}")
         for reason in verdict["invalid"]:
@@ -829,7 +980,21 @@ def main() -> int:
                         help="a level whose overall achieved ratio is low but whose MEDIAN per second rate is at least "
                              "this fraction of target is treated as stalled once, not saturated (default 0.95). set to 0 to always trust the overall ratio")
     parser.add_argument("--cpu-threshold", type=float, default=85.0, help="saturated above this cpu%% of one core on the busiest process (default 85)")
-    parser.add_argument("--queue-fill", type=float, default=0.25, help="saturated above this peak queue depth / capacity (default 0.25)")
+    parser.add_argument("--queue-fill", type=float, default=0.25,
+                        help="a queue counts as saturated when its p95 depth exceeds this fraction of capacity AND "
+                             "its depth is still growing (see --queue-slope). a peak above it is only a warning, "
+                             "because one sample is not evidence of a standing backlog (default 0.25)")
+    parser.add_argument("--queue-growth", type=float, default=0.05,
+                        help="a queue only counts as saturated when its depth TREND gains at least this fraction of "
+                             "its capacity over the measurement window (default 0.05 = 5%%). expressing growth "
+                             "relative to capacity and window length is what makes it comparable between a 1024 slot "
+                             "gossip queue and an 8192 slot event queue, and between a 65s and a 13s run. a plain "
+                             "'slope > 0' test fires on measurement noise")
+    parser.add_argument("--residual-deficit-frac", type=float, default=0.01,
+                        help="saturated when the run takes this fraction longer than its ideal duration AFTER the "
+                             "single largest inter send gap is subtracted (default 0.01 = 1%%). the subtraction "
+                             "matters because a fixed stall eats a growing share of a shrinking run, which makes "
+                             "the raw achieved/target ratio fall with rate for purely mechanical reasons")
     parser.add_argument("--blocked-frac", type=float, default=0.001, help="saturated above this fraction of sends blocked >1ms (default 0.001)")
     parser.add_argument("--max-send-ms", type=float, default=50.0, help="saturated above this single worst socket write in ms (default 50)")
     parser.add_argument("--sender-cpu-threshold", type=float, default=60.0,
@@ -855,6 +1020,8 @@ def main() -> int:
     thresholds = {"achieved_ratio": args.achieved_ratio, "sustained_ratio": args.sustained_ratio,
                   "cpu_pct": args.cpu_threshold,
                   "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
+                  "queue_growth": args.queue_growth,
+                  "residual_deficit_frac": args.residual_deficit_frac,
                   "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold,
                   "infra_queue_fill_warn": args.infra_queue_fill_warn}
 
@@ -886,8 +1053,12 @@ def main() -> int:
 
     print(f"experiment: {args.experiment_dir}")
     print(f"rule: saturated if blocked_sends>{args.blocked_frac:.2%} of sends OR max_send>{args.max_send_ms}ms "
-          f"OR achieved/target<{args.achieved_ratio} OR any message_drop OR peak queue "
-          f">{args.queue_fill:.0%} of capacity OR busiest process >{args.cpu_threshold}% of a core")
+          f"OR the residual deficit >{args.residual_deficit_frac:.1%} of the run OR any message_drop "
+          f"OR a queue is at >{args.queue_fill:.0%} of capacity at p95 AND still growing "
+          f"(trend gains >{args.queue_growth:.0%} of capacity over the window) "
+          f"OR busiest process >{args.cpu_threshold}% of a core")
+    print("      residual deficit = time over the ideal duration MINUS the single largest inter send gap, so a one-off stall does not read as a throughput decline")
+    print("      a queue PEAK above the threshold is only a warning: one sample is not a standing backlog, and peak fill is not comparable across queues of different capacity")
     if args.infra_roles or args.infra_queues:
         print(f"excluded from every signal: role(s) {args.infra_roles or 'none'}, "
               f"queue(s) {args.infra_queues or 'none'} - evaluation scaffolding, still reported "

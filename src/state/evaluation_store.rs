@@ -15,8 +15,19 @@ pub enum EvaluationDetail {
     SensorValue { value_time: Option<EventTime> },
     /// DistributedAppearanceCounterHandler: where to send a late counter update
     DistributedCounterReport { trigger_address: SocketAddr },
-    /// DistributedAppearanceTriggerHandler: what each counter peer reported at trigger time
-    DistributedCounterTotals { per_peer: HashMap<SocketAddr, u64> },
+    /// DistributedAppearanceTriggerHandler: what each counter peer reported at trigger time.
+    /// 'pending_pull' is true while the trigger is still collecting the counter tokens
+    DistributedCounterTotals {
+        per_peer: HashMap<SocketAddr, u64>,
+        pending_pull: bool,
+    },
+}
+
+/// result of applying a late delta: the corrected total, and whether the trigger is still pulling
+#[derive(Debug, Clone, Copy)]
+pub struct PeerTotalUpdate {
+    pub total: u64,
+    pub pending_pull: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,18 +96,54 @@ impl EvaluationStore {
         }
     }
 
-    /// apply a late delta reported by a counter peer and return the corrected total across all peers
+    /// apply a late delta reported by a counter peer and return the corrected total across all
+    /// peers, together with whether the trigger is still pulling. while a pull is outstanding the
+    /// caller must NOT emit a verdict: the total is incomplete and the pull will include the delta
+    /// when it merges its own results
     pub fn add_to_peer_total(
         &mut self,
         case_id: &CaseId,
         index: HandlerIndex,
         peer: SocketAddr,
         delta: u64,
+    ) -> Option<PeerTotalUpdate> {
+        let evaluation = self.evaluations.get_mut(case_id)?.get_mut(&index)?;
+        match &mut evaluation.detail {
+            EvaluationDetail::DistributedCounterTotals {
+                per_peer,
+                pending_pull,
+            } => {
+                *per_peer.entry(peer).or_insert(0) += delta;
+                Some(PeerTotalUpdate {
+                    total: per_peer.values().sum(),
+                    pending_pull: *pending_pull,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// add the counts a completed pull collected to whatever is already recorded and close the pull
+    ///
+    /// the pulled values are ADDED, not assigned: a counter peer reports a late delta for an event
+    /// that it did not include in its pull response, so a delta that landed while the pull was in
+    /// flight is additional to the pulled count and must survive the merge
+    pub fn merge_peer_totals(
+        &mut self,
+        case_id: &CaseId,
+        index: HandlerIndex,
+        pulled: HashMap<SocketAddr, u64>,
     ) -> Option<u64> {
         let evaluation = self.evaluations.get_mut(case_id)?.get_mut(&index)?;
         match &mut evaluation.detail {
-            EvaluationDetail::DistributedCounterTotals { per_peer } => {
-                *per_peer.entry(peer).or_insert(0) += delta;
+            EvaluationDetail::DistributedCounterTotals {
+                per_peer,
+                pending_pull,
+            } => {
+                for (peer, count) in pulled {
+                    *per_peer.entry(peer).or_insert(0) += count;
+                }
+                *pending_pull = false;
                 Some(per_peer.values().sum())
             }
             _ => None,

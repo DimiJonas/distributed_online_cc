@@ -106,6 +106,20 @@ class Pacer:
         self.max_lag = 0.0
         self.late = 0
         self.resyncs = 0
+        self.wall_start_us = int(time.time() * 1_000_000)
+        self.wall_end_us = None
+        self.endtime = None
+
+    # record stream end time
+    def finish(self):
+        if self.wall_end_us is None:
+            self.wall_end_us = int(time.time() * 1_000_000)
+            self.endtime = time.monotonic()
+        return self.wall_end_us
+
+    def _elapsed(self):
+        end = self.endtime if self.endtime is not None else time.monotonic()
+        return end - self.starttime
 
     def wait(self):
         # block until the next event is due, return seconds since start
@@ -141,22 +155,26 @@ class Pacer:
 
     # pacer summary as json
     def json_summary(self):
-        elapsed = time.monotonic() - self.starttime
+        elapsed = self._elapsed()
         return {
             "target_rate": (1.0 / self.interval) if self.interval > 0 else None,
             "effective_rate": (self.count / elapsed) if elapsed > 0 else 0.0,
             "elapsed_s": elapsed,
             "events_paced": self.count,
             "burst": self.burst,
+            "burst_seconds": (self.interval * self.burst) if self.interval > 0 else None,
             "jitter": self.jitter,
             "late": self.late,
             "max_lag_ms": self.max_lag * 1000.0,
             "resyncs": self.resyncs,
+            "pacer_start_us": self.wall_start_us,
+            "pacer_end_us": self.wall_end_us,
         }
 
     def summary(self):
-        elapsed = time.monotonic() - self.starttime
+        elapsed = self._elapsed()
         eff = self.count / elapsed if elapsed > 0 else 0.0
+
         if self.interval <= 0:
             return f"rate=unlimited {self._rate_str(eff)}/s (effective) elapsed={elapsed:.2f}s"
         summary = (f"rate={self._rate_str(1.0 / self.interval)}/s (target) "
@@ -276,13 +294,17 @@ class Progress:
 # in memory jsonl writer
 class SendLog:
 
-    def __init__(self, path, flush_every=0, max_buffer=500_000):
+    def __init__(self, path, flush_every=0, max_buffer=0):
         self.path = path
         self.flush_every = max(0, flush_every)
         self.max_buffer = max(0, max_buffer)
         self.buffer = []
         self.written = 0
         self.spills = 0
+        self.peak_buffer = 0
+        self.spill_us_total = 0
+        self.max_spill_us = 0
+        self.spill_positions: list[int] = []
         self.send_log_file = open(path, "w")
         self.closed = False
 
@@ -292,11 +314,18 @@ class SendLog:
 
     def write(self, record):
         self.buffer.append(record)
+        if len(self.buffer) > self.peak_buffer:
+            self.peak_buffer = len(self.buffer)
         if self.flush_every and len(self.buffer) >= self.flush_every:
             self.flush()
         elif self.max_buffer and len(self.buffer) >= self.max_buffer:
             self.spills += 1
+            self.spill_positions.append(self.written + len(self.buffer))
+            started = time.perf_counter()
             self.flush()
+            spill_us = int((time.perf_counter() - started) * 1e6)
+            self.spill_us_total += spill_us
+            self.max_spill_us = max(self.max_spill_us, spill_us)
 
     def flush(self, chunk=8192):
         if not self.buffer or self.closed:
@@ -462,6 +491,10 @@ def main():
     ap.add_argument("--rate", type=float, default=0.0, help="events per second (0 = as fast as possible)")
     ap.add_argument("--interval", type=float, default=None, help="seconds between events (alternative to --rate)")
     ap.add_argument("--burst", type=int, default=1, help="release this many events at once, then wait (default 1)")
+    ap.add_argument("--burst-ms", type=float, default=None,
+                    help="derive --burst from the rate so that one burst covers this many milliseconds (burst = round(rate * burst_ms / 1000)). holding the burst DURATION fixed keeps the "
+                         "shape of the arrival process identical across a rate sweep, which a fixed --burst does not: burst=32 is a 4ms burst at 8000/s but a 0.64ms burst at 50000/s. it also keeps the "
+                         "inter burst sleep above the ~1ms granularity of time.sleep(). overrides --burst")
     ap.add_argument("--jitter", type=float, default=0.0, help="random jitter as a fraction of the interval, e.g. 0.1")
     ap.add_argument("--pace-dry-run", action="store_true", help="also apply pacing during --dry-run")
     ap.add_argument("--dry-run", action="store_true", help="resolve + log routing without sending")
@@ -474,8 +507,9 @@ def main():
     ap.add_argument("--max-preload-bytes", type=int, default=2 * 1024 ** 3, help="give up on preloading above this many bytes (default 2 GiB)")
     ap.add_argument("--log-flush-every", type=int, default=0,
                     help="write the send log to disk every N records. 0 (the default) keeps the whole log in memory and writes it once at the end")
-    ap.add_argument("--log-max-buffer", type=int, default=500_000,
-                    help="safety valve for --log-flush-every 0: write to disk if the in memory log exceeds this many records (default 500000). 0 = no limit")
+    ap.add_argument("--log-max-buffer", type=int, default=0,
+                    help="safety valve for --log-flush-every 0: write to disk if the in memory log exceeds this many records. 0 (the default) = no limit. a spill happens INSIDE the pacing loop and "
+                         "serialising the whole buffer at once stalls it for seconds, so only set this if memory is actually tight (roughly 1 GB per million events)")
     ap.add_argument("--send-timeout", type=float, default=60.0,
                     help="socket timeout for a single send. long on purpose: blocking here is backpressure, not an error (default 60s)")
     ap.add_argument("--log", default="send_log.jsonl")
@@ -509,6 +543,18 @@ def main():
         interval = 0.0
     if args.dry_run and not args.pace_dry_run:
         interval = 0.0
+
+    # --burst-ms fixes the burst duration instead of the burst size
+    burst = max(1, args.burst)
+    burst_source = "--burst"
+    if args.burst_ms is not None:
+        if args.burst_ms <= 0:
+            ap.error("--burst-ms has to be > 0")
+        if interval <= 0:
+            print("--burst-ms needs a rate (--rate/--interval), ignoring it", file=sys.stderr)
+        else:
+            burst = max(1, round((1.0 / interval) * args.burst_ms / 1000.0))
+            burst_source = f"--burst-ms {args.burst_ms:g}"
 
     show_progress = progress_enabled(args.progress)
     total = count_events(args.stream) if show_progress else 0
@@ -547,7 +593,10 @@ def main():
             sys.exit(f"cannot connect to a node socket: {e}\n"
                      f"are the nodes running? check --config-dir {args.config_dir}")
 
-    pacer = Pacer(interval, burst=args.burst, jitter=args.jitter)
+    pacer = Pacer(interval, burst=burst, jitter=args.jitter)
+    if interval > 0:
+        prog.note(f"pacing at {1.0 / interval:.0f}/s in bursts of {pacer.burst} "
+                  f"({interval * pacer.burst * 1000:.2f}ms per burst, from {burst_source})")
 
     try:
         for seq, case_id, event_id, raw_payload in entries:
@@ -597,6 +646,7 @@ def main():
         prog.note("terminated, flushing the send log")
         raise
     finally:
+        pacer.finish()
         pacer_summary = pacer.summary()
         pacer_stats = pacer.json_summary()
         prog.close(counts)
@@ -614,10 +664,13 @@ def main():
                 "stream": str(args.stream) if args.stream else None,
                 "counts": dict(counts),
                 "pacer": pacer_stats,
-                "sends": {"blocked_over_1ms": slow_sends, "max_send_us": max_send_us,
-                          "reconnects": pool.reconnects()},
+                "sends": {"blocked_over_1ms": slow_sends, "max_send_us": max_send_us, "reconnects": pool.reconnects()},
                 "send_log": {"path": str(args.log), "lines": log.written,
-                             "deferred": log.deferred, "spills": log.spills},
+                             "deferred": log.deferred, "spills": log.spills,
+                             "peak_buffer": log.peak_buffer,
+                             "spill_positions": log.spill_positions,
+                             "spill_us_total": log.spill_us_total,
+                             "max_spill_us": log.max_spill_us},
             }
             try:
                 summary_path = Path(args.json_summary)
@@ -635,8 +688,13 @@ def main():
                   f"blocked_sends(>1ms)={slow_sends} max_send={max_send_us / 1000:.1f}ms "
                   f"reconnects={pool.reconnects()}")
         log_mode = "deferred" if log.deferred else f"streamed every {log.flush_every}"
-        spilled = f", {log.spills} SPILL(S) mid stream - the buffer cap was hit" if log.spills else ""
-        print(f"log -> {args.log} ({log.written} lines, {log_mode}{spilled})")
+        spilled = (f", {log.spills} SPILL(S) mid stream costing {log.spill_us_total / 1000:.0f}ms "
+                   f"(worst {log.max_spill_us / 1000:.0f}ms) at event(s) "
+                   f"{', '.join(str(position) for position in log.spill_positions[:5])}"
+                   f"{' ...' if len(log.spill_positions) > 5 else ''}") if log.spills else ""
+        print(f"log -> {args.log} ({log.written} lines, peak buffer {log.peak_buffer}, {log_mode}{spilled})")
+        if log.spills:
+            print("  !! a spill stalls the pacing loop and shows up as pacer lag / a fake throughput dip - raise --log-max-buffer (0 = no limit) or stream the log with --log-flush-every", file=sys.stderr)
 
     if interrupted:
         sys.exit(130)

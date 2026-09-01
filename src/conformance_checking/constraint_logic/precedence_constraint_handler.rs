@@ -8,7 +8,10 @@ use crate::{
         result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
-    measurement::record::ResultTrigger,
+    measurement::{
+        self,
+        record::{CorrectionDropReason, ResultTrigger},
+    },
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -267,7 +270,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 }
             };
 
-            let result_exists = {
+            let result_already_published = {
                 let results = state.cc_results.lock().unwrap();
                 results
                     .get_constraint(&message.case_id, &self.constraint_id)
@@ -278,7 +281,7 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                 .get_out_cloned(&message.case_id, self.index)
                 .and_then(|token| token.event_time)
             {
-                Some(consumer_event_time) if result_exists => {
+                Some(consumer_event_time) => {
                     let (result, info) = if consumer_event_time <= producer_event_time {
                         (
                             ConstraintResultType::Violated,
@@ -302,7 +305,24 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                         info,
                     ))
                 }
-                _ => None,
+                // no consumer event time in token_out
+                None => {
+                    if result_already_published {
+                        log::warn!(
+                            "precedence consumer handler: producer token for ({}/{}) arrived after the case state was cleaned up. the published verdict stays uncorrected",
+                            message.case_id,
+                            self.constraint_id
+                        );
+                        measurement::api::correction_dropped(
+                            &message.case_id,
+                            &self.constraint_id,
+                            ConstraintType::Precedence,
+                            CorrectionDropReason::CaseAlreadyClosed,
+                            message.sender_address,
+                        );
+                    }
+                    None
+                }
             }
         };
 

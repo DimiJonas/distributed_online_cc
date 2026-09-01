@@ -9,7 +9,10 @@ use crate::{
         result_emitter::{emit_result_stamped, stamp_decision},
     },
     impl_constraint_handler_fields,
-    measurement::record::ResultTrigger,
+    measurement::{
+        self,
+        record::{CorrectionDropReason, ResultTrigger},
+    },
     network::{
         message_types::{CCMessage, CCMessageType, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -266,6 +269,13 @@ impl AppearanceCounterHandler {
                         "appearance counter handler: no counter evaluation recorded for ({}/{}). cannot correct with late event",
                         event.case_id,
                         self.constraint_id
+                    );
+                    measurement::api::correction_dropped(
+                        &event.case_id,
+                        &self.constraint_id,
+                        ConstraintType::Appearance,
+                        CorrectionDropReason::NoRecordedEvaluation,
+                        None,
                     );
                     return;
                 }
