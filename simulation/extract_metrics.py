@@ -89,7 +89,8 @@ class Scan:
         self.instance_to_case_event: dict[str, tuple[str, str]] = {} # instance -> (case, event)
         self.input_node: dict[str, int] = {} # instance -> node id
         self.dequeue_node: dict[str, int] = {} # instance -> node id
-
+        self.dequeue_depths: list[int] = []
+        
         # verdicts per (case, constraint): revision -> (t_us, result, trigger, instance)
         self.verdicts: dict[tuple[str, str], dict[int, tuple[int, str, str, str | None]]] = {}
         self.constraint_type: dict[str, str] = {} # constraint id -> constraint type
@@ -150,6 +151,9 @@ class Scan:
             if instance not in self.t2 or wallclock_time < self.t2[instance]:
                 self.t2[instance] = wallclock_time
                 self.dequeue_node[instance] = node_id
+            depth = line.get("q_length")
+            if depth is not None and self.windows.contains(self.windows.load, wallclock_time):
+                self.dequeue_depths.append(depth)
             # record that the event was seen (important for central)
             case_id, event_id = line["case_id"], line["event_id"]
             if self._keep_case(case_id):
@@ -629,13 +633,11 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     metrics = {
         "windows": windows.as_dict(),
         "nodes": {"total": len(node_roles),
-                  "by_role": {role: sum(1 for node_role in node_roles.values() if node_role == role)
-                              for role in set(node_roles.values())},
+                  "by_role": {role: sum(1 for node_role in node_roles.values() if node_role == role) for role in set(node_roles.values())},
                   "record_files": len(record_files)},
         "throughput": {
             **send,
-            "achieved_rate_steady": (len([event_input_time for event_input_time in scan.t1.values()
-                                          if windows.contains(windows.steady, event_input_time)]) / steady_duration_s)
+            "achieved_rate_steady": (len([event_input_time for event_input_time in scan.t1.values() if windows.contains(windows.steady, event_input_time)]) / steady_duration_s)
                                     if steady_duration_s else 0.0,
             "events_with_input_record": len(scan.t1),
             "message_drops": scan.drops,
@@ -646,6 +648,10 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "queues": queues_out,
             "queues_settle": queues_settle_out,
             "settle_queue_pressure": settle_pressure,
+            "event_q_at_dequeue": {
+                **percentiles(scan.dequeue_depths, (50, 95, 99)),
+                "backlog_fraction": (sum(1 for d in scan.dequeue_depths if d > 0) / len(scan.dequeue_depths)) if scan.dequeue_depths else 0.0,
+            },
             "tcp_channel_queue_max": scan.tcp_queue_max,
             "saturated": bool(saturation_reasons),
             "saturation_reasons": saturation_reasons,
@@ -657,9 +663,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "provisional_t3_t4": percentiles(provisional),
             "end_to_end_t1_t4": percentiles(end_to_end),
             "case_end_verdict": percentiles(case_end_verdict),
-            "gossip_dissemination": {**percentiles(dissemination),
-                                     "by_source": by_source,
-                                     "reach_fraction": reach_fraction},
+            "gossip_dissemination": {**percentiles(dissemination), "by_source": by_source, "reach_fraction": reach_fraction},
             "handler_duration_us": percentiles(scan.handling_us),
             "parse_us": percentiles(scan.parse_us),
             "serde_us": percentiles(scan.serde_us),
@@ -695,31 +699,22 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                 "bytes_per_event_transport": transport_bytes / events,
                 "messages_per_event_sink": sink_sent / events,
                 "bytes_per_event_sink": sink_bytes / events,
-                "mean_bytes_per_coordination_message": (coordination_bytes / coordination_sent)
-                                                       if coordination_sent else 0.0,
-                "mean_bytes_per_transport_message": (transport_bytes / transport_sent)
-                                                    if transport_sent else 0.0,
+                "mean_bytes_per_coordination_message": (coordination_bytes / coordination_sent) if coordination_sent else 0.0,
+                "mean_bytes_per_transport_message": (transport_bytes / transport_sent) if transport_sent else 0.0,
                 "messages_per_case": workload_messages["sent"] / cases_count,
                 "settle_share_of_messages": (settle_messages["sent"] / workload_messages["sent"]) if workload_messages["sent"] else 0.0,
-                "settle_share_of_bytes": (settle_messages["bytes_sent"] / workload_messages["bytes_sent"])
-                                         if workload_messages["bytes_sent"] else 0.0,
-                "idle_overlay_bytes_during_settle": (idle_messages["bytes_sent"] / idle_seconds
-                                                     * settle_seconds) if idle_seconds else 0.0,
-                "coordination_ratio": (coordination_sent / payload_sent)
-                                      if payload_sent else 0.0,
-                "idle_bytes_per_second": (idle_messages["bytes_sent"] / idle_seconds)
-                                         if idle_seconds else 0.0,
-                "idle_bytes_per_node_second": (idle_messages["bytes_sent"]
-                                               / (idle_seconds * idle_nodes))
-                                              if idle_seconds else 0.0,
+                "settle_share_of_bytes": (settle_messages["bytes_sent"] / workload_messages["bytes_sent"]) if workload_messages["bytes_sent"] else 0.0,
+                "idle_overlay_bytes_during_settle": (idle_messages["bytes_sent"] / idle_seconds * settle_seconds) if idle_seconds else 0.0,
+                "coordination_ratio": (coordination_sent / payload_sent) if payload_sent else 0.0,
+                "idle_bytes_per_second": (idle_messages["bytes_sent"] / idle_seconds) if idle_seconds else 0.0,
+                "idle_bytes_per_node_second": (idle_messages["bytes_sent"] / (idle_seconds * idle_nodes)) if idle_seconds else 0.0,
             },
             "peer_churn": scan.peer_churn,
         },
         "margin": {
             "inter_event_gap_us": percentiles(gaps, (5, 50, 95)),
             "coordination_latency_us": percentiles(coordination, (50, 95, 99)),
-            "margin_p50_us": (gap_p50 - coordination_p50)
-                             if gap_p50 is not None and coordination_p50 is not None else None,
+            "margin_p50_us": (gap_p50 - coordination_p50) if gap_p50 is not None and coordination_p50 is not None else None,
             "coordination_slower_than_gap_fraction": negative_fraction,
         },
         "quality": {
