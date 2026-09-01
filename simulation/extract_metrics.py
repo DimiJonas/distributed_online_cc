@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs, Progress
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
 CASE_CLOSED_REASON = "case closed"
@@ -89,7 +89,7 @@ class Scan:
         self.instance_to_case_event: dict[str, tuple[str, str]] = {} # instance -> (case, event)
         self.input_node: dict[str, int] = {} # instance -> node id
         self.dequeue_node: dict[str, int] = {} # instance -> node id
-        self.dequeue_depths: list[int] = []
+        self.dequeue_depths: dict[int, list[int]] = {}
         
         # verdicts per (case, constraint): revision -> (t_us, result, trigger, instance)
         self.verdicts: dict[tuple[str, str], dict[int, tuple[int, str, str, str | None]]] = {}
@@ -153,7 +153,7 @@ class Scan:
                 self.dequeue_node[instance] = node_id
             depth = line.get("q_length")
             if depth is not None and self.windows.contains(self.windows.load, wallclock_time):
-                self.dequeue_depths.append(depth)
+                self.dequeue_depths.setdefault(node_id, []).append(depth)
             # record that the event was seen (important for central)
             case_id, event_id = line["case_id"], line["event_id"]
             if self._keep_case(case_id):
@@ -517,10 +517,17 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                 case_end_verdict.append(t4 - arrival)
 
     # --- gossip dissemination: time from the end event arriving to each node learning about it
+    constraint_nodes = [node_id for node_id, role in node_roles.items() if role in ("constraint_node", "central")]
+    constraint_node_ids = set(constraint_nodes)
+
     dissemination = []
     by_source = {"end_event": 0, "push_gossip": 0, "anti_entropy": 0}
-    reach: dict[str, int] = {} # case id -> number of nodes reached by the cases end notification
+    reach: dict[str, int] = {} # case id -> number of constraint nodes reached by the cases end notification
+    sightings_outside_the_system = 0 # sightings at nodes holding no constraint role (the sink)
     for node, cases in scan.case_end_seen.items():
+        if node not in constraint_node_ids:
+            sightings_outside_the_system += len(cases)
+            continue
         for case_id, sighting in cases.items():
             by_source[sighting["source"]] = by_source.get(sighting["source"], 0) + 1
             reach[case_id] = reach.get(case_id, 0) + 1
@@ -528,8 +535,6 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             if origin is not None and sighting["source"] != "end_event":
                 dissemination.append(sighting["t_us"] - origin)
 
-    constraint_nodes = [node_id for node_id, role in node_roles.items()
-                        if role in ("constraint_node", "central")]
     reach_fraction = None
     if reach and constraint_nodes:
         reach_fraction = (sum(reach.values()) / len(reach)) / len(constraint_nodes)
@@ -574,6 +579,24 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
                                "slope_per_s": slope_per_second([(t, depth_value)
                                                                 for t, depth_value, _c in samples])}
         return out
+
+    def summarise_depths(depth_values: list[int]) -> dict:
+        summary = percentiles(depth_values, (50, 95, 99))
+        summary["backlog_fraction"] = ((sum(1 for depth in depth_values if depth > 0) / len(depth_values))
+                                       if depth_values else 0.0)
+        return summary
+
+    pooled_depths = [depth for depths in scan.dequeue_depths.values() for depth in depths]
+    per_node_depths = {node_id: summarise_depths(depths) for node_id, depths in scan.dequeue_depths.items()}
+    busiest_dequeue_node = max(per_node_depths, key=lambda node_id: (per_node_depths[node_id].get("p95", 0),
+                                                                     per_node_depths[node_id].get("max", 0)),
+                               default=None)
+    dequeue_depth_out = {
+        **summarise_depths(pooled_depths),
+        "nodes_reporting": len(scan.dequeue_depths),
+        "busiest_node_id": busiest_dequeue_node,
+        "busiest_node": per_node_depths.get(busiest_dequeue_node),
+    }
 
     queues_out = summarise_queues(scan.queues, scan.queue_node_max)
     queues_settle_out = summarise_queues(scan.queues_settle, scan.queue_node_max_settle)
@@ -648,10 +671,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "queues": queues_out,
             "queues_settle": queues_settle_out,
             "settle_queue_pressure": settle_pressure,
-            "event_q_at_dequeue": {
-                **percentiles(scan.dequeue_depths, (50, 95, 99)),
-                "backlog_fraction": (sum(1 for d in scan.dequeue_depths if d > 0) / len(scan.dequeue_depths)) if scan.dequeue_depths else 0.0,
-            },
+            "event_q_at_dequeue": dequeue_depth_out,
             "tcp_channel_queue_max": scan.tcp_queue_max,
             "saturated": bool(saturation_reasons),
             "saturation_reasons": saturation_reasons,
@@ -663,7 +683,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "provisional_t3_t4": percentiles(provisional),
             "end_to_end_t1_t4": percentiles(end_to_end),
             "case_end_verdict": percentiles(case_end_verdict),
-            "gossip_dissemination": {**percentiles(dissemination), "by_source": by_source, "reach_fraction": reach_fraction},
+            "gossip_dissemination": {**percentiles(dissemination), "by_source": by_source, "reach_fraction": reach_fraction, "constraint_nodes": len(constraint_nodes),
+                                     "cases_with_sightings": len(reach), "sightings_outside_the_system": sightings_outside_the_system},
             "handler_duration_us": percentiles(scan.handling_us),
             "parse_us": percentiles(scan.parse_us),
             "serde_us": percentiles(scan.serde_us),

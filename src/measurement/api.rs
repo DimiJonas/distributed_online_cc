@@ -167,6 +167,7 @@ pub fn result_persisted(case_id: &CaseId, constraint_id: &ConstraintId, created_
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn result_dropped(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
