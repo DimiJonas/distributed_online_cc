@@ -315,6 +315,7 @@ systems = ["decentralized", "central"]
   repeat = 1
   cases = 10000
   rate = 4000
+  msgtrace = true
 
 [[experiment]]
 id = "E4"
@@ -325,6 +326,7 @@ systems = ["decentralized", "central"]
   repeat = 2
   cases = 5000
   rate = 4000
+  msgtrace = true
 
 [[experiment]]
 id = "E4"
@@ -335,6 +337,7 @@ systems = ["decentralized", "central"]
   repeat = 4
   cases = 2500
   rate = 4000
+  msgtrace = true
 
 [[experiment]]
 id = "E4"
@@ -345,6 +348,7 @@ systems = ["decentralized", "central"]
   repeat = 8
   cases = 1250
   rate = 4000
+  msgtrace = true
 
 [[experiment]]
 id = "E4"
@@ -355,6 +359,7 @@ systems = ["decentralized", "central"]
   repeat = 10
   cases = 1000
   rate = 4000
+  msgtrace = true
 
 # E7: network delay
 # run id naming only includes parameters that vary so different experiment ids are needed here (rate does not vary for the 2 stream tiers)
@@ -367,6 +372,7 @@ systems = ["decentralized", "central"]
   [experiment.params]
   cases = 2500                    # tier S
   rate = 2000
+  msgtrace = false
   [experiment.grid]
   netem_ms = [0, 1, 2, 4, 8]
 
@@ -378,6 +384,7 @@ systems = ["decentralized", "central"]
   [experiment.params]
   cases = 10000                   # tier M
   rate = 16000
+  msgtrace = false
   [experiment.grid]
   netem_ms = [0, 1, 2, 4, 8]
 
@@ -391,6 +398,7 @@ systems = ["decentralized", "central"]
   [experiment.params]
   cases = 5000
   rate = 4000
+  msgtrace = false
   [experiment.grid]
   case_gap_secs = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1]
 
@@ -425,6 +433,7 @@ systems = ["decentralized", "central"]
   cases = 10000
   rate = 4000
   role_assignment = "round-robin"
+  msgtrace = true
   [experiment.grid]
   nodes = [3, 5, 7, 12, 23, 46, 92]
 
@@ -439,6 +448,7 @@ systems = ["decentralized", "central"]
   cases = 10000
   rate = 4000
   role_assignment = "blocked"
+  msgtrace = true
   [experiment.grid]
   nodes = [3, 5, 7, 12]
 
