@@ -102,6 +102,7 @@ class Scan:
         self.messages = {"idle": self._msg_bucket(), "load": self._msg_bucket(), "settle": self._msg_bucket()}
         self.drops = {"total": 0, "by_reason": {}, "by_kind": {}}
         self.event_drops = {"total": 0, "by_reason": {}}   # events discarded before they were handled
+        self.result_drops = {"total": 0, "by_reason": {}}
         self.queues: dict[str, list[tuple[float, float]]] = {} # name -> (timestamp, fill) during the load window
         self.queue_node_max: dict[str, dict[int, int]] = {} # queue name -> (node id -> peak depth) # name -> capacity
         self.queues_settle: dict[str, list[tuple[float, float]]] = {}
@@ -167,6 +168,10 @@ class Scan:
             self.event_drops["total"] += 1
             reason = str(line.get("reason"))
             self.event_drops["by_reason"][reason] = self.event_drops["by_reason"].get(reason, 0) + 1
+        elif record_type == "result_dropped":
+            self.result_drops["total"] += 1
+            reason = line.get("reason") or "unknown"
+            self.result_drops["by_reason"][reason] = self.result_drops["by_reason"].get(reason, 0) + 1
         elif record_type == "queues":
             self._queues(line, node_id, wallclock_time)
         elif record_type == "tcp_channel_queue_depth":
@@ -668,6 +673,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "highest_revision_number": highest_revision,
             "by_trigger": verdicts_by_trigger,
             "final_after_send_end": final_after_send_end,
+            "result_drops": scan.result_drops,
         },
         "resources": {
             **resources,

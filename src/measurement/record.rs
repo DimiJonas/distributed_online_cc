@@ -39,6 +39,13 @@ pub enum CaseEndSource {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultDropReason {
+    ResultAlreadyFinal,
+    StaleRevision,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct QueueDepths {
     /// [depth_now, max_since_last_report, capacity]
     pub event_q: [usize; 3],
@@ -129,9 +136,8 @@ pub enum Record {
         result: String,
         /// immediate / grace period / revocable
         policy: String,
-        /// set when the emitting handler knows which event triggered the check (None if case_end or timer triggered)
+        /// which event triggered the verdict (None if case_end or timer triggered)
         instance_id: Option<EventInstanceId>,
-        // TODO: when aggregating measurements: substract timer duration from the detection delay if needed.
         trigger: ResultTrigger,
         decided_at: DateTime<Utc>,
         revision: RevisionNumber,
@@ -143,6 +149,19 @@ pub enum Record {
         constraint_id: ConstraintId,
         /// created_at as carried in the cc result message
         created_at: String,
+    },
+
+    /// the previous result was already finalized and the new result had to be dropped
+    ResultDropped {
+        case_id: CaseId,
+        constraint_id: ConstraintId,
+        constraint_type: String,
+        result: String,
+        reason: ResultDropReason,
+        #[serde(flatten)]
+        revision: Option<RevisionNumber>,
+        trigger: ResultTrigger,
+        decided_at: DateTime<Utc>,
     },
 
     /// sampled link queue depth

@@ -1,17 +1,24 @@
 /// this module buffers constraint check results before sending them
 /// this helps realize the result emitter that in turn realizes a grace period or revocable results before a result is finalized
 ///
-/// - GracePeriod means the result is buffered for a duration. If an update
-///   arrives during that window the buffered result is overwritten. Once the
-///   timer expires the final result is sent.
-/// - Revocable means the result is sent immediately but can be overwritten by
-///   an update within a duration. After the window the result is considered
-///   final and can no longer be changed.
-use std::{collections::HashMap, fmt::Display, time::Duration};
+/// - GracePeriod means the result is buffered for a duration and not sent. if an update arrives during that window the buffered result is overwritten in place.
+///   once the timer expires the last buffered result is sent and the pair is final.
+///   the sink sees exactly one message per pair
+/// - Revocable means the result is sent immediately and every update inside the window is sent as well.
+///   no value is buffered here, only the fact that the window is open.
+///   after the window the result is final and can no longer be changed
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    time::Duration,
+};
 
-use tokio_util::sync::CancellationToken;
+use chrono::{DateTime, Utc};
 
-use crate::types::{CaseId, ConstraintId, ConstraintResultType};
+use crate::{
+    state::result_revision_store::RevisionNumber,
+    types::{CaseId, ConstraintId, ConstraintResultType},
+};
 
 #[derive(Debug, Clone)]
 pub enum ResultBufferPolicy {
@@ -33,26 +40,31 @@ impl Display for ResultBufferPolicy {
     }
 }
 
+/// the value a GracePeriod pair will send when its window expires (Revocable results are never buffered)
 #[derive(Debug)]
 pub struct PendingResult {
     pub result: ConstraintResultType,
     pub info: String,
-    pub cancel_token: CancellationToken,
+    pub revision: RevisionNumber,
+    pub decided_at: DateTime<Utc>,
 }
 
 impl Display for PendingResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "PendingResult {{ result: {:?}, info: {} }}",
-            self.result, self.info
+            "PendingResult {{ result: {:?}, revision: {}, info: {} }}",
+            self.result, self.revision, self.info
         )
     }
 }
 
 #[derive(Default)]
 pub struct ConstraintResultSendBuffer {
+    /// GracePeriod: the value waiting to be sent
     pending: HashMap<(CaseId, ConstraintId), PendingResult>,
+    /// Revocable: the pairs whose window is still open (no value since the verdicts are sent immediately)
+    open: HashSet<(CaseId, ConstraintId)>,
 }
 
 impl ConstraintResultSendBuffer {
@@ -60,42 +72,29 @@ impl ConstraintResultSendBuffer {
         Self::default()
     }
 
-    /// Insert or update a pending result
-    ///
-    /// If an entry already exists its timer task is cancelled before the new entry replaces it. The
-    /// caller is responsible for spawning a new timer task using the returned
-    /// cancel token
-    ///
-    /// Returns the cancel token for the new entry so the caller can
-    /// pass it to the timer task it spawns
+    /// buffer a result or overwrite the buffered one
+    /// returns true if the call opened the window
     pub fn insert_or_update(
         &mut self,
         case_id: CaseId,
         constraint_id: ConstraintId,
         result: ConstraintResultType,
         info: String,
-    ) -> CancellationToken {
-        let key = (case_id, constraint_id);
-
-        // Cancel any existing timer task for this entry.
-        if let Some(old) = self.pending.get(&key) {
-            old.cancel_token.cancel();
-        }
-
-        let cancel_token = CancellationToken::new();
-        self.pending.insert(
-            key,
-            PendingResult {
-                result,
-                info,
-                cancel_token: cancel_token.clone(),
-            },
-        );
-        cancel_token
+        revision: RevisionNumber,
+        decided_at: DateTime<Utc>,
+    ) -> bool {
+        let entry = PendingResult {
+            result,
+            info,
+            revision,
+            decided_at,
+        };
+        self.pending
+            .insert((case_id, constraint_id), entry)
+            .is_none()
     }
 
-    /// Remove and return the pending result, e.g. when the timer fires and
-    /// the result is ready to be sent
+    /// remove and return the pending result
     pub fn take(
         &mut self,
         case_id: &CaseId,
@@ -105,7 +104,7 @@ impl ConstraintResultSendBuffer {
             .remove(&(case_id.clone(), constraint_id.clone()))
     }
 
-    /// Peek at the current buffered result without removing it
+    /// peek at the current buffered result without removing it
     pub fn get(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> Option<&PendingResult> {
         self.pending.get(&(case_id.clone(), constraint_id.clone()))
     }
@@ -114,14 +113,58 @@ impl ConstraintResultSendBuffer {
         self.pending
             .contains_key(&(case_id.clone(), constraint_id.clone()))
     }
+
+    /// Revocable: mark the window open
+    /// returns true if the call that opened it
+    pub fn open_window(&mut self, case_id: CaseId, constraint_id: ConstraintId) -> bool {
+        self.open.insert((case_id, constraint_id))
+    }
+
+    /// Revocable: the window expired
+    /// returns true if it was open
+    pub fn close_window(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
+        self.open.remove(&(case_id.clone(), constraint_id.clone()))
+    }
+
+    pub fn is_open(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
+        self.open
+            .contains(&(case_id.clone(), constraint_id.clone()))
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn open_window_count(&self) -> usize {
+        self.open.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn k(case: &str, constraint: &str) -> (CaseId, ConstraintId) {
-        (case.to_string(), constraint.to_string())
+    /// distinct, increasing timestamps without depending on a particular chrono constructor
+    fn at(step: i64) -> DateTime<Utc> {
+        Utc::now() + chrono::Duration::seconds(step)
+    }
+
+    fn insert(
+        buf: &mut ConstraintResultSendBuffer,
+        case: &str,
+        constraint: &str,
+        result: ConstraintResultType,
+        info: &str,
+        revision: RevisionNumber,
+    ) -> bool {
+        buf.insert_or_update(
+            case.to_string(),
+            constraint.to_string(),
+            result,
+            info.to_string(),
+            revision,
+            at(revision),
+        )
     }
 
     #[test]
@@ -129,93 +172,85 @@ mod tests {
         let buf = ConstraintResultSendBuffer::new();
         assert!(!buf.has_pending(&"c".to_string(), &"x".to_string()));
         assert!(buf.get(&"c".to_string(), &"x".to_string()).is_none());
-        assert!(buf.pending.is_empty());
+        assert!(!buf.is_open(&"c".to_string(), &"x".to_string()));
+        assert_eq!(buf.pending_count(), 0);
+        assert_eq!(buf.open_window_count(), 0);
     }
 
     #[test]
-    fn insert_or_update_stores_entry() {
+    fn insert_or_update_stores_entry_and_reports_the_open() {
         let mut buf = ConstraintResultSendBuffer::new();
-        let token = buf.insert_or_update(
-            "c".into(),
-            "x".into(),
-            ConstraintResultType::Satisfied,
-            "ok".into(),
-        );
-        assert!(!token.is_cancelled());
+        let opened = insert(&mut buf, "c", "x", ConstraintResultType::Satisfied, "ok", 1);
+        assert!(opened, "the first verdict opens the window");
         assert!(buf.has_pending(&"c".to_string(), &"x".to_string()));
         let pending = buf.get(&"c".to_string(), &"x".to_string()).unwrap();
         assert!(matches!(pending.result, ConstraintResultType::Satisfied));
         assert_eq!(pending.info, "ok");
+        assert_eq!(pending.revision, 1);
     }
 
+    /// the key property: an update replaces the value but does NOT reopen the window, so the caller spawns no second
+    /// timer and the original window still runs out on schedule
     #[test]
-    fn insert_or_update_cancels_previous_token() {
+    fn update_replaces_the_value_without_reopening_the_window() {
         let mut buf = ConstraintResultSendBuffer::new();
-        let first = buf.insert_or_update(
-            "c".into(),
-            "x".into(),
+        assert!(insert(
+            &mut buf,
+            "c",
+            "x",
             ConstraintResultType::Satisfied,
-            "first".into(),
-        );
-        assert!(!first.is_cancelled());
-
-        let second = buf.insert_or_update(
-            "c".into(),
-            "x".into(),
+            "first",
+            1
+        ));
+        assert!(!insert(
+            &mut buf,
+            "c",
+            "x",
             ConstraintResultType::Violated,
-            "second".into(),
-        );
-        // The first cancel token was cancelled by the supersede; the second is fresh.
-        assert!(first.is_cancelled());
-        assert!(!second.is_cancelled());
+            "second",
+            2
+        ));
+        let third = at(3);
+        assert!(!buf.insert_or_update(
+            "c".to_string(),
+            "x".to_string(),
+            ConstraintResultType::Violated,
+            "third".to_string(),
+            3,
+            third,
+        ));
 
-        // And the stored entry reflects the second value.
         let pending = buf.get(&"c".to_string(), &"x".to_string()).unwrap();
         assert!(matches!(pending.result, ConstraintResultType::Violated));
-        assert_eq!(pending.info, "second");
+        assert_eq!(pending.info, "third");
+        // the revision and the timestamp travel with the value, not with the verdict that opened the window
+        assert_eq!(pending.revision, 3);
+        assert_eq!(pending.decided_at, third);
+        assert_eq!(buf.pending_count(), 1);
     }
 
     #[test]
-    fn supersede_only_affects_matching_key() {
+    fn updates_only_affect_the_matching_key() {
         let mut buf = ConstraintResultSendBuffer::new();
-        let t_a = buf.insert_or_update(
-            "c".into(),
-            "a".into(),
-            ConstraintResultType::Satisfied,
-            "".into(),
-        );
-        let _t_b = buf.insert_or_update(
-            "c".into(),
-            "b".into(),
-            ConstraintResultType::Satisfied,
-            "".into(),
-        );
-        // Updating "a" must NOT cancel "b"'s token.
-        let _t_a2 = buf.insert_or_update(
-            "c".into(),
-            "a".into(),
-            ConstraintResultType::Violated,
-            "".into(),
-        );
-        assert!(t_a.is_cancelled());
-        // and "b" is still there + not cancelled
-        assert!(buf.has_pending(&"c".to_string(), &"b".to_string()));
+        insert(&mut buf, "c", "a", ConstraintResultType::Satisfied, "", 1);
+        insert(&mut buf, "c", "b", ConstraintResultType::Satisfied, "", 1);
+        insert(&mut buf, "c", "a", ConstraintResultType::Violated, "", 2);
+
+        let a = buf.get(&"c".to_string(), &"a".to_string()).unwrap();
+        let b = buf.get(&"c".to_string(), &"b".to_string()).unwrap();
+        assert!(matches!(a.result, ConstraintResultType::Violated));
+        assert!(matches!(b.result, ConstraintResultType::Satisfied));
+        assert_eq!(buf.pending_count(), 2);
     }
 
     #[test]
     fn take_removes_and_returns_entry() {
         let mut buf = ConstraintResultSendBuffer::new();
-        buf.insert_or_update(
-            "c".into(),
-            "x".into(),
-            ConstraintResultType::Satisfied,
-            "ok".into(),
-        );
-        let pending = buf.take(&"c".to_string(), &"x".to_string());
-        assert!(pending.is_some());
-        let pending = pending.unwrap();
+        insert(&mut buf, "c", "x", ConstraintResultType::Satisfied, "ok", 1);
+        let pending = buf.take(&"c".to_string(), &"x".to_string()).unwrap();
         assert!(matches!(pending.result, ConstraintResultType::Satisfied));
         assert!(!buf.has_pending(&"c".to_string(), &"x".to_string()));
+        assert_eq!(buf.pending_count(), 0);
     }
 
     #[test]
@@ -224,26 +259,92 @@ mod tests {
         assert!(buf.take(&"c".to_string(), &"x".to_string()).is_none());
     }
 
+    /// after a take the pair may be inserted again and that counts as opening a new window. the emitter never does this
+    /// because it marks the pair final first, but the buffer must not pretend otherwise
+    #[test]
+    fn insert_after_take_opens_a_new_window() {
+        let mut buf = ConstraintResultSendBuffer::new();
+        assert!(insert(
+            &mut buf,
+            "c",
+            "x",
+            ConstraintResultType::Satisfied,
+            "1",
+            1
+        ));
+        buf.take(&"c".to_string(), &"x".to_string());
+        assert!(insert(
+            &mut buf,
+            "c",
+            "x",
+            ConstraintResultType::Satisfied,
+            "2",
+            2
+        ));
+    }
+
     #[test]
     fn keys_are_independent_by_pair() {
         let mut buf = ConstraintResultSendBuffer::new();
-        buf.insert_or_update(
-            "case-1".into(),
-            "x".into(),
+        insert(
+            &mut buf,
+            "case-1",
+            "x",
             ConstraintResultType::Satisfied,
-            "1".into(),
+            "1",
+            1,
         );
-        buf.insert_or_update(
-            "case-2".into(),
-            "x".into(),
+        insert(
+            &mut buf,
+            "case-2",
+            "x",
             ConstraintResultType::Violated,
-            "2".into(),
+            "2",
+            1,
         );
-        // Same constraint, different cases — both entries exist.
         let p1 = buf.get(&"case-1".to_string(), &"x".to_string()).unwrap();
         let p2 = buf.get(&"case-2".to_string(), &"x".to_string()).unwrap();
         assert!(matches!(p1.result, ConstraintResultType::Satisfied));
         assert!(matches!(p2.result, ConstraintResultType::Violated));
-        let _ = k("a", "b"); // suppress unused
+    }
+
+    // ── revocable windows ────────────────────────────────────────────────
+
+    #[test]
+    fn open_window_reports_only_the_first_open() {
+        let mut buf = ConstraintResultSendBuffer::new();
+        assert!(buf.open_window("c".to_string(), "x".to_string()));
+        assert!(!buf.open_window("c".to_string(), "x".to_string()));
+        assert!(!buf.open_window("c".to_string(), "x".to_string()));
+        assert!(buf.is_open(&"c".to_string(), &"x".to_string()));
+        assert_eq!(buf.open_window_count(), 1);
+    }
+
+    #[test]
+    fn close_window_reports_whether_it_was_open() {
+        let mut buf = ConstraintResultSendBuffer::new();
+        buf.open_window("c".to_string(), "x".to_string());
+        assert!(buf.close_window(&"c".to_string(), &"x".to_string()));
+        assert!(!buf.close_window(&"c".to_string(), &"x".to_string()));
+        assert!(!buf.is_open(&"c".to_string(), &"x".to_string()));
+    }
+
+    /// revocable stores no value: opening a window must not create a pending entry for the grace period path
+    #[test]
+    fn open_window_does_not_create_a_pending_value() {
+        let mut buf = ConstraintResultSendBuffer::new();
+        buf.open_window("c".to_string(), "x".to_string());
+        assert!(!buf.has_pending(&"c".to_string(), &"x".to_string()));
+        assert_eq!(buf.pending_count(), 0);
+    }
+
+    #[test]
+    fn windows_are_independent_by_pair() {
+        let mut buf = ConstraintResultSendBuffer::new();
+        buf.open_window("c".to_string(), "a".to_string());
+        buf.open_window("c".to_string(), "b".to_string());
+        buf.close_window(&"c".to_string(), &"a".to_string());
+        assert!(!buf.is_open(&"c".to_string(), &"a".to_string()));
+        assert!(buf.is_open(&"c".to_string(), &"b".to_string()));
     }
 }

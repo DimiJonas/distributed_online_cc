@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
 use crate::measurement::record::{
-    CaseEndSource, ChurnEvent, Direction, QueueDepths, Record, ResultTrigger,
+    CaseEndSource, ChurnEvent, Direction, QueueDepths, Record, ResultDropReason, ResultTrigger,
 };
 use crate::measurement::record_writer::{enabled, message_trace_enabled, record};
 use crate::network::message_types::{PeerMessage, PeerMessagePayload};
@@ -150,8 +150,8 @@ pub fn result_emitted(
         case_id: case_id.clone(),
         constraint_id: constraint_id.clone(),
         constraint_type: constraint_type.to_string(),
-        result: format!("{}", result_type),
-        policy: format!("{}", policy),
+        result: result_type.to_string(),
+        policy: policy.to_string(),
         instance_id,
         trigger,
         decided_at,
@@ -165,6 +165,28 @@ pub fn result_persisted(case_id: &CaseId, constraint_id: &ConstraintId, created_
         constraint_id: constraint_id.clone(),
         created_at: created_at.to_string(),
     });
+}
+
+pub fn result_dropped(
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
+    result_type: ConstraintResultType,
+    reason: ResultDropReason,
+    revision: Option<RevisionNumber>,
+    trigger: ResultTrigger,
+    decided_at: DateTime<Utc>,
+) {
+    record(Record::ResultDropped {
+        case_id: case_id.clone(),
+        constraint_id: constraint_id.clone(),
+        constraint_type: constraint_type.to_string(),
+        result: result_type.to_string(),
+        reason,
+        revision,
+        trigger,
+        decided_at,
+    })
 }
 
 pub fn tcp_channel_queue_depth(peer: PeerAddress, depth: usize, capacity: usize) {

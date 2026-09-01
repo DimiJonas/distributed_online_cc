@@ -42,7 +42,7 @@ cpu_cap_exclude_roles = ["sink"]
 [baseline]
 event_queue_size = 8192
 loopback_queue_size = 8192
-case_end_grace_period = "10s"
+case_end_grace_period = "15s"         # this should be longer than the result buffer policies to be safe
 case_janitor_cleanup_interval = "1s"
 
 [baseline.tcp_channels]
@@ -57,7 +57,7 @@ connect_timeout = "5s"
 
 [baseline.default_result_buffer]
 policy = "Revocable"
-duration = "10s"
+duration = "10s"                    # this should exceed t3-t4 window, otherwise late verdicts will be ignored
 
 [baseline.result_sink]
 mpsc_channel_size = 262144

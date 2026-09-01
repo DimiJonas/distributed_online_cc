@@ -1,14 +1,16 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio_util::sync::CancellationToken;
 
 /// this module is used to realize the different result publication strategies:
 ///     - immediate
 ///     - grace period
 ///     - revocable result
 use crate::{
-    measurement::{api::result_emitted, record::ResultTrigger},
+    measurement::{
+        self,
+        record::{ResultDropReason, ResultTrigger},
+    },
     network::{
         message_types::{CCResultMessage, PeerMessage},
         tcp_router::send_to_conformance_peer,
@@ -33,12 +35,27 @@ pub async fn emit_result(
     result_trigger: ResultTrigger,
     instance_id: Option<EventInstanceId>,
 ) {
+    let decided_at = Utc::now();
+
+    if is_final(&state, case_id, constraint_id) {
+        record_drop(
+            case_id,
+            constraint_id,
+            constraint_type,
+            result,
+            ResultDropReason::ResultAlreadyFinal,
+            None,
+            result_trigger,
+            decided_at,
+        );
+        return;
+    }
     let revision = {
         let mut revisions = state.result_revisions.lock().unwrap();
         revisions.next_revision(case_id, constraint_id)
     };
     emit_result_at(
-        Utc::now(),
+        decided_at,
         revision,
         case_id,
         constraint_id,
@@ -93,13 +110,60 @@ pub fn stamp_decision(
         .stamp(case_id, constraint_id)
 }
 
-/// emit a constraint result, stamping the result with the supplied decision time and revision and applying the configured buffering policy for the
-/// given constraint
+fn is_final(state: &AppState, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
+    state
+        .result_revisions
+        .lock()
+        .unwrap()
+        .is_final(case_id, constraint_id)
+}
+
+fn mark_final(state: &AppState, case_id: &CaseId, constraint_id: &ConstraintId) {
+    state
+        .result_revisions
+        .lock()
+        .unwrap()
+        .mark_final(case_id, constraint_id);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_drop(
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+    constraint_type: ConstraintType,
+    result: ConstraintResultType,
+    reason: ResultDropReason,
+    revision: Option<RevisionNumber>,
+    result_trigger: ResultTrigger,
+    decided_at: DateTime<Utc>,
+) {
+    log::debug!(
+        "dropping result for ({}/{}): {} ({:?})",
+        constraint_id,
+        case_id,
+        result,
+        reason
+    );
+    // record dropped result
+    measurement::api::result_dropped(
+        case_id,
+        constraint_id,
+        constraint_type,
+        result,
+        reason,
+        revision,
+        result_trigger,
+        decided_at,
+    );
+}
+
+/// emit a constraint result, stamping the result with the supplied decision time and revision and applying the configured buffering policy for the given constraint
 ///
-/// - Immediate (zero grace): writes to cc_results immediately
-/// - GracePeriod: writes to cc_results immediately (so the store is always up to date) AND buffers the send; the buffered send fires after the
-///   grace window, merging any updates that arrive in the meantime
-/// - Revocable: writes to cc_results immediately and keeps the result open to overwrite for the time window, then finalizes
+/// - Immediate (zero grace): written to cc_results and finalized and sent right away
+/// - GracePeriod: written to cc_results right away (so the local store is always current) but the result is buffered and can be overwritten by later verdicts.
+///   when the window expires the result is finalized and sent.
+/// - Revocable: written to cc_results and sent right away and every verdict inside the revocable window is sent as well.
+///   when the window expires the result is finalized.
 #[allow(clippy::too_many_arguments)]
 pub async fn emit_result_at(
     decided_at: DateTime<Utc>,
@@ -115,6 +179,39 @@ pub async fn emit_result_at(
 ) {
     let result_receive_time = decided_at;
 
+    if is_final(&state, case_id, constraint_id) {
+        record_drop(
+            case_id,
+            constraint_id,
+            constraint_type,
+            result,
+            ResultDropReason::ResultAlreadyFinal,
+            Some(revision),
+            result_trigger,
+            result_receive_time,
+        );
+        return;
+    }
+
+    // check if a newer revision has already been published
+    {
+        let revisions = state.result_revisions.lock().unwrap();
+        if revisions.is_superseded(case_id, constraint_id, revision) {
+            drop(revisions);
+            record_drop(
+                case_id,
+                constraint_id,
+                constraint_type,
+                result,
+                ResultDropReason::StaleRevision,
+                Some(revision),
+                result_trigger,
+                result_receive_time,
+            );
+            return;
+        }
+    }
+
     log::debug!(
         "emitting result for ({}/{}) revision {}: {:?}: {}",
         constraint_id,
@@ -126,7 +223,7 @@ pub async fn emit_result_at(
 
     let policy = state.config.result_buffer_policy(constraint_id);
     // record result emitted
-    result_emitted(
+    measurement::api::result_emitted(
         case_id,
         constraint_id,
         constraint_type,
@@ -140,14 +237,14 @@ pub async fn emit_result_at(
 
     match policy {
         ResultBufferPolicy::GracePeriod { duration } if duration.is_zero() => {
-            log::info!(
+            log::debug!(
                 "immediate result configured for ({}/{}): revision {} is final; sending result {:?}",
                 case_id,
                 constraint_id,
                 revision,
                 result
             );
-            // Immediate: no buffering at all
+            // Immediate: no buffering at all and no window to keep open
             {
                 let mut results = state.cc_results.lock().unwrap();
                 results.upsert(
@@ -158,7 +255,7 @@ pub async fn emit_result_at(
                     info.clone(),
                 );
             }
-            send_result_outbound(
+            publish(
                 case_id,
                 constraint_id,
                 constraint_type,
@@ -169,10 +266,11 @@ pub async fn emit_result_at(
                 revision,
             )
             .await;
+            mark_final(&state, case_id, constraint_id);
         }
 
         ResultBufferPolicy::GracePeriod { duration } => {
-            // only update cc result store for now
+            // only update local result store
             {
                 let mut results = state.cc_results.lock().unwrap();
                 results.upsert(
@@ -184,26 +282,32 @@ pub async fn emit_result_at(
                 );
             }
 
-            // buffer the send and (re)start the grace timer
-            let cancel_token = {
+            let opened = {
                 let mut buf = state.result_send_buffer.lock().unwrap();
-                buf.insert_or_update(case_id.clone(), constraint_id.clone(), result, info)
+                buf.insert_or_update(
+                    case_id.clone(),
+                    constraint_id.clone(),
+                    result,
+                    info,
+                    revision,
+                    result_receive_time,
+                )
             };
 
-            tokio::spawn(grace_period_timer(
-                duration,
-                state.clone(),
-                case_id.clone(),
-                constraint_id.clone(),
-                constraint_type,
-                cancel_token,
-                result_receive_time,
-                revision,
-            ));
+            // spawn grace period timer only if the result was the first for its pair
+            if opened {
+                tokio::spawn(grace_period_timer(
+                    duration,
+                    state.clone(),
+                    case_id.clone(),
+                    constraint_id.clone(),
+                    constraint_type,
+                ));
+            }
         }
 
         ResultBufferPolicy::Revocable { duration } => {
-            // write to cc_results and send immediately; allow overwrite within window
+            // write to cc_results and publish right away, but allow overwrite within window
             {
                 let mut results = state.cc_results.lock().unwrap();
                 results.upsert(
@@ -214,7 +318,7 @@ pub async fn emit_result_at(
                     info.clone(),
                 );
             }
-            send_result_outbound(
+            publish(
                 case_id,
                 constraint_id,
                 constraint_type,
@@ -226,91 +330,89 @@ pub async fn emit_result_at(
             )
             .await;
 
-            let cancel_token = {
+            // check if revocable window is still open
+            let opened = {
                 let mut buf = state.result_send_buffer.lock().unwrap();
-                buf.insert_or_update(case_id.clone(), constraint_id.clone(), result, info)
+                buf.open_window(case_id.clone(), constraint_id.clone())
             };
 
-            tokio::spawn(revocable_result_timer(
-                state.clone(),
-                duration,
-                case_id.clone(),
-                constraint_id.clone(),
-                cancel_token,
-            ));
+            if opened {
+                tokio::spawn(revocable_result_timer(
+                    state.clone(),
+                    duration,
+                    case_id.clone(),
+                    constraint_id.clone(),
+                ));
+            }
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// after the timer expired: publish the last buffered value once and close the pair
 async fn grace_period_timer(
     duration: Duration,
     state: AppState,
     case_id: CaseId,
     constraint_id: ConstraintId,
     constraint_type: ConstraintType,
-    cancel_token: CancellationToken,
-    created_at: DateTime<Utc>,
-    revision: RevisionNumber,
 ) {
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => {
-            let pending = {
-                let mut buf = state.result_send_buffer.lock().unwrap();
-                buf.take(&case_id, &constraint_id)
-            };
-            if let Some(pending) = pending {
-                log::info!(
-                    "grace period expired for ({}/{}): revision {} is now final; sending result {:?}",
-                    case_id, constraint_id, revision, pending.result
-                );
-                send_result_outbound(
-                    &case_id, &constraint_id,constraint_type,
-                    pending.result, &pending.info, state.clone(),
-                    created_at, revision,
-                ).await;
-            }
-        }
-        _ = cancel_token.cancelled() => {
-            log::debug!(
-                "grace period timer reset for ({}/{})",
-                case_id, constraint_id
-            );
-        }
+    tokio::time::sleep(duration).await;
+
+    // get pending result from buffer
+    let pending = {
+        let mut buf = state.result_send_buffer.lock().unwrap();
+        buf.take(&case_id, &constraint_id)
+    };
+
+    mark_final(&state, &case_id, &constraint_id);
+
+    if let Some(pending) = pending {
+        log::debug!(
+            "grace period expired for ({}/{}): revision {} is now final; sending result {:?}",
+            case_id,
+            constraint_id,
+            pending.revision,
+            pending.result
+        );
+        publish(
+            &case_id,
+            &constraint_id,
+            constraint_type,
+            pending.result,
+            &pending.info,
+            state.clone(),
+            pending.decided_at,
+            pending.revision,
+        )
+        .await;
     }
 }
 
+/// after the timer expired: close the window for the pair (result was published already)
 async fn revocable_result_timer(
     state: AppState,
     duration: Duration,
     case_id: CaseId,
     constraint_id: ConstraintId,
-    cancel_token: CancellationToken,
 ) {
-    tokio::select! {
-        _ = tokio::time::sleep(duration) => {
-            {
-                let mut buf = state.result_send_buffer.lock().unwrap();
-                buf.take(&case_id, &constraint_id);
-            }
+    tokio::time::sleep(duration).await;
 
-            log::info!(
-                "revocable window expired for ({}/{}): result is now final",
-                case_id, constraint_id
-            );
-        }
-        _ = cancel_token.cancelled() => {
-            log::debug!(
-                "revocable window reset for ({}/{})",
-                case_id, constraint_id
-            );
-        }
+    mark_final(&state, &case_id, &constraint_id);
+    {
+        let mut buf = state.result_send_buffer.lock().unwrap();
+        buf.close_window(&case_id, &constraint_id);
     }
+
+    log::debug!(
+        "revocable window expired for ({}/{}): result is now final",
+        case_id,
+        constraint_id
+    );
 }
 
 /// send the constraint check result to the sink
 #[allow(clippy::too_many_arguments)]
-async fn send_result_outbound(
+async fn publish(
     case_id: &CaseId,
     constraint_id: &ConstraintId,
     constraint_type: ConstraintType,
@@ -320,6 +422,12 @@ async fn send_result_outbound(
     created_at: DateTime<Utc>,
     revision: RevisionNumber,
 ) {
+    // record what was actually published
+    {
+        let mut revisions = state.result_revisions.lock().unwrap();
+        revisions.note_published(case_id, constraint_id, revision);
+    }
+
     match &state.config.result_sink_addresses {
         Some(addresses) => {
             // sink addresses were configured - sending result there
@@ -334,7 +442,7 @@ async fn send_result_outbound(
             });
             for address in addresses {
                 log::debug!(
-                    "send_result_outbound: sending result message {} to result sink at {}",
+                    "publish: sending result message {} to result sink at {}",
                     result_message,
                     address,
                 );
@@ -342,7 +450,7 @@ async fn send_result_outbound(
                     send_to_conformance_peer(*address, result_message.clone(), state.clone()).await
                 {
                     log::error!(
-                        "send_result_outbound: error sending result message {} to {} (result sink): {}",
+                        "publish: error sending result message {} to {} (result sink): {}",
                         result_message,
                         address,
                         e
@@ -353,7 +461,7 @@ async fn send_result_outbound(
         None => {
             // no sink configured - logging result
             log::info!(
-                "send_result_outbound: RESULT for case/constraint {}/{} (revision {}) is {}: {}",
+                "publish: RESULT for case/constraint {}/{} (revision {}) is {}: {}",
                 case_id,
                 constraint_id,
                 revision,
@@ -378,13 +486,27 @@ pub async fn emit_result_immediate(
 ) {
     let result_receive_time = Utc::now();
 
+    if is_final(&state, case_id, constraint_id) {
+        record_drop(
+            case_id,
+            constraint_id,
+            constraint_type,
+            result,
+            ResultDropReason::ResultAlreadyFinal,
+            None,
+            result_trigger,
+            result_receive_time,
+        );
+        return;
+    }
+
     let revision = {
         let mut revisions = state.result_revisions.lock().unwrap();
         revisions.next_revision(case_id, constraint_id)
     };
 
     // record result emitted
-    result_emitted(
+    measurement::api::result_emitted(
         case_id,
         constraint_id,
         constraint_type,
@@ -408,7 +530,7 @@ pub async fn emit_result_immediate(
             info.clone(),
         );
     }
-    send_result_outbound(
+    publish(
         case_id,
         constraint_id,
         constraint_type,
@@ -419,6 +541,8 @@ pub async fn emit_result_immediate(
         revision,
     )
     .await;
+
+    mark_final(&state, case_id, constraint_id);
 }
 
 #[cfg(test)]
@@ -459,6 +583,46 @@ mod tests {
             .constraint_result
     }
 
+    fn config_with(policy: ResultBufferConfig) -> AppState {
+        let mut buffers = HashMap::new();
+        buffers.insert("x".to_string(), policy);
+        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1");
+        state
+    }
+
+    async fn emit(state: &AppState, result: ConstraintResultType, info: &str) {
+        emit_result(
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintType::Response,
+            result,
+            info.to_string(),
+            state.clone(),
+            ResultTrigger::Event,
+            Some(EventInstanceId::new_v4()),
+        )
+        .await;
+    }
+
+    fn is_closed(state: &AppState) -> bool {
+        state
+            .result_revisions
+            .lock()
+            .unwrap()
+            .is_final(&"case-1".to_string(), &"x".to_string())
+    }
+
+    /// the highest revision issued so far. a dropped verdict must not move this: it never got a number
+    fn revisions_issued(state: &AppState) -> RevisionNumber {
+        state
+            .result_revisions
+            .lock()
+            .unwrap()
+            .current_revision(&"case-1".to_string(), &"x".to_string())
+    }
+
     // ── Immediate policy ─────────────────────────────────────────────────
 
     #[tokio::test]
@@ -467,17 +631,7 @@ mod tests {
         let state = make_state_from_config(cfg);
         register(&state, "case-1");
 
-        emit_result(
-            &"case-1".to_string(),
-            &"x".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::Violated,
-            "v".to_string(),
-            state.clone(),
-            ResultTrigger::Event,
-            Some(EventInstanceId::new_v4()),
-        )
-        .await;
+        emit(&state, ConstraintResultType::Violated, "v").await;
 
         assert!(matches!(
             read_result(&state, "case-1", "x"),
@@ -493,40 +647,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn immediate_is_final_at_once_and_later_verdicts_are_dropped() {
+        let cfg = make_config_with_buffers(vec![], HashMap::new(), ResultBufferConfig::Immediate);
+        let state = make_state_from_config(cfg);
+        register(&state, "case-1");
+
+        emit(&state, ConstraintResultType::Violated, "first").await;
+        assert!(is_closed(&state));
+
+        let before = revisions_issued(&state);
+        emit(&state, ConstraintResultType::Satisfied, "too late").await;
+
+        // the store still holds the final value and the dropped verdict burnt no revision number
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Violated
+        ));
+        assert_eq!(revisions_issued(&state), before);
+    }
+
     // ── GracePeriod policy ───────────────────────────────────────────────
 
     #[tokio::test(start_paused = true)]
     async fn grace_period_writes_cc_results_immediately_and_buffers_send() {
-        let mut buffers = HashMap::new();
-        buffers.insert(
-            "x".to_string(),
-            ResultBufferConfig::GracePeriod {
-                duration: Duration::from_secs(5),
-            },
-        );
-        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
-        let state = make_state_from_config(cfg);
-        register(&state, "case-1");
+        let state = config_with(ResultBufferConfig::GracePeriod {
+            duration: Duration::from_secs(5),
+        });
 
-        emit_result(
-            &"case-1".to_string(),
-            &"x".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::Violated,
-            "v".to_string(),
-            state.clone(),
-            ResultTrigger::Event,
-            Some(EventInstanceId::new_v4()),
-        )
-        .await;
+        emit(&state, ConstraintResultType::Violated, "v").await;
 
         // cc_results is current right away
         assert!(matches!(
             read_result(&state, "case-1", "x"),
             ConstraintResultType::Violated
         ));
-
-        // Buffer holds the pending send
         assert!(
             state
                 .result_send_buffer
@@ -534,8 +689,8 @@ mod tests {
                 .unwrap()
                 .has_pending(&"case-1".to_string(), &"x".to_string())
         );
+        assert!(!is_closed(&state));
 
-        // Advance through the grace period — the spawned task takes the entry
         advance_and_settle(6).await;
 
         assert!(
@@ -545,55 +700,23 @@ mod tests {
                 .unwrap()
                 .has_pending(&"case-1".to_string(), &"x".to_string())
         );
+        assert!(is_closed(&state));
     }
 
     #[tokio::test(start_paused = true)]
     async fn grace_period_superseding_update_replaces_buffered_value() {
-        let mut buffers = HashMap::new();
-        buffers.insert(
-            "x".to_string(),
-            ResultBufferConfig::GracePeriod {
-                duration: Duration::from_secs(5),
-            },
-        );
-        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
-        let state = make_state_from_config(cfg);
-        register(&state, "case-1");
+        let state = config_with(ResultBufferConfig::GracePeriod {
+            duration: Duration::from_secs(5),
+        });
 
-        emit_result(
-            &"case-1".to_string(),
-            &"x".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::Violated,
-            "tentative".to_string(),
-            state.clone(),
-            ResultTrigger::Event,
-            Some(EventInstanceId::new_v4()),
-        )
-        .await;
-
-        // Halfway through the grace window, supersede with a corrected result
+        emit(&state, ConstraintResultType::Violated, "tentative").await;
         advance_and_settle(2).await;
+        emit(&state, ConstraintResultType::Satisfied, "corrected").await;
 
-        emit_result(
-            &"case-1".to_string(),
-            &"x".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::Satisfied,
-            "corrected".to_string(),
-            state.clone(),
-            ResultTrigger::Event,
-            Some(EventInstanceId::new_v4()),
-        )
-        .await;
-
-        // cc_results reflects the corrected value
         assert!(matches!(
             read_result(&state, "case-1", "x"),
             ConstraintResultType::Satisfied
         ));
-
-        // The buffer still has a pending entry but it's the corrected one
         {
             let buf = state.result_send_buffer.lock().unwrap();
             let pending = buf
@@ -603,7 +726,6 @@ mod tests {
             assert_eq!(pending.info, "corrected");
         }
 
-        // Run past both windows; the buffer drains
         advance_and_settle(10).await;
         assert!(
             !state
@@ -614,55 +736,150 @@ mod tests {
         );
     }
 
+    /// the window must not be extended by later verdicts: it runs out 5s after the FIRST one, not 5s after the last
+    #[tokio::test(start_paused = true)]
+    async fn grace_period_window_does_not_slide() {
+        let state = config_with(ResultBufferConfig::GracePeriod {
+            duration: Duration::from_secs(5),
+        });
+
+        emit(&state, ConstraintResultType::Violated, "first").await;
+        for _ in 0..4 {
+            advance_and_settle(1).await;
+            emit(&state, ConstraintResultType::Violated, "again").await;
+            assert!(!is_closed(&state), "closed too early");
+        }
+        // 4s of repeated updates have passed; one more second ends the original window
+        advance_and_settle(2).await;
+        assert!(is_closed(&state), "the window slid instead of running out");
+    }
+
     // ── Revocable policy ─────────────────────────────────────────────────
 
     #[tokio::test(start_paused = true)]
-    async fn revocable_writes_immediately_and_keeps_buffer_open() {
-        let mut buffers = HashMap::new();
-        buffers.insert(
-            "x".to_string(),
-            ResultBufferConfig::Revocable {
-                duration: Duration::from_secs(5),
-            },
-        );
-        let cfg = make_config_with_buffers(vec![], buffers, ResultBufferConfig::Immediate);
-        let state = make_state_from_config(cfg);
-        register(&state, "case-1");
+    async fn revocable_writes_immediately_and_keeps_window_open() {
+        let state = config_with(ResultBufferConfig::Revocable {
+            duration: Duration::from_secs(5),
+        });
 
-        emit_result(
-            &"case-1".to_string(),
-            &"x".to_string(),
-            ConstraintType::Response,
-            ConstraintResultType::Violated,
-            "v".to_string(),
-            state.clone(),
-            ResultTrigger::Event,
-            Some(EventInstanceId::new_v4()),
-        )
-        .await;
+        emit(&state, ConstraintResultType::Violated, "v").await;
 
-        // cc_results updated right away (revocable sends immediately)
         assert!(matches!(
             read_result(&state, "case-1", "x"),
             ConstraintResultType::Violated
         ));
-        // and the buffer holds the entry for the revocable window
+        // revocable stores no value, only the open window
         assert!(
             state
                 .result_send_buffer
                 .lock()
                 .unwrap()
-                .has_pending(&"case-1".to_string(), &"x".to_string())
+                .is_open(&"case-1".to_string(), &"x".to_string())
         );
+        assert!(!is_closed(&state));
 
-        // Advance past the window — buffer is taken (finalised)
         advance_and_settle(6).await;
         assert!(
             !state
                 .result_send_buffer
                 .lock()
                 .unwrap()
-                .has_pending(&"case-1".to_string(), &"x".to_string())
+                .is_open(&"case-1".to_string(), &"x".to_string())
+        );
+        assert!(is_closed(&state));
+    }
+
+    /// inside the window every verdict is published; after it closes they are dropped
+    #[tokio::test(start_paused = true)]
+    async fn revocable_accepts_inside_the_window_and_drops_after_it() {
+        let state = config_with(ResultBufferConfig::Revocable {
+            duration: Duration::from_secs(5),
+        });
+
+        emit(&state, ConstraintResultType::Violated, "first").await;
+        advance_and_settle(2).await;
+        emit(&state, ConstraintResultType::Satisfied, "correction").await;
+        assert!(matches!(
+            read_result(&state, "case-1", "x"),
+            ConstraintResultType::Satisfied
+        ));
+
+        advance_and_settle(6).await;
+        assert!(is_closed(&state));
+
+        let before = revisions_issued(&state);
+        emit(&state, ConstraintResultType::Violated, "too late").await;
+        assert!(
+            matches!(
+                read_result(&state, "case-1", "x"),
+                ConstraintResultType::Satisfied
+            ),
+            "a verdict after the window must not move the result"
+        );
+        assert_eq!(revisions_issued(&state), before);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn revocable_window_does_not_slide() {
+        let state = config_with(ResultBufferConfig::Revocable {
+            duration: Duration::from_secs(5),
+        });
+
+        emit(&state, ConstraintResultType::Violated, "first").await;
+        for _ in 0..4 {
+            advance_and_settle(1).await;
+            emit(&state, ConstraintResultType::Violated, "again").await;
+            assert!(!is_closed(&state), "closed too early");
+        }
+        advance_and_settle(2).await;
+        assert!(is_closed(&state), "the window slid instead of running out");
+    }
+
+    // ── stale revisions ──────────────────────────────────────────────────
+
+    /// a stamped emission that lost the race must not move the result backwards
+    #[tokio::test(start_paused = true)]
+    async fn stamped_out_of_order_emission_is_dropped() {
+        let state = config_with(ResultBufferConfig::Revocable {
+            duration: Duration::from_secs(30),
+        });
+
+        let early = stamp_decision(&state, &"case-1".to_string(), &"x".to_string());
+        let late = stamp_decision(&state, &"case-1".to_string(), &"x".to_string());
+
+        // the later decision is emitted first
+        emit_result_stamped(
+            late,
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintType::Response,
+            ConstraintResultType::Satisfied,
+            "late decision".to_string(),
+            state.clone(),
+            ResultTrigger::Event,
+            None,
+        )
+        .await;
+
+        emit_result_stamped(
+            early,
+            &"case-1".to_string(),
+            &"x".to_string(),
+            ConstraintType::Response,
+            ConstraintResultType::Violated,
+            "early decision, arrives second".to_string(),
+            state.clone(),
+            ResultTrigger::Event,
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                read_result(&state, "case-1", "x"),
+                ConstraintResultType::Satisfied
+            ),
+            "a superseded revision must not overwrite a newer one"
         );
     }
 
@@ -705,5 +922,7 @@ mod tests {
                 .unwrap()
                 .has_pending(&"case-1".to_string(), &"x".to_string())
         );
+        // and it closes the pair, so the configured 60s grace policy cannot reopen it
+        assert!(is_closed(&state));
     }
 }
