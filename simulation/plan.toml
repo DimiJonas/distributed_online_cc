@@ -100,7 +100,7 @@ shuffle_secs = 5
 shuffle_length = 4
 cache_size = 20
 ring_degree = 2
-worker_threads = 2                # determined with E0b
+worker_threads = 4                # determined with E0b (4 instead of 2 because central already used 1.7 cpus in the experiment)
 
 
 # E0a - find sender ceiling and have coarse saturation info to fix rate sweeps
