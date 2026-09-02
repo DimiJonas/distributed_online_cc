@@ -22,7 +22,7 @@ netem_dev = "lo"
 netem_sudo = true
 node_start_stagger_s = 0.05
 ready_timeout_s = 120
-stop_grace_s = 15
+stop_grace_s = 60
 between_systems_s = 5
 send_timeout_s = 7200
 run_order = "shuffle"
@@ -435,7 +435,7 @@ systems = ["decentralized", "central"]
   role_assignment = "round-robin"
   msgtrace = true
   [experiment.grid]
-  nodes = [3, 5, 7, 12, 23, 46, 92]
+  nodes = [3, 5, 7, 12, 23, 32, 46]
 
 # E3b: system scale blocked
 # metrics: (same as E3a)

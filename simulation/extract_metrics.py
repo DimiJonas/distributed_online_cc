@@ -440,10 +440,17 @@ def send_metrics(send_dir: Path, system: str) -> dict:
         except (OSError, json.JSONDecodeError):
             send_summary = None
 
+    send_log_path = send_dir / f"{system}.log"
+    if not send_log_path.exists():
+        return {"events_sent": 0, "events_no_route": 0, "events_error": 0, "bytes_sent": 0, "cases": 0,
+                "no_send_log": True,
+                "warning": f"no send log at {send_log_path}: expected for an idle only run, "
+                           f"a bug in any run that was supposed to send events"}
+
     counts = {"sent": 0, "no_route": 0, "error": 0}
     bytes_sent = 0
     cases: set[str] = set()
-    for row in read_jsonl(send_dir / f"{system}.log"):
+    for row in read_jsonl(send_log_path):
         status = str(row.get("status", ""))
         if status == "sent":
             counts["sent"] += 1
@@ -483,8 +490,9 @@ def send_metrics(send_dir: Path, system: str) -> dict:
 # 
 def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[dict, dict]:
     system = timeline["system"]
+    idle_only_run = bool(params.get("idle_only"))
     windows = Windows(timeline, args.warmup_fraction, args.cooldown_fraction)
-    if windows.load_source == "process":
+    if windows.load_source == "process" and not idle_only_run:
         print(f"  !! {system}: no pacer_start_us/pacer_end_us in the timeline, using the sender "
               f"process bounds instead. the load window then also contains the payload preload and "
               f"the send log flush, during which the nodes are idle, so every cpu percentage and "
@@ -647,6 +655,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     other_event_drops = scan.event_drops["total"] - closed_case_event_drops
 
     saturation_reasons = []
+    if send.get("no_send_log") and not idle_only_run:
+        saturation_reasons.append("no send log: the sender never ran, so every per event metric is meaningless")
     if (send.get("pacer_max_lag_ms") or 0) > 100:
         saturation_reasons.append("pacer lag over 100ms")
     if closed_case_drops > 0:
@@ -786,6 +796,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "writer_shutdown_missing": sorted(scan.nodes_seen - scan.writer_shutdown),
             "complete": not (scan.nodes_seen - scan.writer_shutdown),
             "problems": timeline.get("problems", []),
+            "idle_only": idle_only_run,
+            "no_send_log": bool(send.get("no_send_log")),
             "settlement_reason": timeline.get("system_settlement_reason"),
             "pairs_in_db": timeline.get("pairs_in_db"),
             "expected_pairs": timeline.get("expected_pairs"),
