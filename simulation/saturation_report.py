@@ -5,6 +5,7 @@ saturation_report.py - aggregate the saturation signals of an experiment per sys
   python3.12 simulation/saturation_report.py results/e0_find_saturation
   python3.12 simulation/saturation_report.py results/e0_find_saturation --json out.json --csv out.csv
   python3.12 simulation/saturation_report.py results/e0_find_saturation --x-param rate --cpu-threshold 85
+  python3.12 simulation/saturation_report.py results/E0c --x-param cpu_cap_cores --filter rate=16000
 
 it reads per run and per system:
 
@@ -65,6 +66,48 @@ RE_RESYNC = re.compile(r"resyncs=(\d+)")
 RE_BLOCKED = re.compile(r"blocked_sends\(>1ms\)=(\d+)")
 RE_MAXSEND = re.compile(r"max_send=([\d.]+)ms")
 RE_SENT = re.compile(r"sent=(\d+)")
+
+
+CORE_PARAMS = ("cpu_cap_cores", "cpu_cap_cpus")
+
+
+def infer_x_direction(x_parameter: str) -> str:
+    return "decreasing" if x_parameter in RESOURCE_PARAMS else "increasing"
+
+
+def parse_filters(raw_filters: list[str]) -> list[tuple[str, list[str]]]:
+    filters: list[tuple[str, list[str]]] = []
+    for raw in raw_filters or []:
+        if "=" not in raw:
+            raise ValueError(f"--filter needs key=value, got {raw!r}")
+        key, _, values = raw.partition("=")
+        key = key.strip()
+        wanted = [value.strip() for value in values.split(",") if value.strip()]
+        if not key or not wanted:
+            raise ValueError(f"--filter needs key=value, got {raw!r}")
+        filters.append((key, wanted))
+    return filters
+
+
+def _values_match(actual, wanted: str) -> bool:
+    if actual is None:
+        return wanted.lower() in ("none", "null", "-")
+    if isinstance(actual, bool):
+        return str(actual).lower() == wanted.lower()
+    try:
+        return math.isclose(float(actual), float(wanted), rel_tol=1e-9, abs_tol=0.0)
+    except (TypeError, ValueError):
+        return str(actual).strip().lower() == wanted.lower()
+
+
+def run_matches_filters(params: dict, filters: list[tuple[str, list[str]]]) -> bool:
+    for key, wanted in filters:
+        if key not in params:
+            return False
+        if not any(_values_match(params[key], value) for value in wanted):
+            return False
+    return True
+
 
 
 def quantile(sorted_values: list[float], q: float) -> float | None:
@@ -861,6 +904,7 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         "isolated_saturating_x": early_minority,
         "early_majority_saturating_x": early_majority,
         "highest_sustainable_x": sustainable,
+        "sustainable_x": sustainable,
         "highest_tested_x": tested_extreme,
         "highest_usable_x": usable_extreme,
         "saturation_bracketed": knee is not None,
@@ -911,7 +955,26 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         else:
             print(f"    NOT SATURATED even at the smallest {x_parameter} tested "
                   f"({min(ascending)}) - the requirement is BELOW the grid, test smaller budgets.")
-        fit = extrapolate_cpu(usable)
+        fit = extrapolate_cpu(usable) if x_direction == "increasing" else None
+        if x_direction == "decreasing":
+            demand = cpu_demand(by_level, levels, x_parameter)
+            if demand:
+                summary["cpu_demand"] = demand
+                print(f"    cpu demand of the system under test (sum over the capped processes, "
+                      f"median per level):")
+                for level in ascending:
+                    row = demand["per_level"].get(level)
+                    if row:
+                        budget = (f"{row['utilisation']:.0%} of the {row['budget_pct']:.0f}% budget"
+                                  if row.get("utilisation") is not None else "budget unknown")
+                        print(f"      {level:>8}  {row['cpu_sum_pct']:7.1f}%  ({budget})")
+                print(f"    lowest observed demand = {demand['floor_pct']:.0f}% of a core "
+                      f"= {demand['floor_cores']:.2f} cores, at {x_parameter} "
+                      f"= {demand['floor_x']}")
+                if demand.get("suggested_x") is not None:
+                    print(f"    so the budget only starts to bind near {x_parameter} "
+                          f"= {demand['suggested_x']} - extend the grid down to there, or raise the "
+                          f"load instead")
         if fit:
             what = ("busiest thread" if fit.get("metric") == "sys_thread_max_pct"
                     else "busiest process")
@@ -946,6 +1009,32 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
                   f"points, so the usable range only reaches {usable_extreme}.")
             summary["saturation_bracketed"] = False
     return summary
+
+
+# how much cpu the capped processes actually want, per level, against the budget the cap grants
+def cpu_demand(by_level: dict, levels: list, x_parameter: str) -> dict | None:
+    per_level: dict = {}
+    for level in levels:
+        values = sorted(point["sys_cpu_sum_pct"] for point in by_level[level]
+                        if point.get("sys_cpu_sum_pct") is not None)
+        if not values:
+            continue
+        median = values[len(values) // 2]
+        budget = float(level) * 100.0 if x_parameter in CORE_PARAMS and level else None
+        per_level[level] = {"cpu_sum_pct": median, "budget_pct": budget,
+                            "utilisation": (median / budget) if budget else None,
+                            "replicates": len(values)}
+    if not per_level:
+        return None
+    floor_x = min(per_level, key=lambda level: per_level[level]["cpu_sum_pct"])
+    floor_pct = per_level[floor_x]["cpu_sum_pct"]
+    suggested = None
+    if x_parameter in CORE_PARAMS:
+        # the smallest whole core count whose budget is still below the observed demand
+        suggested = max(1, math.floor(floor_pct / 100.0))
+    return {"per_level": per_level, "floor_x": floor_x, "floor_pct": floor_pct,
+            "floor_cores": floor_pct / 100.0, "suggested_x": suggested,
+            "metric": "sys_cpu_sum_pct"}
 
 
 def extrapolate_cpu(points: list[dict]) -> dict | None:
@@ -1002,6 +1091,11 @@ def main() -> int:
     parser.add_argument("--x-direction", choices=["increasing", "decreasing"], default=None,
                         help="whether a bigger x means more stress. 'increasing' for a load sweep (rate), 'decreasing' for a resource sweep (cpu_cap_cores, nodes). "
                              "inferred from --x-param when not given")
+    parser.add_argument("--filter", action="append", default=[], metavar="KEY=VALUE",
+                        help="keep only runs whose run.json params match. repeatable, and a value list is allowed "
+                             "(--filter rate=16000 --filter cases=2500,10000). use this to hold every swept parameter "
+                             "except --x-param: if a level mixes runs at different loads, its saturating fraction is "
+                             "an average over those loads and the knee is not readable")
     parser.add_argument("--knee-frac", type=float, default=0.5,
                         help="fraction of replicates at one x that must saturate for that x to count as saturating (default 0.5, i.e. a majority)")
     parser.add_argument("--infra-roles", nargs="*", default=list(INFRA_ROLES),
@@ -1017,6 +1111,15 @@ def main() -> int:
     parser.add_argument("--csv", type=Path, default=None, help="write a flat per point table here")
     args = parser.parse_args()
 
+    try:
+        filters = parse_filters(args.filter)
+    except ValueError as error:
+        print(error, file=sys.stderr)
+        return 2
+
+    # a resource sweep saturates at the LOW end. inferred from --x-param unless forced
+    x_direction = args.x_direction or infer_x_direction(args.x_param)
+
     thresholds = {"achieved_ratio": args.achieved_ratio, "sustained_ratio": args.sustained_ratio,
                   "cpu_pct": args.cpu_threshold,
                   "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
@@ -1030,6 +1133,25 @@ def main() -> int:
     if not run_directories:
         print(f"no runs with a run.json under {args.experiment_dir}", file=sys.stderr)
         return 0
+
+    filtered_out = 0
+    if filters:
+        kept = []
+        for run_directory in run_directories:
+            try:
+                params = json.loads((run_directory / "run.json").read_text()).get("params", {})
+            except (json.JSONDecodeError, OSError):
+                continue
+            if run_matches_filters(params, filters):
+                kept.append(run_directory)
+            else:
+                filtered_out += 1
+        run_directories = kept
+        if not run_directories:
+            wanted = ", ".join(key + "=" + ",".join(values) for key, values in filters)
+            print(f"no runs under {args.experiment_dir} match {wanted} "
+                  f"({filtered_out} run(s) filtered out)", file=sys.stderr)
+            return 0
 
     points_by_system: dict[str, list[dict]] = {system: [] for system in args.systems}
     progress = Progress(len(run_directories) * len(args.systems), "collecting", enabled=not args.quiet)
@@ -1052,6 +1174,12 @@ def main() -> int:
     all_points = [point for points in points_by_system.values() for point in points]
 
     print(f"experiment: {args.experiment_dir}")
+    direction_note = ("bigger x is more load, knee at the HIGH end" if x_direction == "increasing"
+                      else "bigger x is more resource, knee at the LOW end")
+    print(f"x param: {args.x_param} ({x_direction} - {direction_note})")
+    if filters:
+        wanted = ", ".join(key + "=" + ",".join(values) for key, values in filters)
+        print(f"filter: {wanted}  ({len(run_directories)} run(s) kept, {filtered_out} filtered out)")
     print(f"rule: saturated if blocked_sends>{args.blocked_frac:.2%} of sends OR max_send>{args.max_send_ms}ms "
           f"OR the residual deficit >{args.residual_deficit_frac:.1%} of the run OR any message_drop "
           f"OR a queue is at >{args.queue_fill:.0%} of capacity at p95 AND still growing "
@@ -1115,20 +1243,24 @@ def main() -> int:
     print("=" * 132)
     print("  SUMMARY PER SYSTEM")
     print("=" * 132)
-    summaries_by_system = {system: summarise_system(system, points_by_system[system], args.x_param, args.knee_frac)
+    summaries_by_system = {system: summarise_system(system, points_by_system[system], args.x_param, args.knee_frac, x_direction)
                            for system in args.systems if points_by_system[system]}
 
     print()
     unbracketed_systems = [system for system, summary in summaries_by_system.items()
                            if not summary.get("saturation_bracketed")]
-    if unbracketed_systems:
+    if unbracketed_systems and x_direction == "increasing":
         print(f"  NO BASE POINT YET: {', '.join(unbracketed_systems)} never saturated (or the top of the grid is invalid).")
         print(f"  a '60% of sustainable' base point read off an unsaturated sweep is just 60% of wherever you stopped testing,")
         print(f"  not 60% of what the system can do. extend the grid until every system shows a sustained saturating point.")
-    else:
-        sustainable_by_system = {system: summary["highest_sustainable_x"]
+    elif unbracketed_systems:
+        print(f"  NO BINDING BUDGET YET: {', '.join(unbracketed_systems)} kept up even at the smallest {args.x_param} tested.")
+        print(f"  the requirement is below the grid. either extend it downwards, or hold {args.x_param} and raise the load instead -")
+        print(f"  a budget that only binds for one system is still a usable comparison, but say which system it binds for.")
+    elif x_direction == "increasing":
+        sustainable_by_system = {system: summary["sustainable_x"]
                                  for system, summary in summaries_by_system.items()
-                                 if summary.get("highest_sustainable_x") is not None}
+                                 if summary.get("sustainable_x") is not None}
         if len(sustainable_by_system) > 1:
             limiting_system = min(sustainable_by_system, key=sustainable_by_system.get)
             lowest_sustainable = sustainable_by_system[limiting_system]
@@ -1139,10 +1271,25 @@ def main() -> int:
             print(f"  report these separately. if you also need ONE shared base point for the sensitivity experiments, it has to")
             print(f"  come from the lower one ({limiting_system}), otherwise {limiting_system} is already saturated at the base point and every")
             print(f"  downstream comparison is confounded.  shared 60% base point = {round(lowest_sustainable * 0.6)}")
+    else:
+        sufficient_by_system = {system: summary["sustainable_x"]
+                                for system, summary in summaries_by_system.items()
+                                if summary.get("sustainable_x") is not None}
+        if len(sufficient_by_system) > 1:
+            hungriest_system = max(sufficient_by_system, key=sufficient_by_system.get)
+            print(f"  the systems need different budgets for this load:")
+            for system, sufficient in sorted(sufficient_by_system.items(), key=lambda item: item[1]):
+                print(f"    {system:<16} smallest sufficient {args.x_param} = {sufficient}")
+            print(f"  a shared budget has to come from the hungrier one ({hungriest_system}) if BOTH must keep up, and from the")
+            print(f"  leaner one if the point is to make both saturate. those are different experiments - pick one deliberately.")
 
     report_payload = {
         "experiment": str(args.experiment_dir),
         "x_param": args.x_param,
+        "x_direction": x_direction,
+        "filters": {key: values for key, values in filters},
+        "runs_kept": len(run_directories),
+        "runs_filtered_out": filtered_out,
         "thresholds": thresholds,
         "summary": summaries_by_system,
         "points": {system: [{key: value for key, value in point.items() if key != "_class"}
