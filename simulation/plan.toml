@@ -207,7 +207,7 @@ systems = ["decentralized", "central"]
   msgtrace = false
   burst = 32
   [experiment.grid]
-  rate = [24000, 32000, 40000, 50000]   # TODO: adjust to E0a sender limit
+  rate = [24000, 32000, 40000, 50000]
 
 # E1b: system capped load sweep
 # metrics: pacer lag, queue depths, message drops, p50/p95/p99 of t1-t3 and t3-t4, revisions per (case, constraint)
@@ -222,7 +222,7 @@ systems = ["decentralized", "central"]
   burst = 16
   cpu_cap_mode = "cpuset"
   cpu_cap_scope = "system"
-  cpu_cap_cores = 12              # TODO: set from E0c
+  cpu_cap_cores = 4              # set from E0c
   [experiment.grid]
   rate = [1000, 2000]
 
@@ -237,7 +237,7 @@ systems = ["decentralized", "central"]
   burst = 16
   cpu_cap_mode = "cpuset"
   cpu_cap_scope = "system"
-  cpu_cap_cores = 12              # TODO: set from E0c
+  cpu_cap_cores = 4              # set from E0c
   [experiment.grid]
   rate = [4000, 8000, 12000, 16000]
 
@@ -252,9 +252,9 @@ systems = ["decentralized", "central"]
   burst = 16
   cpu_cap_mode = "cpuset"
   cpu_cap_scope = "system"
-  cpu_cap_cores = 12              # TODO: set from E0c
+  cpu_cap_cores = 4              # set from E0c
   [experiment.grid]
-  rate = [24000, 32000]
+  rate = [24000, 32000, 40000, 50000]
 
 # E1c: node capped load sweep
 # metrics: cpu_max (busiest process), cpu_total
@@ -301,7 +301,7 @@ systems = ["decentralized", "central"]
   cpu_cap_scope = "node"
   cpu_cap_cores = 1
   [experiment.grid]
-  rate = [24000, 32000]
+  rate = [24000, 32000, 40000, 50000]
 
 # E4: model size sweep
 # cases swept inverse to repeat to achieve similar run lengths
