@@ -18,16 +18,13 @@ it reads per run and per system:
 
 and then applies a saturation rule to each (system, rate) point. the point saturates if any of:
 
-  blocked_sends > 0                a node stopped reading its socket (the receiver side signal)
-  achieved / target < 0.95         the system could not absorb the offered load
-  any message_drop record          a queue overflowed
-  max queue depth > 25% capacity   a long lived queue is filling up
-  busiest system process cpu > 85% a single process is running out of core
+  LOSS        any message drop            work was destroyed; revisions repair late messages, not lost ones
+  BACKLOG     a queue is deep AND growing  p95 depth > 25% of capacity and the depth trend still rising
+  COMPUTE     cpu > 85% of the ceiling     the ceiling is the per node cap, the shared system cap, or one core for the busiest thread when the run was uncapped
+  THROUGHPUT  effective/target < 0.95      unless the median second still hit target, which means one stall
+  STALL       a socket write blocked >= 1s a node stopped reading its socket altogether
 
-the sustainable rate is reported as the highest rate below the first saturating one. 
-the sender is reported separately: 
-    if the sender itself is above the cpu threshold the point says so, because then the limit measured is the load generator, not the system under test.
-
+the sustainable rate is reported as the highest rate below the first saturating one.
 """
 from __future__ import annotations
 
@@ -55,6 +52,11 @@ INFRA_ROLES = ("sink",)
 INFRA_QUEUES = ("result_sink_q",)
 
 ALL_QUEUES = ("event_q", "loopback_q", "result_sink_q", "gossip_out_q", "gossip_in_q")
+
+INPUT_DROP_RECORDS = ("message_drop", "dropped_event")
+REPAIR_DROP_RECORDS = ("correction_dropped",)
+REPAIR_RESULT_DROP_REASONS = ("result_already_final",)
+DROP_RECORDS = INPUT_DROP_RECORDS + REPAIR_DROP_RECORDS + ("result_dropped",)
 
 # the pacer summary line: "rate=8e+03/s (target) 7.75e+03/s (effective) elapsed=9.91s late=4417 max_lag=2.5ms resyncs=626"
 RE_TARGET = re.compile(r"rate=([\d.e+-]+)/s \(target\)")
@@ -136,7 +138,7 @@ def depth_slope_per_s(samples: list[tuple[int, int]]) -> float | None:
     return covariance / variance
 
 
-# the slope expressed as a fraction of capacity gained over the whole measurement window (makes queues of different capacities comparable)
+# the slope expressed as a fraction of capacity gained over the whole measurement window
 def growth_over_window(samples: list[tuple[int, int]], capacity: int) -> float | None:
     slope = depth_slope_per_s(samples)
     if slope is None or not capacity:
@@ -286,6 +288,10 @@ def parse_resources(run_dir: Path, system: str, window: tuple[int, int] | None, 
         resource_stats["sys_rss_sum_mb"] = sum(rss_kb for _, rss_kb, _ in system_procs) / 1024
         resource_stats["sys_rss_max_mb"] = max(rss_kb for _, rss_kb, _ in system_procs) / 1024
         resource_stats["sys_processes"] = len(system_procs)
+        resource_stats["sys_cpu_profile"] = [
+            {"node": f"{meta_row['role']}/{meta_row['node_id']}", "cpu_pct": cpu_pct,
+             "rss_mb": rss_kb / 1024}
+            for cpu_pct, rss_kb, meta_row in system_procs]
 
     infra_procs = per_group.get("infra", [])
     if infra_procs:
@@ -373,7 +379,8 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
     capacity: dict[tuple[int, str], int] = {}
     # (node_id, queue) -> [(t_us, depth), ...] so a standing backlog can be told apart from a spike
     series: dict[tuple[int, str], list[tuple[int, int]]] = defaultdict(list)
-    drops: dict[str, int] = defaultdict(int)
+    drops: dict[tuple[str, str], int] = defaultdict(int)
+    drops_by_node: dict[str, int] = defaultdict(int)
     incomplete: list[str] = []
     dequeue_depths: list[int] = []
 
@@ -406,14 +413,42 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
                 depth = row.get("q_length")
                 if depth is not None:
                     dequeue_depths.append(depth)
-            elif kind == "message_drop":
-                drops[row.get("reason") or "unknown"] += 1
+            elif kind in DROP_RECORDS:
+                drops[(kind, str(row.get("reason") or "unknown"))] += 1
+                if kind in INPUT_DROP_RECORDS:
+                    drops_by_node[f"node-{node_id}"] += 1
         if not marker_seen:
             incomplete.append(path.name)
 
-    records_stats: dict = {"records_present": True, "record_files": len(record_files),
-                           "incomplete_record_files": incomplete,
-                           "message_drops": sum(drops.values()), "drop_reasons": dict(drops)}
+    def _is_repair(kind: str, reason: str) -> bool:
+        if kind in REPAIR_DROP_RECORDS:
+            return True
+        return kind == "result_dropped" and reason in REPAIR_RESULT_DROP_REASONS
+
+    def _count(predicate) -> int:
+        return sum(count for (kind, reason), count in drops.items() if predicate(kind, reason))
+
+    def _reasons(predicate) -> dict:
+        return {f"{kind}/{reason}": count for (kind, reason), count in sorted(drops.items())
+                if predicate(kind, reason)}
+
+    records_stats: dict = {
+        "records_present": True, "record_files": len(record_files),
+        "incomplete_record_files": incomplete,
+        # unrecoverable input loss - the saturation signal
+        "input_drops": _count(lambda kind, _r: kind in INPUT_DROP_RECORDS),
+        "input_drop_reasons": _reasons(lambda kind, _r: kind in INPUT_DROP_RECORDS),
+        "message_drops": _count(lambda kind, _r: kind == "message_drop"),
+        "event_drops": _count(lambda kind, _r: kind == "dropped_event"),
+        # repairs that never landed - explains wrong verdicts, not a capacity signal
+        "repair_drops": _count(_is_repair),
+        "repair_drop_reasons": _reasons(_is_repair),
+        # the revision store discarding an older revision - normal, context only
+        "stale_result_drops": _count(lambda kind, reason: kind == "result_dropped"
+                                     and reason not in REPAIR_RESULT_DROP_REASONS),
+        "drop_reasons": _reasons(lambda _k, _r: True),
+        "input_drops_by_node": dict(sorted(drops_by_node.items(), key=lambda kv: -kv[1])),
+    }
 
     # worst fill per queue across nodes and the overall worst that counts as a saturation signal
     signal_fill = 0.0
@@ -458,7 +493,8 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
     records_stats["queue_fill_max_queue"] = signal_queue
     records_stats["queue_fill_max_node"] = signal_node
 
-    # the queue that carries the saturation signal (the one with the highest p95 fill)
+    # every (node, queue) with samples
+    queue_profile: list[dict] = []
     standing_best = (-1.0, None, None, None, None, None)
     for queue in ALL_QUEUES:
         if queue in infra_queues:
@@ -473,10 +509,17 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
                 continue
             depths = sorted(depth for _t, depth in samples)
             p95_fill = quantile(depths, 0.95) / cap
+            queue_profile.append({
+                "node": f"node-{node_id}", "queue": queue, "capacity": cap,
+                "p95_fill": p95_fill, "p99_fill": quantile(depths, 0.99) / cap,
+                "peak_fill": max(depths) / cap,
+                "slope_per_s": depth_slope_per_s(samples),
+                "growth": growth_over_window(samples, cap)})
             if p95_fill > standing_best[0]:
                 standing_best = (p95_fill, queue, f"node-{node_id}",
                                  depth_slope_per_s(samples), quantile(depths, 0.99) / cap,
                                  growth_over_window(samples, cap))
+    records_stats["queue_profile"] = sorted(queue_profile, key=lambda entry: -entry["p95_fill"])
     if standing_best[1]:
         records_stats["queue_fill_p95_max"] = standing_best[0]
         records_stats["queue_fill_p95_max_queue"] = standing_best[1]
@@ -530,6 +573,7 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
 
     point: dict = {
         "run_id": run_file.get("run_id"),
+        "run_dir": str(run_dir),
         "system": system,
         "x_param": x_param,
         "x": run_file.get("params", {}).get(x_param),
@@ -568,6 +612,7 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
     point.update(parse_resources(run_dir, system, window, infra_roles))
     roles_by_node = {node["node_id"]: node.get("role") for node in (timeline.get("nodes") or []) if node.get("node_id") is not None}
     point.update(parse_records(run_dir, system, window, roles_by_node, infra_roles, infra_queues))
+    point.update(cpu_ceiling(timeline.get("cpu_cap") or {}, point))
 
     sources = []
     target = run_file.get("params", {}).get("rate")
@@ -630,88 +675,138 @@ def _problem_is_other_system(problem, system: str) -> bool:
     return False
 
 
+def _cpu_count_from_list(cpu_list) -> int | None:
+    if not cpu_list:
+        return None
+    total = 0
+    for chunk in str(cpu_list).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            low, _, high = chunk.partition("-")
+            try:
+                total += int(high) - int(low) + 1
+            except ValueError:
+                return None
+        else:
+            total += 1
+    return total or None
+
+
+def cpu_ceiling(cap_info: dict, point: dict) -> dict:
+    out = {
+        "cpu_cap_mode": (cap_info or {}).get("mode", "off"),
+        "cpu_cap_scope": (cap_info or {}).get("scope"),
+        "cpu_cap_cores": (cap_info or {}).get("cores"),
+        "cpu_cap_note": (cap_info or {}).get("note"),
+        "cpu_ceiling_basis": None,      # which number is compared against the ceiling
+        "cpu_ceiling_label": None,
+        "cpu_ceiling_pct": None, 
+        "cpu_used_pct": None,
+        "cpu_of_ceiling": None,         # cpu_used_pct / cpu_ceiling_pct
+    }
+    mode = str((cap_info or {}).get("mode") or "off").lower()
+
+    if mode == "off":
+        out["cpu_ceiling_label"] = "uncapped - no cpu ceiling, so cpu cannot signal saturation here"
+        return out
+
+    scope = str((cap_info or {}).get("scope") or "system").lower()
+    cores = (cap_info or {}).get("cores")
+    if scope == "node":
+        per_node = (cap_info or {}).get("cpus_per_node") or cores
+        ceiling = float(per_node) * 100.0 if per_node else None
+        used = point.get("sys_cpu_max_pct")
+        out["cpu_ceiling_basis"] = "process"
+        out["cpu_ceiling_label"] = (f"{mode}/node: busiest node process vs its "
+                                    f"{_fmt_cores(per_node)} cpu(s)")
+    else:
+        cpus = _cpu_count_from_list((cap_info or {}).get("system_cpus")) or cores
+        ceiling = float(cpus) * 100.0 if cpus else None
+        used = point.get("sys_cpu_sum_pct")
+        out["cpu_ceiling_basis"] = "system"
+        out["cpu_ceiling_label"] = (f"{mode}/system: all node processes vs the shared "
+                                    f"{_fmt_cores(cpus)} cpu(s)")
+    out["cpu_ceiling_pct"] = ceiling
+    out["cpu_used_pct"] = used
+    if ceiling and used is not None:
+        out["cpu_of_ceiling"] = used / ceiling
+    return out
+
+
+def _fmt_cores(value) -> str:
+    if value is None:
+        return "?"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(number)) if number == int(number) else f"{number:g}"
+
+
+# decide whether this point shows the system failing to keep up
 def classify(point: dict, thresholds: dict) -> dict:
 
     reasons: list[str] = []
     warnings: list[str] = []
+    notes: list[str] = []
 
-    blocked = point.get("blocked_sends")
-    sent = point.get("events_sent")
-    blocked_fraction = (blocked / sent) if (blocked is not None and sent) else None
-    max_send = point.get("max_send_ms")
-    if blocked_fraction is not None and blocked_fraction > thresholds["blocked_frac"]:
-        reasons.append(f"blocked_sends={blocked} ({blocked_fraction:.2%} of sends) > {thresholds['blocked_frac']:.2%} - a node is not keeping up with its socket")
-    if max_send is not None and max_send > thresholds["max_send_ms"]:
-        reasons.append(f"max_send={max_send:.1f}ms > {thresholds['max_send_ms']}ms - a node stopped reading its socket long enough to block the sender")
+    # LOSS (message/event/result/correction drops)
+    if point.get("input_drops"):
+        detail = ", ".join(f"{count}x {reason}" for reason, count
+                           in (point.get("input_drop_reasons") or {}).items())
+        by_node = point.get("input_drops_by_node") or {}
+        where = ("" if thresholds.get("only_max_node") or not by_node else
+                 " on " + ", ".join(f"{node} ({count})" for node, count in by_node.items()))
+        reasons.append(f"{point['input_drops']} input record(s) dropped{where} "
+                       f"({detail or 'reason not recorded'}) - work was destroyed, and a late "
+                       f"revision cannot repair a message or event that never arrived")
 
-    # throughput. achieved_ratio = (1 - excess/elapsed) by construction, so any fixed stall makes it
-    # fall as the rate rises simply because the run gets shorter: a 1.9s stall is 3% of a 65s run at
-    # 8000/s and 15% of a 13s run at 50000/s, with nothing about the system having changed. so the
-    # rule is on the residual deficit (excess minus the single largest inter send gap), which is
-    # what is left after the worst stall is accounted for
-    ratio = point.get("achieved_ratio")
-    sustained = point.get("sustained_ratio")
-    excess = point.get("excess_over_ideal_s")
-    residual_frac = point.get("residual_deficit_frac")
-    largest_gap = point.get("largest_gap_s")
-    warnings_from_rate = None
+    if point.get("repair_drops"):
+        detail = ", ".join(f"{count}x {reason}" for reason, count
+                           in (point.get("repair_drop_reasons") or {}).items())
+        warnings.append(f"{point['repair_drops']} repair(s) never landed ({detail}) - a later, better "
+                        f"verdict arrived and the revision mechanism could not apply it, either because "
+                        f"the correction could not be matched or because the revocable window had "
+                        f"already closed. not a capacity signal, but it is how a saturated system loses "
+                        f"correctness - read it next to the wrong count")
 
-    achieved_ratio_fired = False
-    if residual_frac is not None:
-        achieved_ratio_fired = residual_frac > thresholds["residual_deficit_frac"]
-        if achieved_ratio_fired:
-            reasons.append(f"residual deficit {point['residual_deficit_s']:.2f}s = {residual_frac:.2%} of the run "
-                           f"> {thresholds['residual_deficit_frac']:.2%} (total {excess:.2f}s over ideal, of which "
-                           f"{largest_gap:.2f}s was the single largest inter send gap)")
-        elif ratio is not None and ratio < thresholds["achieved_ratio"]:
-            warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but "
-                                  f"{largest_gap:.2f}s of the {excess:.2f}s deficit is one single gap and the "
-                                  f"residual is only {residual_frac:.2%} of the run - a one-off stall, NOT "
-                                  f"counted as saturation. check the sender for a send log spill or a GC pause")
-    else:
-        achieved_ratio_fired = ratio is not None and ratio < thresholds["achieved_ratio"]
-        if achieved_ratio_fired and sustained is not None and sustained >= thresholds["sustained_ratio"]:
-            achieved_ratio_fired = False
-            warnings_from_rate = (f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}, but the median "
-                                  f"second delivered {sustained:.3f} of the target - a one-off stall, NOT counted "
-                                  f"as saturation (no send log, so the residual deficit is unavailable)")
-        elif achieved_ratio_fired:
-            reasons.append(f"achieved/target={ratio:.3f} < {thresholds['achieved_ratio']}"
-                           + (f" (median second at {sustained:.3f} of target)" if sustained is not None else ""))
-
-    if point.get("message_drops"):
-        reasons.append(f"message_drops={point['message_drops']} {point.get('drop_reasons')}")
-
-    # queues. a peak is one sample and it is not comparable across queues of different capacity, so a peak alone never counts as saturation. 
-    # what counts is a standing backlog that is still growing: p95 fill above the threshold and a positive depth slope over the window.
-    # this is applied uniformly to every queue rather than only to event_q
+    # BACKLOG (filled queues)
     standing_fill = point.get("queue_fill_p95_max")
     standing_queue = point.get("queue_fill_p95_max_queue")
     standing_node = point.get("queue_fill_p95_max_node")
     standing_slope = point.get("queue_slope_at_p95_max")
-    standing_p99 = point.get("queue_fill_p99_at_p95_max")
-
     standing_growth = point.get("queue_growth_at_p95_max")
+    standing_p99 = point.get("queue_fill_p99_at_p95_max")
     queue_reason_fired = False
     if standing_fill is not None and standing_fill > thresholds["queue_fill"]:
         if standing_growth is not None and standing_growth > thresholds["queue_growth"]:
             queue_reason_fired = True
-            reasons.append(f"{standing_queue} on {standing_node}: p95 depth at {standing_fill:.0%} of capacity "
-                           f"> {thresholds['queue_fill']:.0%} and still growing - the trend gains "
-                           f"{standing_growth:.0%} of capacity over the window "
-                           f"({standing_slope:+.2f} slots/s) - a standing, unbounded backlog"
-                           + (f" (p99 {standing_p99:.0%})" if standing_p99 is not None else ""))
+            crossed = [entry for entry in (point.get("queue_profile") or [])
+                       if entry["p95_fill"] > thresholds["queue_fill"]
+                       and (entry.get("growth") or 0) > thresholds["queue_growth"]]
+            if thresholds.get("only_max_node") or len(crossed) <= 1:
+                reasons.append(f"{standing_queue} on {standing_node} is a standing backlog: p95 depth "
+                               f"{standing_fill:.0%} of capacity (> {thresholds['queue_fill']:.0%}) and "
+                               f"the depth trend rises by {standing_growth:.0%} of capacity across the "
+                               f"send window ({standing_slope:+.1f} slots/s)"
+                               + (f", p99 {standing_p99:.0%}" if standing_p99 is not None else "")
+                               + (f"  [{len(crossed)} queues crossed the threshold in total, "
+                                  f"--only-max-node hides them]" if len(crossed) > 1 else ""))
+            else:
+                reasons.append(f"{len(crossed)} standing backlogs (p95 > {thresholds['queue_fill']:.0%} "
+                               f"of capacity AND still growing), worst first:")
+                for entry in crossed:
+                    reasons.append(f"     {entry['queue']} on {entry['node']}: p95 {entry['p95_fill']:.0%} "
+                                   f"p99 {entry['p99_fill']:.0%} of {entry['capacity']} slots, "
+                                   f"trend {entry['growth']:+.0%} of capacity over the window "
+                                   f"({fmt(entry['slope_per_s'], '+.1f')} slots/s)")
         else:
-            warnings.append(f"{standing_queue} on {standing_node}: p95 depth at {standing_fill:.0%} of capacity, "
-                            f"but the trend only gains {fmt(standing_growth, '.1%')} of capacity over the window "
-                            f"({fmt(standing_slope, '+.2f')} slots/s) - a deep but STABLE queue, so it is NOT "
-                            f"counted as saturation")
-
-    fill = point.get("queue_fill_max")
-    if fill is not None and fill > thresholds["queue_fill"] and not queue_reason_fired:
-        warnings.append(f"peak {point.get('queue_fill_max_queue')} depth on {point.get('queue_fill_max_node')} "
-                        f"reached {fill:.0%} of capacity, but the standing backlog is only "
-                        f"{fmt(standing_fill, '.0%')} (p95) - a tail excursion, not saturation")
+            warnings.append(f"{standing_queue} on {standing_node}: p95 depth {standing_fill:.0%} of "
+                            f"capacity but the trend only rises by {fmt(standing_growth, '.1%')} of "
+                            f"capacity across the window ({fmt(standing_slope, '+.1f')} slots/s) - a "
+                            f"deep but STABLE queue is a buffer absorbing bursts, not saturation")
 
     capacity = point.get("event_q_capacity")
     depth_p95, depth_p99 = point.get("dequeue_depth_p95"), point.get("dequeue_depth_p99")
@@ -719,19 +814,82 @@ def classify(point: dict, thresholds: dict) -> dict:
         point["event_q_p95_fill"] = (depth_p95 / capacity) if depth_p95 is not None else None
         point["event_q_p99_fill"] = (depth_p99 / capacity) if depth_p99 is not None else None
 
-    thread_cpu = point.get("sys_thread_max_pct")
-    process_cpu = point.get("sys_cpu_max_pct")
-    if thread_cpu is not None:
-        if thread_cpu > thresholds["cpu_pct"]:
-            reasons.append(f"busiest thread '{point.get('sys_thread_max_name')}' on "
-                           f"{point.get('sys_thread_max_node')} at {thread_cpu:.0f}% of a core "
-                           f"> {thresholds['cpu_pct']}% - a single task is running out of core")
-    elif process_cpu is not None and process_cpu > thresholds["cpu_pct"]:
-        reasons.append(f"busiest process {point.get('sys_cpu_max_node')} at {process_cpu:.0f}% of a "
-                       f"core > {thresholds['cpu_pct']}% (no per thread samples, so this is a "
-                       f"process total and NOT evidence that one task is saturated)")
+    # CPU CAP
+    of_cap = point.get("cpu_of_ceiling")
+    ratio = point.get("achieved_ratio")
+    where = (f"{point.get('sys_cpu_max_node')} at {fmt(point.get('cpu_used_pct'), '.0f')}%"
+             if point.get("cpu_ceiling_basis") == "process"
+             else f"the node processes together at {fmt(point.get('cpu_used_pct'), '.0f')}%")
+    cap_text = (f"{where} of the {fmt(point.get('cpu_ceiling_pct'), '.0f')}% cpu cap "
+                f"({fmt(of_cap, '.0%')} of it)")
+    cpu_fired = False
+    if of_cap is not None:
+        if of_cap >= thresholds["cpu_pinned"] / 100.0:
+            cpu_fired = True
+            reasons.append(f"{cap_text} - pinned at the cap "
+                           f"(>= {thresholds['cpu_pinned']:.0f}%), there is no cpu left to go faster")
+        elif of_cap >= thresholds["cpu_pct"] / 100.0 and ratio is not None and ratio < thresholds["achieved_ratio"]:
+            cpu_fired = True
+            reasons.append(f"{cap_text} AND only {ratio:.3f} of the target rate was delivered "
+                           f"- the cpu it was given ran out and the shortfall shows it "
+                           f"(cap >= {thresholds['cpu_pct']:.0f}%, rate < {thresholds['achieved_ratio']:.2f})")
+        # under a per node cap the same threshold applies to every node, so name all of them
+        if cpu_fired and point.get("cpu_ceiling_basis") == "process" and point.get("cpu_ceiling_pct"):
+            ceiling = point["cpu_ceiling_pct"]
+            hot = [entry for entry in (point.get("sys_cpu_profile") or [])
+                   if entry["cpu_pct"] / ceiling >= thresholds["cpu_pct"] / 100.0]
+            if len(hot) > 1:
+                if thresholds.get("only_max_node"):
+                    reasons.append(f"     {len(hot)} nodes are at or above "
+                                   f"{thresholds['cpu_pct']:.0f}% of the cap "
+                                   f"[--only-max-node hides which]")
+                else:
+                    reasons.append(f"     {len(hot)} nodes are at or above "
+                                   f"{thresholds['cpu_pct']:.0f}% of the cap:")
+                    for entry in hot:
+                        reasons.append(f"       {entry['node']}: {entry['cpu_pct']:.0f}% "
+                                       f"({entry['cpu_pct'] / ceiling:.0%} of the cap), "
+                                       f"{entry['rss_mb']:.0f} MB")
 
-    # not a saturation signal
+    if point.get("cpu_cap_note"):
+        warnings.append(f"cpu cap: {point['cpu_cap_note']}")
+
+    # which nodes are hot
+    hot = [entry for entry in (point.get("sys_cpu_profile") or [])
+           if entry["cpu_pct"] >= thresholds["hot_cpu_pct"]]
+    already_listed = cpu_fired and point.get("cpu_ceiling_basis") == "process"
+    if hot and not already_listed:
+        if thresholds.get("only_max_node"):
+            notes.append(f"{len(hot)} node(s) above {thresholds['hot_cpu_pct']:.0f}% of a core, "
+                         f"busiest {hot[0]['node']} at {hot[0]['cpu_pct']:.0f}% "
+                         f"[--only-max-node hides the rest]")
+        else:
+            notes.append(f"{len(hot)} node(s) above {thresholds['hot_cpu_pct']:.0f}% of a core:")
+            for entry in hot:
+                of_cap_text = (f", {entry['cpu_pct'] / point['cpu_ceiling_pct']:.0%} of its cap"
+                               if point.get("cpu_ceiling_pct") else "")
+                notes.append(f"     {entry['node']}: {entry['cpu_pct']:.0f}% of a core"
+                             f"{of_cap_text}, {entry['rss_mb']:.0f} MB")
+
+    sustained = point.get("sustained_ratio")
+    if ratio is not None and ratio < thresholds["achieved_ratio"] and not cpu_fired and not queue_reason_fired:
+        warnings.append(f"effective/target={ratio:.3f} < {thresholds['achieved_ratio']} but nothing "
+                        f"else fired: no cpu exhaustion, no backlog, no input loss"
+                        + (f" (median second at {sustained:.3f} of target)" if sustained is not None else "")
+                        + " - the load generator, a gc pause or a scheduler hiccup, NOT saturation")
+
+    # STALL (blocked sends)
+    max_send = point.get("max_send_ms")
+    if max_send is not None and max_send >= thresholds["stall_ms"]:
+        reasons.append(f"one socket write blocked for {max_send / 1000:.1f}s "
+                       f"(>= {thresholds['stall_ms'] / 1000:.1f}s) - a node stopped reading its socket "
+                       f"altogether")
+
+    wrong = point.get("wrong")
+    if wrong:
+        warnings.append(f"{wrong} wrong final verdict(s) (accuracy {fmt(point.get('accuracy'), '.6f')}) "
+                        f"- not a saturation signal by itself, but check it against the signals above")
+
     invalid: list[str] = []
     if point.get("hard_killed"):
         invalid.append(f"{point['hard_killed']} node(s) SIGKILLed")
@@ -742,47 +900,32 @@ def classify(point: dict, thresholds: dict) -> dict:
     if point.get("status") == "invalid":
         invalid.append("run.json status=invalid")
 
-    # check if the sender is the limit
-    if warnings_from_rate:
-        warnings.append(warnings_from_rate)
     if point.get("window_source") == "process":
-        warnings.append("no pacer window in run.json, so cpu was measured over the sender PROCESS bounds, which also cover the payload preload and the send log flush while the nodes are idle. every "
-                        "cpu percentage here is diluted by an unknown, run specific factor - re-run with the current send_event_stream.py before comparing cpu across levels")
-
+        warnings.append("no pacer window in run.json, so cpu was measured over the sender PROCESS "
+                        "bounds, which also cover the payload preload and the send log flush while "
+                        "the nodes are idle - every cpu percentage here is diluted by an unknown "
+                        "factor. re-run with the current send_event_stream.py before comparing cpu")
     if point.get("send_log_spills"):
-        warnings.append(f"the sender spilled its send log {point['send_log_spills']}x mid stream - that stalls the "
-                        f"pacing loop and shows up as pacer lag and a fake throughput dip, not as a system limit")
+        warnings.append(f"the sender spilled its send log {point['send_log_spills']}x mid stream - that "
+                        f"stalls the pacing loop and shows up as a fake throughput dip")
 
     sender_cpu = point.get("sender_cpu_pct")
-    # check if the tooling (sender) is reaching its limit
     tooling_limited: list[str] = []
     if sender_cpu is not None and sender_cpu > thresholds["sender_cpu_pct"]:
-        if achieved_ratio_fired and len(reasons) == 1:
-            tooling_limited.append(
-                f"the only saturation signal is achieved/target={ratio:.3f}, and the SENDER was at "
-                f"{sender_cpu:.0f}% of a core (> {thresholds['sender_cpu_pct']}%) - this is a load "
-                f"generator limit, not a system limit")
-        else:
-            warnings.append(f"SENDER at {sender_cpu:.0f}% of a core - interpret the throughput "
-                            f"numbers here with care")
+        warnings.append(f"SENDER at {sender_cpu:.0f}% of a core - read the throughput numbers here "
+                        f"with care, the load generator may be the limit")
     elif sender_cpu is None and point.get("target_rate"):
         warnings.append("sender cpu not sampled (old run) - cannot rule out a load generator limit")
-    if thread_cpu is None and point.get("records_present") is not None:
-        warnings.append("no per thread samples - set resource_per_thread=true to find out whether a "
-                        "single task is the ceiling")
+
     infra_fill = point.get("infra_queue_fill_max")
     if infra_fill is not None and infra_fill >= thresholds["infra_queue_fill_warn"]:
         warnings.append(f"{point.get('infra_queue_fill_max_queue')} on "
-                        f"{point.get('infra_queue_fill_max_node')} reached {infra_fill:.0%} of "
-                        f"capacity - evaluation scaffolding, excluded from the rule, but it can "
-                        f"backpressure into the system and confound everything above it")
-    if (thread_cpu is not None and process_cpu is not None
-          and process_cpu > thresholds["cpu_pct"] and thread_cpu < 60):
-        warnings.append(f"process at {process_cpu:.0f}% but busiest thread only {thread_cpu:.0f}% - "
-                        f"the work is spreading across threads, no single task is near its ceiling")
+                        f"{point.get('infra_queue_fill_max_node')} reached {infra_fill:.0%} of capacity "
+                        f"- evaluation scaffolding, excluded from the rule, but it can backpressure "
+                        f"into the system and confound everything above it")
 
     return {"saturated": bool(reasons), "reasons": reasons, "invalid": invalid,
-            "warnings": warnings, "tooling_limited": tooling_limited}
+            "warnings": warnings, "notes": notes, "tooling_limited": tooling_limited}
 
 
 def fmt(value, spec="", dash="-"):
@@ -794,17 +937,160 @@ def fmt(value, spec="", dash="-"):
         return str(value)
 
 
-def print_system_table(system: str, points: list[dict], x_param: str) -> None:
+ROLE_INITIALS = {"constraint_node": "n", "central": "C", "forwarder": "f"}
+
+
+def _short_node(name) -> str:
+    if not name:
+        return "-"
+    text = str(name)
+    if "/" in text:
+        role, _, node_id = text.partition("/")
+        if role.startswith("sink"):
+            return "sink"
+        for prefix, initial in ROLE_INITIALS.items():
+            if role.startswith(prefix):
+                return f"{initial}{node_id}"
+        return f"{role[:1]}{node_id}"
+    if text.startswith("node-"):
+        return "n" + text[5:]
+    return text[:12]
+
+
+def print_legend(thresholds: dict) -> None:
     print()
-    print("=" * 132)
+    print("  COLUMNS")
+    print("    dur_s     wall clock length of the send window. every rate/queue/cpu number below is measured over exactly this window.")
+    print("    eff/s     events per second the sender actually delivered.   eff/tgt = that divided by the target rate.")
+    print("    q_p95     95th percentile depth of the deepest queue, as a fraction of that queue's capacity. this is the standing depth:")
+    print("              the level the queue sits at, not a spike. q_where names the queue and the node it was on.")
+    print("    q_grow    least squares trend of that queue's depth over the send window, expressed as the fraction of capacity the fitted")
+    print("              line gains from the START to the END of the window. +40% = the trend rises by 40% of the queue's capacity over the")
+    print("              whole run. it is NOT per second and it is NOT a prediction of the next window. above +100% the trend would more")
+    print("              than fill the queue within the window, so the queue is certainly clipping at capacity and the real growth is")
+    print("              steeper than shown. a positive q_grow with a low q_p95 is harmless; the pair together is what matters.")
+    print("    bklog     fraction of dequeues that found at least one more event already waiting behind them. 0% = the node was idle")
+    print("              between events; 100% = there was always something queued. capacity independent, so it is comparable across")
+    print("              queues and runs, and it moves long before q_p95 does.")
+    print("    drops     input the system threw away: message_drop + dropped_event records. unrecoverable - a revision repairs a LATE")
+    print("              message, never a destroyed one. this is the only drop kind that counts as saturation.")
+    print("    nofix     repairs that never landed: correction_dropped records, plus result_dropped with reason result_already_final")
+    print("              (the revocable window closed before the correction arrived). a better verdict existed and the revision")
+    print("              mechanism could not apply it, so a wrong verdict survives to the end of the run. this is not a capacity")
+    print("              signal - it is what capacity costs, and it is the first thing to read when acc is below 1.0. result_dropped")
+    print("              with reason stale_revision is an OLDER revision arriving late, loses nothing, and is counted in the csv only.")
+    print("    cpu_max   busiest single node process, in percent of one core.   cpu_sum = all node processes added up (the sink excluded).")
+    print("    of_cap    cpu_max (or cpu_sum, or the busiest thread) as a fraction of the ceiling this run was actually given - see the")
+    print("              header line of each table for which. 100% means it ran out of the cpu it was allowed to use.")
+    print("    busiest   which node cpu_max was on.   sink = cpu of the result sink.   sender = cpu of the load generator, all in % of a core.")
+    print("    wrong     final verdicts that disagree with the ground truth.   acc = fraction correct.")
+    print()
+    print("  VERDICT   when a system cannot keep up, the excess work has to go somewhere, and there are only four places it can go:")
+    print("            into a buffer, back onto the sender, into the bin, or into extra time. which one you see depends on which")
+    print("            buffer is tightest, so there is no single signal that always fires. a point is SATURATED if any of these did:")
+    print(f"    LOSS        any message_drop or dropped_event record - work was destroyed")
+    print(f"    BACKLOG     q_p95 > {thresholds['queue_fill']:.0%} of capacity AND q_grow > {thresholds['queue_growth']:.0%} - a buffer is deep and still filling")
+    print(f"    CPU CAP     of_cap >= {thresholds['cpu_pinned']:.0f}% on its own, OR of_cap >= {thresholds['cpu_pct']:.0f}% together with eff/tgt < {thresholds['achieved_ratio']:.2f}")
+    print(f"                (cause and consequence: neither is trustworthy alone, both together are)")
+    print(f"    STALL       a single socket write blocked for >= {thresholds['stall_ms'] / 1000:.1f}s - a node stopped reading its socket")
+    print("    a rate shortfall on its own NEVER counts. it is reported as a warning so it can be explained, not so it can decide.")
+    print("    runs with no cpu cap have no ceiling to exhaust, so only LOSS, BACKLOG and STALL can fire for them.")
+    print("    -> lines give the signals that fired, ?? lines are warnings that did NOT count, !! lines make the point unusable.")
+    print("    when a threshold is crossed, every node that crossed it is listed under the signal, worst first. one hot node and twenty")
+    print("    hot nodes are different findings. pass --only-max-node to collapse those lists back to the single worst node.")
+    print(f"    .. lines are informational: every node at or above {thresholds['hot_cpu_pct']:.0f}% of one core, whether or not a cap exists.")
+
+
+TABLE_HEADER = (f"{{x:>7}} {'runs':>5} {'dur_s':>7} {'eff/s':>8} {'eff/tgt':>8} | "
+                f"{'q_p95':>6} {'q_grow':>7} {'q_where':>16} {'bklog':>6} {'drops':>6} {'nofix':>7} | "
+                f"{'cpu_max':>8} {'of_cap':>7} {'busiest':>8} {'cpu_sum':>8} {'sink':>5} {'sender':>7} | "
+                f"{'wrong':>6} {'acc':>9}  verdict")
+
+
+def _median(values: list):
+    clean = sorted(value for value in values if value is not None and not (isinstance(value, float) and math.isnan(value)))
+    if not clean:
+        return None
+    return clean[len(clean) // 2]
+
+
+def _mode(values: list):
+    counts: dict = {}
+    for value in values:
+        if value is not None:
+            counts[value] = counts.get(value, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def _row(x_text: str, runs_text: str, get, tag: str) -> str:
+    queue_where = (f"{(get('queue_fill_p95_max_queue') or '-').replace('_q', '')}"
+                   f"@{_short_node(get('queue_fill_p95_max_node'))}"
+                   if get("queue_fill_p95_max_queue") else "-")
+    return (f"{x_text:>7} {runs_text:>5} "
+            f"{fmt(get('elapsed_s'), '.1f'):>7} "
+            f"{fmt(get('effective_rate'), '.0f'):>8} "
+            f"{fmt(get('achieved_ratio'), '.3f'):>8} | "
+            f"{fmt(get('queue_fill_p95_max'), '.0%'):>6} "
+            f"{fmt(get('queue_growth_at_p95_max'), '+.0%'):>7} "
+            f"{queue_where:>16} "
+            f"{fmt(get('dequeue_backlog_frac'), '.0%'):>6} "
+            f"{fmt(get('input_drops')):>6} "
+            f"{fmt(get('repair_drops')):>7} | "
+            f"{fmt(get('sys_cpu_max_pct'), '.0f'):>8} "
+            f"{fmt(get('cpu_of_ceiling'), '.0%'):>7} "
+            f"{_short_node(get('sys_cpu_max_node')):>8} "
+            f"{fmt(get('sys_cpu_sum_pct'), '.0f'):>8} "
+            f"{fmt(get('infra_cpu_max_pct'), '.0f'):>5} "
+            f"{fmt(get('sender_cpu_pct'), '.0f'):>7} | "
+            f"{fmt(get('wrong')):>6} "
+            f"{fmt(get('accuracy'), '.6f'):>9}  {tag}")
+
+
+# the overview: one line per level, median across replicates (medians, not means, so one bad replicate cannot move a column)
+def print_level_overview(system: str, points: list[dict], x_param: str) -> None:
+    by_level: dict = {}
+    for point in points:
+        if point.get("x") is not None:
+            by_level.setdefault(point["x"], []).append(point)
+    if not by_level:
+        return
+    ceiling_labels = {point.get("cpu_ceiling_label") for point in points if point.get("cpu_ceiling_label")}
+    print()
+    print("=" * 158)
+    print(f"  {system.upper()}   median per {x_param} level, {len(points)} run(s)")
+    if ceiling_labels:
+        print(f"  cpu ceiling: {' | '.join(sorted(ceiling_labels))}")
+    print("=" * 158)
+    print(TABLE_HEADER.format(x=x_param))
+    print("-" * 158)
+    for level in sorted(by_level):
+        rows = by_level[level]
+        numeric = ("elapsed_s", "effective_rate", "achieved_ratio", "queue_fill_p95_max",
+                   "queue_growth_at_p95_max", "dequeue_backlog_frac", "input_drops",
+                   "repair_drops",
+                   "sys_cpu_max_pct", "cpu_of_ceiling", "sys_cpu_sum_pct", "infra_cpu_max_pct",
+                   "sender_cpu_pct", "wrong", "accuracy")
+        values = {key: _median([row.get(key) for row in rows]) for key in numeric}
+        for key in ("queue_fill_p95_max_queue", "queue_fill_p95_max_node", "sys_cpu_max_node"):
+            values[key] = _mode([row.get(key) for row in rows])
+        saturated = sum(1 for row in rows if row["_class"]["saturated"])
+        invalid = sum(1 for row in rows if row["_class"]["invalid"])
+        tag = f"{saturated}/{len(rows)} SATURATED" if saturated else "ok"
+        if invalid:
+            tag += f"   !! {invalid} INVALID"
+        print(_row(str(level), str(len(rows)), values.get, tag))
+
+
+def print_system_table(system: str, points: list[dict], x_param: str) -> None:
+    ceiling_labels = {point.get("cpu_ceiling_label") for point in points if point.get("cpu_ceiling_label")}
+    print()
+    print("=" * 158)
     print(f"  {system.upper()}   ({len(points)} point(s), x = {x_param})")
-    print("=" * 132)
-    # resid% is the deficit left after the single largest inter send gap is removed
-    header = (f"{x_param:>8} {'eff/tgt':>8} {'resid%':>7} {'eff/s':>8} {'blkd':>5} {'maxsnd':>7} "
-              f"{'late%':>6} {'resync':>7} {'q_peak':>7} {'q_p95':>6} {'q_grow':>8} {'bklog':>6} {'drops':>6} "
-              f"{'cpu_max':>8} {'thr_max':>8} {'cpu_sum':>8} {'busiest':>16} {'sink':>6} {'sender':>7} {'acc':>8}  verdict")
-    print(header)
-    print("-" * 160)
+    if ceiling_labels:
+        print(f"  cpu ceiling: {' | '.join(sorted(ceiling_labels))}")
+    print("=" * 158)
+    print(TABLE_HEADER.format(x=x_param))
+    print("-" * 158)
     for point in points:
         verdict = point["_class"]
         if verdict["invalid"]:
@@ -815,38 +1101,19 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
             tag = "SATURATED"
         else:
             tag = "ok"
-        residual_pct = (100 * point['residual_deficit_frac']) if point.get('residual_deficit_frac') is not None else None
-        print(f"{fmt(point.get('x')):>8} "
-              f"{fmt(point.get('achieved_ratio'), '.3f'):>8} "
-              f"{fmt(residual_pct, '.2f'):>7} "
-              f"{fmt(point.get('effective_rate'), '.0f'):>8} "
-              f"{fmt(point.get('blocked_sends')):>5} "
-              f"{fmt(point.get('max_send_ms'), '.1f'):>7} "
-              f"{fmt(100 * point['late_frac'] if point.get('late_frac') is not None else None, '.1f'):>6} "
-              f"{fmt(point.get('resyncs')):>7} "
-              f"{fmt(point.get('queue_fill_max'), '.0%'):>7} "
-              f"{fmt(point.get('queue_fill_p95_max'), '.0%'):>6} "
-              f"{fmt(point.get('queue_growth_at_p95_max'), '+.0%'):>8} "
-              f"{fmt(point.get('dequeue_backlog_frac'), '.1%'):>6} "
-              f"{fmt(point.get('message_drops')):>6} "
-              f"{fmt(point.get('sys_cpu_max_pct'), '.1f'):>8} "
-              f"{fmt(point.get('sys_thread_max_pct'), '.1f'):>8} "
-              f"{fmt(point.get('sys_cpu_sum_pct'), '.1f'):>8} "
-              f"{fmt(point.get('sys_cpu_max_node')):>16} "
-              f"{fmt(point.get('infra_cpu_max_pct'), '.0f'):>6} "
-              f"{fmt(point.get('sender_cpu_pct'), '.1f'):>7} "
-              f"{fmt(point.get('accuracy'), '.6f'):>8}  {tag}")
+        print(_row(str(point.get("x")), "", point.get, tag))
         for reason in verdict["reasons"]:
-            print(f"{'':>8}   -> {reason}")
+            print(f"{'':>7}   -> {reason}")
         for reason in verdict["invalid"]:
-            print(f"{'':>8}   !! {reason}")
+            print(f"{'':>7}   !! {reason}")
         for reason in verdict.get("tooling_limited", []):
-            print(f"{'':>8}   ~~ {reason}")
+            print(f"{'':>7}   ~~ {reason}")
         for warning in verdict["warnings"]:
-            print(f"{'':>8}   ?? {warning}")
+            print(f"{'':>7}   ?? {warning}")
+        for note in verdict.get("notes", []):
+            print(f"{'':>7}   .. {note}")
 
 
-# aggregate the replicates at each level, then look for the knee across levels
 def summarise_system(system: str, points: list[dict], x_parameter: str, knee_frac: float = 0.5, x_direction: str = "increasing") -> dict:
 
     usable = [point for point in points
@@ -927,6 +1194,25 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         count = sum(1 for point in by_level[level] if point["_class"]["saturated"])
         print(f"      {level:>8}  {count}/{len(by_level[level])}  {mark}")
 
+    wrong_levels = {level: (sum(point.get("wrong") or 0 for point in by_level[level]),
+                            sum(1 for point in by_level[level] if point.get("wrong")))
+                    for level in ascending}
+    dirty = [level for level in ascending if wrong_levels[level][0]]
+    summary["levels_with_wrong_verdicts"] = dirty
+    summary["wrong_verdicts_total"] = sum(count for count, _ in wrong_levels.values())
+    if dirty:
+        print(f"    correctness: wrong final verdicts at {x_parameter} = {dirty}")
+        for level in dirty:
+            total, runs = wrong_levels[level]
+            print(f"      {level:>8}  {total} wrong verdict(s) across {runs}/{len(by_level[level])} "
+                  f"replicate(s)")
+        clean_side = [level for level in ascending if level not in dirty]
+        if clean_side:
+            print(f"      every other level was exactly correct. lowest level with wrong verdicts "
+                  f"= {min(dirty)}")
+    else:
+        print(f"    correctness: 100% at every level tested")
+
     if tooling_limited:
         print(f"    !! {len(tooling_limited)} point(s) EXCLUDED as load generator limited "
               f"(the sender ran short of cpu, so their throughput says nothing about the system):")
@@ -976,18 +1262,11 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
                           f"= {demand['suggested_x']} - extend the grid down to there, or raise the "
                           f"load instead")
         if fit:
-            what = ("busiest thread" if fit.get("metric") == "sys_thread_max_pct"
-                    else "busiest process")
-            print(f"    linear fit of the {what}: cpu% = {fit['intercept']:.1f} + "
-                  f"{fit['slope'] * 1000:.2f} per 1000 {x_parameter}  ->  100% of a core near "
-                  f"{x_parameter} = {fit['x_at_100']:,.0f}")
-            if fit.get("metric") == "sys_thread_max_pct":
-                print(f"    (extrapolation only, but a thread genuinely cannot exceed one core, so "
-                      f"this is a real ceiling rather than a threshold crossing)")
-            else:
-                print(f"    (extrapolation only, and 100% of one core is NOT the ceiling for a multi "
-                      f"threaded process - if cpu_max already exceeds 100% the work is spreading "
-                      f"across threads and this number means nothing. set resource_per_thread=true)")
+            print(f"    linear fit of the cpu used against its cap: cpu% = {fit['intercept']:.1f} + "
+                  f"{fit['slope'] * 1000:.2f} per 1000 {x_parameter}  ->  hits the "
+                  f"{fit['ceiling_pct']:.0f}% cap near {x_parameter} = {fit['x_at_100']:,.0f}")
+            print(f"    (extrapolation only - it says where the cpu cap would bind if nothing else "
+                  f"binds first, not that the system will get there)")
             summary["cpu_fit"] = fit
     elif x_direction == "increasing":
         print(f"    saturation starts at {x_parameter} = {knee} and holds above it")
@@ -1011,7 +1290,137 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
     return summary
 
 
-# how much cpu the capped processes actually want, per level, against the budget the cap grants
+# why a run with wrong verdicts is wrong
+def explain_wrong_verdicts(point: dict) -> tuple[str, str]:
+    def detail(key: str) -> str:
+        return ", ".join(f"{count}x {reason}" for reason, count in (point.get(key) or {}).items())
+
+    if point.get("input_drops"):
+        return "loss", (f"{point['input_drops']} input record(s) dropped "
+                        f"({detail('input_drop_reasons') or 'reason not recorded'}) - destroyed work "
+                        f"cannot be repaired by a late revision, so the wrong verdicts follow from it. "
+                        f"capacity, not a bug")
+    if point.get("repair_drops"):
+        return "repair", (f"{point['repair_drops']} repair(s) never landed "
+                          f"({detail('repair_drop_reasons')}) - the better verdict existed, the revision "
+                          f"mechanism could not apply it. result_already_final means the revocable "
+                          f"window closed before the correction arrived, and case_already_closed / "
+                          f"incomplete_peer_pull are the same timing story, so all three are capacity. "
+                          f"no_recorded_evaluation and no_local_decision are not, so check those")
+    if point.get("expected_pairs") and (point.get("pairs_in_db") or 0) < point["expected_pairs"]:
+        return "incomplete", (f"only {point.get('pairs_in_db')}/{point['expected_pairs']} pairs reached "
+                              f"the sink - verdicts that never arrived cannot be correct")
+    if point.get("absent") or point.get("spurious"):
+        return "incomplete", (f"absent={point.get('absent')} spurious={point.get('spurious')} - pairs are "
+                              f"missing or extra, so this is a delivery problem, not a checking problem")
+    if point.get("hard_killed") or point.get("incomplete_record_files"):
+        return "incomplete", "a node was killed or a record file was truncated - the run did not finish cleanly"
+    if point.get("settlement_reason") and point["settlement_reason"] != "complete":
+        return "incomplete", (f"settlement ended as {point['settlement_reason']!r}, not 'complete' - the run "
+                              f"may have been torn down before the last revisions landed")
+    stale = point.get("stale_result_drops") or 0
+    stale_note = (f". {stale} result(s) carrying an older revision were discarded, which is normal and "
+                  f"loses nothing" if stale else "")
+    if point["_class"]["saturated"]:
+        return "unexplained_overloaded", ("the point is saturated but nothing was dropped and everything "
+                                          "arrived, so overload does not explain the wrong verdicts by "
+                                          "itself - most likely a race that outlived its correction "
+                                          "window" + stale_note)
+    return "bug", ("no drops, nothing missing, and no saturation signal - the system was keeping up and "
+                   "still got verdicts wrong. that is a code or config fault" + stale_note)
+
+
+def _grep_hint(point: dict) -> list[str]:
+    run_dir = point.get("run_dir") or "<run_dir>"
+    system = point.get("system", "<system>")
+    records = f"{run_dir}/records/{system}"
+    types = "|".join(DROP_RECORDS)
+    return [f"""grep -hoE '"type":"({types})"' {records}/node-*.jsonl | sort | uniq -c""",
+            f"""grep -ho '"reason":"[^"]*"' {records}/node-*.jsonl | sort | uniq -c | sort -rn""",
+            f"""grep -lE '"type":"({types})"' {records}/node-*.jsonl"""]
+
+
+def print_runs_to_investigate(points_by_system: dict, summaries: dict, x_parameter: str) -> None:
+    buckets = {"bug": [], "repair": [], "unexplained_overloaded": [], "loss": [], "incomplete": [],
+               "invalid": []}
+    for system, points in points_by_system.items():
+        sustainable = (summaries.get(system) or {}).get("sustainable_x")
+        for point in points:
+            verdict = point["_class"]
+            nominal = (sustainable is not None and point.get("x") is not None
+                       and point["x"] <= sustainable)
+            if verdict["invalid"]:
+                buckets["invalid"].append((point, "; ".join(verdict["invalid"]), nominal))
+                continue
+            if not point.get("wrong"):
+                continue
+            kind, why = explain_wrong_verdicts(point)
+            buckets[kind].append((point, why, nominal))
+
+    if not any(buckets.values()):
+        print()
+        print("  RUNS TO INVESTIGATE: none. every run finished cleanly and every wrong verdict is "
+              "accounted for (there were none).")
+        return
+
+    print()
+    print("=" * 158)
+    print("  RUNS TO INVESTIGATE")
+    print("=" * 158)
+
+    def dump(title: str, rows: list, advice: str, needs_a_look: bool) -> None:
+        if not rows:
+            return
+        rows = sorted(rows, key=lambda r: (r[0]["system"], r[0].get("x") or 0))
+        print()
+        print(f"  {title}  ({len(rows)} run(s))")
+        for point, why, nominal in rows:
+            bracket = "  [INSIDE THE NOMINAL BRACKET]" if nominal else ""
+            print(f"    {point['system']:<14} {x_parameter}={point.get('x'):<8} {point.get('run_id')}"
+                  f"{bracket}")
+            print(f"      {point.get('wrong')} wrong, accuracy {fmt(point.get('accuracy'), '.6f')}: {why}")
+            if needs_a_look:
+                for line in _grep_hint(point):
+                    print(f"      $ {line}")
+        print(f"    -> {advice}")
+        if not needs_a_look:
+            print(f"       to look at one of them:")
+            for line in _grep_hint(rows[0][0]):
+                print(f"       $ {line}")
+
+    dump("!! BUG SUSPECTS", buckets["bug"],
+         "nothing about load explains these. fix the cause and re-run them. any that are marked INSIDE THE "
+         "NOMINAL BRACKET also contaminate every downstream experiment, not just this sweep.", True)
+    dump("?? WRONG VERDICTS EXPLAINED BY CORRECTIONS THAT COULD NOT BE APPLIED", buckets["repair"],
+         "the checking was right, the repair never landed. read the reasons: the timing ones are capacity, "
+         "the other two are not.", True)
+    dump("?? WRONG VERDICTS UNDER LOAD, NOT EXPLAINED BY LOSS", buckets["unexplained_overloaded"],
+         "saturated, but nothing was dropped and nothing is missing. check the revision history of a few "
+         "pairs before deciding whether this is capacity or a correction window that is too short.", True)
+    dump("ok WRONG VERDICTS EXPLAINED BY DROPPED MESSAGES", buckets["loss"],
+         "expected: the system was past capacity and threw work away. not a bug. keep them as evidence of "
+         "what saturation costs, or raise the queue sizes / lower the rate if you want them clean.", True)
+    dump("ok WRONG VERDICTS EXPLAINED BY INCOMPLETE DELIVERY", buckets["incomplete"],
+         "the verdicts never had a chance to be right. treat these as invalid rather than as correctness "
+         "results.", False)
+    if buckets["invalid"]:
+        print()
+        print(f"  !! INVALID / INCOMPLETE RUNS  ({len(buckets['invalid'])} run(s))")
+        for point, why, nominal in sorted(buckets["invalid"],
+                                          key=lambda r: (r[0]["system"], r[0].get("x") or 0)):
+            bracket = "  [INSIDE THE NOMINAL BRACKET]" if nominal else ""
+            print(f"    {point['system']:<14} {x_parameter}={point.get('x'):<8} "
+                  f"{point.get('run_id')}{bracket}")
+            print(f"      {why}")
+        print("    -> these are excluded from the knee above, but extract_metrics and plot_results WILL "
+              "still pick them up.")
+        print("       investigate them, then delete the run directories and re-run those runs "
+              "(run_simulations skips whatever is still on disk):")
+        for run_dir in sorted({point.get("run_dir") for point, _why, _nominal in buckets["invalid"]
+                               if point.get("run_dir")}):
+            print(f"       rm -rf {run_dir}")
+
+
 def cpu_demand(by_level: dict, levels: list, x_parameter: str) -> dict | None:
     per_level: dict = {}
     for level in levels:
@@ -1038,8 +1447,9 @@ def cpu_demand(by_level: dict, levels: list, x_parameter: str) -> dict | None:
 
 
 def extrapolate_cpu(points: list[dict]) -> dict | None:
-    key = ("sys_thread_max_pct" if any(point.get("sys_thread_max_pct") is not None for point in points)
-           else "sys_cpu_max_pct")
+    if not any(point.get("cpu_of_ceiling") is not None for point in points):
+        return None
+    key = "cpu_used_pct"
     pairs = [(point["x"], point[key]) for point in points
              if point.get("x") is not None and point.get(key) is not None]
     if len(pairs) < 3:
@@ -1054,8 +1464,9 @@ def extrapolate_cpu(points: list[dict]) -> dict | None:
     intercept = my - slope * mx
     if slope <= 0:
         return None
-    return {"slope": slope, "intercept": intercept, "x_at_100": (100 - intercept) / slope,
-            "metric": key}
+    ceiling = next((point["cpu_ceiling_pct"] for point in points if point.get("cpu_ceiling_pct")), 100.0)
+    return {"slope": slope, "intercept": intercept, "x_at_100": (ceiling - intercept) / slope,
+            "metric": key, "ceiling_pct": ceiling}
 
 
 def main() -> int:
@@ -1064,11 +1475,11 @@ def main() -> int:
     parser.add_argument("--x-param", default="rate", help="the swept parameter (default: rate)")
     parser.add_argument("--systems", nargs="*", default=list(SYSTEMS))
     parser.add_argument("--quiet", action="store_true", help="no progress output")
-    parser.add_argument("--achieved-ratio", type=float, default=0.95, help="saturated below this effective/target ratio (default 0.95)")
+    parser.add_argument("--achieved-ratio", type=float, default=0.98, help="saturated below this effective/target ratio (default 0.95)")
     parser.add_argument("--sustained-ratio", type=float, default=0.95,
                         help="a level whose overall achieved ratio is low but whose MEDIAN per second rate is at least "
                              "this fraction of target is treated as stalled once, not saturated (default 0.95). set to 0 to always trust the overall ratio")
-    parser.add_argument("--cpu-threshold", type=float, default=85.0, help="saturated above this cpu%% of one core on the busiest process (default 85)")
+    parser.add_argument("--cpu-threshold", type=float, default=80.0, help="cpu %% of the cap that counts as exhausted WHEN the delivered rate also fell short (default 80). runs without a cpu cap have no ceiling, so this rule cannot fire for them")
     parser.add_argument("--queue-fill", type=float, default=0.25,
                         help="a queue counts as saturated when its p95 depth exceeds this fraction of capacity AND "
                              "its depth is still growing (see --queue-slope). a peak above it is only a warning, "
@@ -1079,13 +1490,25 @@ def main() -> int:
                              "relative to capacity and window length is what makes it comparable between a 1024 slot "
                              "gossip queue and an 8192 slot event queue, and between a 65s and a 13s run. a plain "
                              "'slope > 0' test fires on measurement noise")
-    parser.add_argument("--residual-deficit-frac", type=float, default=0.01,
-                        help="saturated when the run takes this fraction longer than its ideal duration AFTER the "
-                             "single largest inter send gap is subtracted (default 0.01 = 1%%). the subtraction "
-                             "matters because a fixed stall eats a growing share of a shrinking run, which makes "
-                             "the raw achieved/target ratio fall with rate for purely mechanical reasons")
-    parser.add_argument("--blocked-frac", type=float, default=0.001, help="saturated above this fraction of sends blocked >1ms (default 0.001)")
-    parser.add_argument("--max-send-ms", type=float, default=50.0, help="saturated above this single worst socket write in ms (default 50)")
+    parser.add_argument("--hot-cpu-pct", type=float, default=90.0,
+                        help="nodes at or above this %% of ONE CORE are listed under each point as a hot "
+                             "node (default 90). informational only - it never decides saturation, it just "
+                             "shows where the load sat")
+    parser.add_argument("--only-max-node", action="store_true",
+                        help="when a saturation threshold is crossed, name only the single worst node "
+                             "instead of every node that crossed it. the default lists all of them, "
+                             "because whether one node or twenty is over the line is the difference "
+                             "between a hot spot and a system wide limit")
+    parser.add_argument("--per-run", action="store_true",
+                        help="also print one row per replicate with the signals it fired. the default is the "
+                             "median-per-level overview only")
+    parser.add_argument("--cpu-pinned", type=float, default=95.0,
+                        help="a node (or the deployment) at this %% of its cpu cap counts as saturated on its "
+                             "own, with no second signal needed (default 95)")
+    parser.add_argument("--stall-ms", type=float, default=1000.0,
+                        help="saturated when a single socket write blocked for at least this long (default 1000 = 1s). "
+                             "this is a node that stopped reading its socket altogether, not slow processing - keep it "
+                             "high enough that ordinary scheduling jitter cannot reach it")
     parser.add_argument("--sender-cpu-threshold", type=float, default=60.0,
                         help="above this sender cpu%% of one core, a lone achieved/target shortfall is attributed to the load generator rather than the system (default 60)")
     parser.add_argument("--x-direction", choices=["increasing", "decreasing"], default=None,
@@ -1117,15 +1540,14 @@ def main() -> int:
         print(error, file=sys.stderr)
         return 2
 
-    # a resource sweep saturates at the LOW end. inferred from --x-param unless forced
+    # a resource sweep for example saturates at the low end, so inferred from --x-param unless forced
     x_direction = args.x_direction or infer_x_direction(args.x_param)
 
     thresholds = {"achieved_ratio": args.achieved_ratio, "sustained_ratio": args.sustained_ratio,
-                  "cpu_pct": args.cpu_threshold,
-                  "queue_fill": args.queue_fill, "blocked_frac": args.blocked_frac,
-                  "queue_growth": args.queue_growth,
-                  "residual_deficit_frac": args.residual_deficit_frac,
-                  "max_send_ms": args.max_send_ms, "sender_cpu_pct": args.sender_cpu_threshold,
+                  "cpu_pct": args.cpu_threshold, "cpu_pinned": args.cpu_pinned,
+                  "queue_fill": args.queue_fill, "queue_growth": args.queue_growth,
+                  "stall_ms": args.stall_ms, "sender_cpu_pct": args.sender_cpu_threshold,
+                  "only_max_node": args.only_max_node, "hot_cpu_pct": args.hot_cpu_pct,
                   "infra_queue_fill_warn": args.infra_queue_fill_warn}
 
     run_directories = sorted(entry for entry in args.experiment_dir.iterdir() if (entry / "run.json").exists()) \
@@ -1180,13 +1602,7 @@ def main() -> int:
     if filters:
         wanted = ", ".join(key + "=" + ",".join(values) for key, values in filters)
         print(f"filter: {wanted}  ({len(run_directories)} run(s) kept, {filtered_out} filtered out)")
-    print(f"rule: saturated if blocked_sends>{args.blocked_frac:.2%} of sends OR max_send>{args.max_send_ms}ms "
-          f"OR the residual deficit >{args.residual_deficit_frac:.1%} of the run OR any message_drop "
-          f"OR a queue is at >{args.queue_fill:.0%} of capacity at p95 AND still growing "
-          f"(trend gains >{args.queue_growth:.0%} of capacity over the window) "
-          f"OR busiest process >{args.cpu_threshold}% of a core")
-    print("      residual deficit = time over the ideal duration MINUS the single largest inter send gap, so a one-off stall does not read as a throughput decline")
-    print("      a queue PEAK above the threshold is only a warning: one sample is not a standing backlog, and peak fill is not comparable across queues of different capacity")
+    print_legend(thresholds)
     if args.infra_roles or args.infra_queues:
         print(f"excluded from every signal: role(s) {args.infra_roles or 'none'}, "
               f"queue(s) {args.infra_queues or 'none'} - evaluation scaffolding, still reported "
@@ -1216,6 +1632,12 @@ def main() -> int:
 
     for system in args.systems:
         if points_by_system[system]:
+            print_level_overview(system, points_by_system[system], args.x_param)
+    if not args.per_run:
+        print()
+        print("  (per run detail suppressed - pass --per-run to see every replicate and the signals it fired)")
+    for system in args.systems:
+        if points_by_system[system] and args.per_run:
             print_system_table(system, points_by_system[system], args.x_param)
 
     saturated_infra = [point for point in all_points
@@ -1245,6 +1667,8 @@ def main() -> int:
     print("=" * 132)
     summaries_by_system = {system: summarise_system(system, points_by_system[system], args.x_param, args.knee_frac, x_direction)
                            for system in args.systems if points_by_system[system]}
+
+    print_runs_to_investigate(points_by_system, summaries_by_system, args.x_param)
 
     print()
     unbracketed_systems = [system for system, summary in summaries_by_system.items()
