@@ -21,7 +21,9 @@ import math
 import threading
 import time
 import fnmatch
+import gzip
 import tomllib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -955,3 +957,259 @@ class Progress:
             self._line_open = False
         print(message, flush=True)
         self._render(self._last_detail, force=True)
+
+
+BK_TYPES = ("set", "mult", "seq")
+DISCLOSURE_INDEX_NAME = "disclosure_index.json.gz"
+DISCLOSURE_INDEX_SCHEMA = 1
+
+
+def load_ground_truth(manifest: Path) -> dict:
+
+    cases: dict[str, dict] = {}
+    with open(manifest) as manifest_file:
+        for line in manifest_file:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            case_id, event_id = row.get("case_id"), row.get("event_id")
+            if case_id is None or event_id is None:
+                continue
+            case = cases.setdefault(case_id, {"activities": Counter(), "trace": []})
+            case["activities"][event_id] += 1
+            case["trace"].append(event_id)
+    return {case_id: {"activities": dict(case["activities"]), "trace": tuple(case["trace"])}
+            for case_id, case in cases.items()}
+
+
+
+# the disclosure measures of rafiei and van der aalst (2021) evaluated against the ground truth log
+#
+# the log is collapsed to its variants (unique traces) with their frequencies
+# a candidate background knowledge selects a subset of variants and the multiset of matching traces comes from their frequencies
+# the variants containing a given activity are precomputed as bitmasks, so resolving a candidate intersects a few integers instead of scanning the log
+class DisclosureIndex:
+
+    def __init__(self, ground_truth_event_log: dict | None = None, variants=None, counts=None):
+        if variants is not None:
+            # rebuilt from a prebuilt index file
+            self.variants = [tuple(variant) for variant in variants]
+            self.counts = list(counts or [])
+        else:
+            variant_counts = Counter(case["trace"] for case in (ground_truth_event_log or {}).values())
+            self.variants = list(variant_counts.keys())
+            self.counts = [variant_counts[variant] for variant in self.variants]
+        self.total_traces = sum(self.counts)
+
+        self.activity_mask: dict[str, int] = {} # activity -> bitmask of variants containing it
+        self.count_mask: dict[tuple[str, int], int] = {} # (activity, k) -> variants with >= k of it
+        for index, variant in enumerate(self.variants):
+            bit = 1 << index
+            for activity, occurrences in Counter(variant).items():
+                self.activity_mask[activity] = self.activity_mask.get(activity, 0) | bit
+                for k in range(1, occurrences + 1):
+                    self.count_mask[(activity, k)] = self.count_mask.get((activity, k), 0) | bit
+
+        self._mask_cache: dict[tuple, int] = {}
+        self._stats_cache: dict[int, tuple[int, float]] = {}
+
+    # bitmask of the variants matching a candidate background knowledge
+    def _mask(self, bk_type: str, candidate) -> int:
+        cache_key = (bk_type, candidate)
+        cached = self._mask_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        mask = (1 << len(self.variants)) - 1
+        if bk_type == "set":
+            for activity in candidate:
+                mask &= self.activity_mask.get(activity, 0)
+                if not mask:
+                    break
+        elif bk_type == "mult":
+            for activity, occurrences in candidate:
+                mask &= self.count_mask.get((activity, occurrences), 0)
+                if not mask:
+                    break
+        else: # seq: prune with the set mask first, then verify the subsequence directly
+            for activity in set(candidate):
+                mask &= self.activity_mask.get(activity, 0)
+                if not mask:
+                    break
+            for index in list(_bits(mask)):
+                if not _is_subsequence(candidate, self.variants[index]):
+                    mask &= ~(1 << index)
+
+        self._mask_cache[cache_key] = mask
+        return mask
+
+    # |proj(x)| and ent(proj(x)) / max_ent(proj(x)) for one candidate
+    def stats(self, bk_type: str, candidate) -> tuple[int, float]:
+        mask = self._mask(bk_type, candidate)
+        cached = self._stats_cache.get(mask)
+        if cached is not None:
+            return cached
+
+        matching = [self.counts[index] for index in _bits(mask)]
+        total = sum(matching)
+        if total == 0:
+            result = (0, 0.0)
+        elif len(matching) <= 1:
+            # a single matching variant: no uncertainty about the trace is left (entropy ratio = 0, trace disclosure contribution = 1)
+            result = (total, 0.0)
+        else:
+            entropy = 0.0
+            for count in matching:
+                frequency = count / total
+                entropy -= frequency * math.log2(frequency)
+            ratio = min(1.0, max(0.0, entropy / math.log2(len(matching))))
+            result = (total, ratio)
+
+        self._stats_cache[mask] = result
+        return result
+
+
+# iterate the set bit positions of a bitmask
+def _bits(mask: int):
+    while mask:
+        lowest = mask & -mask
+        yield lowest.bit_length() - 1
+        mask ^= lowest
+
+
+def _is_subsequence(candidate: tuple, trace: tuple) -> bool:
+    position = 0
+    for activity in trace:
+        if position < len(candidate) and activity == candidate[position]:
+            position += 1
+    return position == len(candidate)
+
+
+# the background knowledge that a set of named activities gives about one case, per type
+def build_candidates(named: set[str], truth_case: dict, bk_types) -> dict:
+    candidates = {}
+    if "set" in bk_types:
+        candidates["set"] = frozenset(named)
+    if "mult" in bk_types:
+        candidates["mult"] = tuple(sorted((activity, count)
+                                          for activity, count in truth_case["activities"].items()
+                                          if activity in named))
+    if "seq" in bk_types:
+        candidates["seq"] = tuple(activity for activity in truth_case["trace"] if activity in named)
+    return candidates
+
+
+def log_baseline_disclosure(ground_truth_event_log: dict, index, bk_types) -> dict:
+    distinct_traces = (len(index.variants) if index is not None
+                       else len({case["trace"] for case in ground_truth_event_log.values()}))
+    activities_per_case = [float(len(case["activities"])) for case in ground_truth_event_log.values()]
+    events_per_case = [float(len(case["trace"])) for case in ground_truth_event_log.values()]
+    baseline = {"cases": len(ground_truth_event_log),
+                "events": int(sum(events_per_case)),
+                "distinct_traces": distinct_traces,
+                "trace_uniqueness": (distinct_traces / len(ground_truth_event_log))
+                                    if ground_truth_event_log else 0.0,
+                "distinct_activities": len({activity for case in ground_truth_event_log.values()
+                                            for activity in case["activities"]}),
+                "background_knowledge_size_max": percentiles(activities_per_case, points=(5, 50, 95)),
+                "events_per_case": percentiles(events_per_case, points=(5, 50, 95))}
+    if index is None:
+        return baseline
+    for bk_type in bk_types:
+        uniqueness, entropy_ratios = [], []
+        for case in ground_truth_event_log.values():
+            candidate = build_candidates(set(case["activities"]), case, (bk_type,))[bk_type]
+            matching_traces, entropy_ratio = index.stats(bk_type, candidate)
+            if matching_traces:
+                uniqueness.append(1.0 / matching_traces)
+                entropy_ratios.append(entropy_ratio)
+        baseline[f"case_disclosure_{bk_type}"] = (sum(uniqueness) / len(uniqueness)) if uniqueness else 0.0
+        baseline[f"trace_disclosure_{bk_type}"] = (max(0.0, 1.0 - sum(entropy_ratios) / len(entropy_ratios)) if entropy_ratios else 0.0)
+    return baseline
+
+
+def load_disclosure_index(path: Path) -> dict | None:
+    try:
+        with gzip.open(path, "rt") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (payload.get("schema_version") or 0) < 1 or "cases" not in payload:
+        return None
+    return payload
+
+
+def index_path_for(manifest: Path) -> Path:
+    return manifest.parent / DISCLOSURE_INDEX_NAME
+
+
+# how unique the traces are decides whether the variant index is worth building at all: on a
+# synthetic stream nearly every trace is its own variant, so the disclosure measures describe the
+# generator rather than the deployment. counting distinct traces is cheap and needs no index
+def trace_uniqueness(log: dict) -> float:
+    if not log:
+        return 0.0
+    return len({case["trace"] for case in log.values()}) / len(log)
+
+
+# build the index next to the manifest unless it is already there. returns (path, action) where
+# action is one of "existing", "built", "skipped"
+def ensure_index(manifest: Path, bk_types: tuple[str, ...] | None = ("set", "mult", "seq"),
+                 force: bool = False, uniqueness_max: float = 0.9,
+                 out_path: Path | None = None, log=print) -> tuple[Path | None, str]:
+    if manifest is None or not Path(manifest).exists():
+        return None, "skipped"
+    manifest = Path(manifest)
+    out_path = out_path or index_path_for(manifest)
+    if out_path.exists() and not force:
+        return out_path, "existing"
+
+    parsed = load_ground_truth(manifest)
+    if not parsed:
+        if log:
+            log(f"    disclosure index: {manifest} parsed to no cases, skipped")
+        return None, "skipped"
+
+    wanted = tuple(bk_types or ())
+    uniqueness = trace_uniqueness(parsed)
+    # bk_types=None means "decide from the log itself"
+    if bk_types is None:
+        wanted = () if uniqueness > uniqueness_max else ("set", "mult", "seq")
+    if wanted and uniqueness > uniqueness_max and log:
+        log(f"    disclosure index: trace uniqueness {uniqueness:.3f} is above {uniqueness_max:.2f}, "
+            f"so the disclosure measures mostly describe the stream generator here")
+
+    payload = build_payload(manifest, parsed, wanted)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(out_path, "wt") as handle:
+        json.dump(payload, handle)
+    if log:
+        baseline = payload["baselines"]["|".join(wanted)]
+        log(f"    disclosure index: wrote {out_path.name} "
+            f"({out_path.stat().st_size / 1e6:.1f} MB, {baseline['cases']} cases, "
+            f"trace uniqueness {baseline['trace_uniqueness']:.3f}"
+            + (f", variant index for {', '.join(wanted)})" if wanted else ", log only)"))
+    return out_path, "built"
+
+
+def build_payload(manifest: Path, log: dict, bk_types: tuple[str, ...]) -> dict:
+    index = DisclosureIndex(log) if bk_types else None
+    baseline = log_baseline_disclosure(log, index, bk_types)
+
+    payload = {
+        "schema_version": DISCLOSURE_INDEX_SCHEMA,
+        "manifest": str(manifest.resolve()),
+        "manifest_bytes": manifest.stat().st_size,
+        "bk_types": list(bk_types),
+        # the compacted log
+        "cases": {case_id: {"activities": case["activities"], "trace": list(case["trace"])}
+                  for case_id, case in log.items()},
+        # the log baseline under the bk types this file was built with
+        "baselines": {"|".join(bk_types): baseline},
+    }
+    if index is not None:
+        # activity_mask and count_mask are rebuilt from the variants in a single pass, so only the variants and their frequencies are stored
+        payload["variants"] = [list(variant) for variant in index.variants]
+        payload["variant_counts"] = list(index.counts)
+    return payload

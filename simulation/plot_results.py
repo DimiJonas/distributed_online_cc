@@ -96,6 +96,15 @@ def find_nested_value(data, path: str):
     return current
 
 
+def derive_params(params: dict) -> dict:
+    params = dict(params)
+    params["netem_ms"] = params.get("netem_ms", 0)
+    node_count = params.get("nodes")
+    if isinstance(node_count, int) and not isinstance(node_count, bool) and node_count > 1:
+        params["constraint_nodes"] = node_count - 1
+    return params
+
+
 # parameters and metrics of a (run, system) pair
 class Row:
 
@@ -112,10 +121,7 @@ class Row:
         # check if cap is set - consider as swept parameter if so
         if cap.get("mode") and cap.get("mode") != "off":
             self.params.setdefault("cpu_cap_cores", cap.get("cores"))
-        self.params["netem_ms"] = self.params.get("netem_ms", 0)
-        node_count = self.params.get("nodes")
-        if isinstance(node_count, int) and not isinstance(node_count, bool) and node_count > 1:
-            self.params["constraint_nodes"] = node_count - 1
+        self.params = derive_params(self.params)
         self.processes = (self.metrics.get("nodes") or {}).get("by_role") or {}
 
     def value(self, path: str):
@@ -152,7 +158,7 @@ def load_rows(results: Path, pattern: str | None, progress: Progress | None) -> 
                 continue
             for system, block in privacy_data.get("systems", {}).items():
                 key = (metrics.get("experiment"), metrics.get("run_id"), system)
-                privacy[key] = {"params": metrics.get("params") or {},
+                privacy[key] = {"params": derive_params(metrics.get("params") or {}),
                                 "local": block.get("local_attacker", {}),
                                 "global": block.get("global_attacker", {}),
                                 "ground_truth": privacy_data.get("ground_truth", {})}
@@ -737,24 +743,233 @@ def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
 
 # how many nodes an attacker needs before a case can be reconstructed 
 def min_nodes_figure(privacy, experiment, out_path, formats):
-    values: dict[str, list[float]] = defaultdict(list)
+    by_length: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    by_length_min: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+    histogram: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    headline: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    coverage: dict[str, list[float]] = defaultdict(list)
+
     for (exp, _run_id, system), block in privacy.items():
         if exp != experiment:
             continue
-        median = (block["local"].get("min_nodes_full_case") or {}).get("p50")
-        if median is not None:
-            values[system].append(median)
-    if not values:
+        stats = block["local"].get("min_nodes_full_case") or {}
+        if not stats:
+            continue
+        for key in ("min", "p5", "p50", "p95", "max"):
+            if stats.get(key) is not None:
+                headline[system][key].append(float(stats[key]))
+        covered, total = stats.get("cases_covered"), stats.get("cases_total")
+        if covered is not None and total:
+            coverage[system].append(covered / total)
+        for count, cases in (stats.get("histogram") or {}).items():
+            histogram[system][int(count)] += int(cases)
+        for length, group in (stats.get("by_distinct_activities") or {}).items():
+            if group.get("p50") is not None:
+                by_length[system][int(length)].append(float(group["p50"]))
+            if group.get("min") is not None:
+                by_length_min[system][int(length)].append(float(group["min"]))
+
+    if not headline:
         return None
-    figure, axes = plt.subplots(figsize=(4.4, 3.4))
-    systems = sorted(values)
-    medians = [summarize(values[system])[0] for system in systems]
-    axes.bar(systems, medians, color=[SYSTEM_STYLE.get(s, {}).get("color", "#888") for s in systems],
-             width=0.5)
-    for index, value in enumerate(medians):
-        axes.text(index, value, f"{value:.0f}", ha="center", va="bottom", fontsize=9)
-    style_axes(axes, "nodes needed to reconstruct a case (median case)", "", "compromised nodes")
-    figure.tight_layout()
+
+    figure, (left, middle, right) = plt.subplots(1, 3, figsize=(13.2, 3.8))
+    systems = sorted(headline)
+
+    # left: nodes needed against the length of the case
+    all_lengths: set[int] = set()
+    for system in systems:
+        style = SYSTEM_STYLE.get(system, {})
+        lengths = sorted(by_length.get(system, {}))
+        if not lengths:
+            continue
+        all_lengths |= set(lengths)
+        left.plot(lengths, [summarize(by_length[system][length])[0] for length in lengths],
+                  marker=style.get("marker", "o"), markersize=3.5, linewidth=1.4,
+                  color=style.get("color", "#888"), label=f"{style.get('label', system)} (median case)")
+        if by_length_min.get(system):
+            left.plot(lengths, [summarize(by_length_min[system][length])[0] for length in lengths],
+                      linestyle="--", linewidth=1.0, color=style.get("color", "#888"), alpha=0.7,
+                      label=f"{style.get('label', system)} (easiest case)")
+    if all_lengths:
+        span = [min(all_lengths), max(all_lengths)]
+        left.plot(span, span, linestyle=":", linewidth=1.4, color="#111111", zorder=6,
+                  label="one node per activity")
+    style_axes(left, "nodes needed against case length", "distinct activities in the case",
+               "compromised nodes")
+    left.legend(fontsize=7)
+
+    # middle: the distribution the median summarises
+    for system in systems:
+        counts = histogram.get(system) or {}
+        total = sum(counts.values())
+        if not total:
+            continue
+        style = SYSTEM_STYLE.get(system, {})
+        ordered = sorted(counts)
+        middle.bar([count for count in ordered], [counts[count] / total for count in ordered],
+                   width=0.8, alpha=0.55, color=style.get("color", "#888"),
+                   label=style.get("label", system))
+    style_axes(middle, "distribution over cases", "compromised nodes", "share of cases")
+    middle.legend(fontsize=7)
+
+    # right: the headline numbers, easiest case next to the typical one
+    labels = [("min", "easiest case"), ("p5", "p5"), ("p50", "median case")]
+    width = 0.8 / max(1, len(systems))
+    for index, system in enumerate(systems):
+        style = SYSTEM_STYLE.get(system, {})
+        positions = [position + index * width for position in range(len(labels))]
+        values = [summarize(headline[system].get(key, [0]))[0] for key, _text in labels]
+        right.bar(positions, values, width=width, color=style.get("color", "#888"),
+                  label=style.get("label", system))
+        for position, value in zip(positions, values):
+            right.text(position, value, f"{value:.0f}", ha="center", va="bottom", fontsize=8)
+    right.set_xticks([position + width * (len(systems) - 1) / 2 for position in range(len(labels))])
+    right.set_xticklabels([text for _key, text in labels], fontsize=8)
+    style_axes(right, "median across runs", "", "compromised nodes")
+    right.legend(fontsize=7)
+
+    dropped = [f"{SYSTEM_STYLE.get(system, {}).get('label', system)}: "
+               f"{summarize(coverage[system])[0]:.0%} of cases coverable"
+               for system in systems if coverage.get(system) and summarize(coverage[system])[0] < 0.999]
+    subtitle = f"{experiment}: nodes needed to reconstruct a case"
+    if dropped:
+        subtitle += "   (" + "; ".join(dropped) + ")"
+    figure.suptitle(subtitle, fontsize=11)
+    figure.tight_layout(rect=(0, 0, 1, 0.93))
+    return write_figure(figure, out_path, formats)
+
+
+# nodes needed against the number of distinct activities in the case
+NODES_VS_ACTIVITIES_PANELS = [("min", "easiest case (min over cases)"),
+                              ("p50", "median case"),
+                              ("max", "hardest case (max over cases)")]
+
+
+# entries is a list of (system, privacy block) for the runs this figure should cover
+def _nodes_vs_activities_panels(entries, out_path, formats, subtitle_prefix: str):
+    # system -> statistic -> distinct activity count -> one value per run
+    collected: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    cases_at: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    exact: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+
+    for system, block in entries:
+        groups = ((block["local"].get("min_nodes_full_case") or {})
+                  .get("by_distinct_activities") or {})
+        for distinct, group in groups.items():
+            distinct = int(distinct)
+            cases = int(group.get("cases") or 0)
+            cases_at[system][distinct] += cases
+            for statistic, _title in NODES_VS_ACTIVITIES_PANELS:
+                if group.get(statistic) is not None:
+                    collected[system][statistic][distinct].append(float(group[statistic]))
+            exact[system][1] += cases
+            if group.get("min") == distinct and group.get("max") == distinct:
+                exact[system][0] += cases
+
+    if not collected:
+        return None, {}
+
+    all_x = {distinct for system in collected for statistic in collected[system]
+             for distinct in collected[system][statistic]}
+    upper = max(all_x) + 1
+    figure, axes_row = plt.subplots(1, 3, figsize=(13.5, 4.8))
+
+    for axes, (statistic, panel_title) in zip(axes_row, NODES_VS_ACTIVITIES_PANELS):
+        for system in sorted(collected):
+            points = collected[system].get(statistic) or {}
+            if not points:
+                continue
+            style = SYSTEM_STYLE.get(system, {})
+            xs = sorted(points)
+            ys = [summarize(points[x])[0] for x in xs]
+            weights = [cases_at[system][x] for x in xs]
+            largest = max(weights) or 1
+            axes.plot(xs, ys, linewidth=1.4, color=style.get("color", "#888"), zorder=3,
+                      label=style.get("label", system))
+            axes.scatter(xs, ys, s=[12 + 80 * weight / largest for weight in weights],
+                         color=style.get("color", "#888"), alpha=0.75, zorder=4,
+                         marker=style.get("marker", "o"))
+        axes.plot([0, upper], [0, upper], linestyle=":", linewidth=1.4, color="#111111", zorder=6,
+                  label="one node per activity (y = x)")
+        axes.set_xlim(0, upper)
+        axes.set_ylim(0, upper)
+        axes.set_aspect("equal", adjustable="box")
+        style_axes(axes, panel_title, "distinct activities in the case",
+                   "nodes needed to reconstruct the case")
+        axes.legend(fontsize=7, loc="upper left", framealpha=0.9)
+
+    notes = [f"{SYSTEM_STYLE.get(system, {}).get('label', system)}: "
+             f"{on_line / total:.0%} of cases need exactly one node per distinct activity"
+             for system, (on_line, total) in sorted(exact.items()) if total]
+    figure.suptitle(f"{subtitle_prefix}: nodes needed against distinct activities in the case"
+                    + ("   (" + "; ".join(notes) + ")" if notes else ""), fontsize=11)
+    figure.tight_layout(rect=(0, 0, 1, 0.94))
+    exact_counts = {name: tuple(counts) for name, counts in exact.items()}
+    return write_figure(figure, out_path, formats), exact_counts
+
+
+# parameters that influence role distribution in sweeps
+PLACEMENT_PARAMS = {"constraint_nodes", "nodes", "repeat"}
+
+
+def min_nodes_vs_activities_figures(privacy, experiment, target, formats, sweep_key) -> list[Path]:
+    if sweep_key not in PLACEMENT_PARAMS:
+        sweep_key = None
+    entries = [(block["params"].get(sweep_key) if sweep_key else None, system, block)
+               for (exp, _run_id, system), block in privacy.items() if exp == experiment]
+    if not entries:
+        return []
+    values = sorted({value for value, _system, _block in entries if value is not None},
+                    key=lambda value: (isinstance(value, str), value))
+
+    if sweep_key is None or len(values) <= 1:
+        result = _nodes_vs_activities_panels([(system, block) for _value, system, block in entries],
+                                             target / "privacy_nodes_vs_activities", formats,
+                                             experiment)
+        return [result[0]] if result and result[0] else []
+
+    written: list[Path] = []
+    exact_by_value: dict = {}
+    for value in values:
+        subset = [(system, block) for other, system, block in entries if other == value]
+        # a filename fragment that survives a float or a string value
+        tag = str(value).replace(".", "p").replace("/", "_").replace(" ", "")
+        result = _nodes_vs_activities_panels(
+            subset, target / f"privacy_nodes_vs_activities__{sweep_key}{tag}", formats,
+            f"{experiment}, {sweep_key} = {value}")
+        if result and result[0]:
+            written.append(result[0])
+            exact_by_value[value] = result[1]
+
+    summary = _nodes_vs_activities_summary(exact_by_value, experiment, sweep_key,
+                                           target / "privacy_nodes_vs_activities_summary", formats)
+    if summary:
+        written.append(summary)
+    return written
+
+
+def _nodes_vs_activities_summary(exact_by_value: dict, experiment, sweep_key, out_path, formats):
+    if len(exact_by_value) < 2:
+        return None
+    systems = sorted({system for counts in exact_by_value.values() for system in counts})
+    figure, axes = plt.subplots(figsize=(5.6, 3.8))
+    values = sorted(exact_by_value)
+    for system in systems:
+        style = SYSTEM_STYLE.get(system, {})
+        xs, ys = [], []
+        for value in values:
+            on_line, total = exact_by_value[value].get(system, (0, 0))
+            if total:
+                xs.append(value)
+                ys.append(on_line / total)
+        if xs:
+            axes.plot(xs, ys, marker=style.get("marker", "o"), markersize=4, linewidth=1.4,
+                      color=style.get("color", "#888"), label=style.get("label", system))
+    axes.set_ylim(-0.03, 1.03)
+    style_axes(axes, "cases needing one node per distinct activity", sweep_key, "share of cases")
+    axes.legend(fontsize=8)
+    figure.suptitle(f"{experiment}: does the 1:1 relation hold across the sweep?", fontsize=11)
+    figure.tight_layout(rect=(0, 0, 1, 0.93))
     return write_figure(figure, out_path, formats)
 
 
@@ -925,6 +1140,7 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
     figure = min_nodes_figure(privacy, experiment, target / "privacy_min_nodes", formats)
     if figure:
         written.append(figure)
+    written += min_nodes_vs_activities_figures(privacy, experiment, target, formats, privacy_x)
 
     note("fact disclosure per atom kind")
     for name, builder in (("privacy_facts_breakdown", fact_breakdown_figure), ("privacy_facts_traffic", fact_traffic_figure)):

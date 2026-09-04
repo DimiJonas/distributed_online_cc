@@ -3,10 +3,11 @@
 extract_metrics.py - extract metrics from the generated files of a simulation run
 
 writes metrics.json:  all one time metrics (throughput, latency, revisions, resources, message overhead, margin, correctness) for each system
-writes observations.json.gz:  what each node saw (local events, events inferable from coordination traffic, case end sightings)
-    for computing privacy metrics with compute_privacy.py
+writes observations.json.gz:  what each node saw (local events, events inferable from coordination traffic, case end sightings) for computing privacy metrics with compute_privacy.py
+writes disclosure_index.json.gz next to the stream's manifest.jsonl:  the compacted ground truth log, the trace variant index and the log baseline that compute_privacy.py needs
 
   python3.11 simulation/extract_metrics.py --results results/
+  python3.11 simulation/extract_metrics.py --build-index results/_streams/sepsis/manifest.jsonl --bk-type set mult seq
   python3.11 simulation/extract_metrics.py --results results/ --experiment 'load_*' --force
   python3.11 simulation/extract_metrics.py --run results/load_sweep/rate1000__seed29
 
@@ -32,7 +33,9 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs, Progress
+from helpers import (CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second,
+                     percentiles, case_id_hash_fraction, discover_runs, Progress,
+                     DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index)
 
 SCHEMA_VERSION = 4
 
@@ -1025,7 +1028,22 @@ def process_run(run_dir: Path, args) -> str:
     if not args.no_observations:
         with gzip.open(run_dir / "observations.json.gz", "wt") as handle:
             json.dump(observations, handle, default=str)
-    return f"wrote {metrics_out_path.relative_to(args.results) if args.results else metrics_out_path}"
+
+    index_note = ""
+    if args.disclosure_index != "skip":
+        manifest = (run_spec.get("stream") or {}).get("manifest")
+        bk_types = None if args.bk_type == ["auto"] else tuple(args.bk_type)
+        index_path, action = ensure_index(Path(manifest) if manifest else None, bk_types=bk_types,
+                                          force=args.disclosure_index == "force",
+                                          uniqueness_max=args.disclosure_uniqueness_max,
+                                          log=None)
+        if action == "built":
+            index_note = f" (+ {index_path.name})"
+        elif action == "skipped" and manifest:
+            index_note = f" (no {DEFAULT_NAME}: {manifest} is gone)"
+
+    return (f"wrote {metrics_out_path.relative_to(args.results) if args.results else metrics_out_path}"
+            f"{index_note}")
 
 
 def main() -> None:
@@ -1041,8 +1059,38 @@ def main() -> None:
                         help="keep this fraction of cases in observations.json.gz, chosen by a hash of the case id so the same cases are kept in both systems "
                         "and across re-runs (default 1.0 = every case)")
     parser.add_argument("--no-observations", action="store_true", help="skip observations.json.gz (metrics only)")
+    parser.add_argument("--build-index", type=Path, action="append", default=[], metavar="MANIFEST",
+                        help=f"build {DEFAULT_NAME} for these stream manifests and exit, without extracting "
+                             f"anything (repeatable). the same thing extraction does on its own, exposed "
+                             f"for building an index for a stream up front")
+    parser.add_argument("--disclosure-index", choices=("auto", "skip", "force"), default="auto",
+                        help=f"build {DEFAULT_NAME} next to the stream manifest if it is not "
+                             f"already there (default auto). it holds the compacted ground truth log and "
+                             f"the trace variant index that compute_privacy.py needs, so once it exists "
+                             f"the stream directory can be deleted and privacy can be recomputed with a "
+                             f"new seed as often as you like")
+    parser.add_argument("--bk-type", nargs="+", default=["auto"],
+                        help="background knowledge types to index (set, mult, seq), or 'auto' (default) to "
+                             "index only when the log is not already almost all unique traces")
+    parser.add_argument("--disclosure-uniqueness-max", type=float, default=0.9,
+                        help="under 'auto', skip the variant index when trace uniqueness is above this "
+                             "(default 0.9). on synthetic streams nearly every trace is its own variant, "
+                             "so the disclosure measures would describe the generator, not the deployment")
     parser.add_argument("--quiet", action="store_true", help="no progress output")
     args = parser.parse_args()
+
+    if args.build_index:
+        bk_types = None if args.bk_type == ["auto"] else tuple(args.bk_type)
+        for manifest in args.build_index:
+            path, action = ensure_index(manifest, bk_types=bk_types,
+                                        force=args.disclosure_index == "force",
+                                        uniqueness_max=args.disclosure_uniqueness_max,
+                                        log=lambda text: print(text.strip()))
+            if action == "existing":
+                print(f"{path}: already there (--disclosure-index force to rebuild)")
+            elif action == "skipped":
+                print(f"{manifest}: not found or empty, nothing written")
+        return
 
     runs = list(args.run)
     if args.results:
