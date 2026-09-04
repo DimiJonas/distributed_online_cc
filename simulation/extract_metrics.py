@@ -34,7 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second, percentiles, case_id_hash_fraction, discover_runs, Progress
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
 CASE_CLOSED_REASON = "case closed"
@@ -126,6 +126,7 @@ class Scan:
         self.queue_node_max: dict[str, dict[int, int]] = {} # queue name -> (node id -> peak depth) # name -> capacity
         self.queues_settle: dict[str, list[tuple[float, float]]] = {}
         self.queue_node_max_settle: dict[str, dict[int, int]] = {}
+        self.queues_by_node: dict[tuple[str, int], list[tuple[float, int, int]]] = {}
         self.tcp_queue_max = 0 # highest fill of a tcp channel queue
         self.peer_churn = {"created": 0, "removed": 0}
         self.meta: dict[int, dict] = {} # meta infos at node startup
@@ -186,10 +187,12 @@ class Scan:
             self.drops["by_reason"][reason] = self.drops["by_reason"].get(reason, 0) + 1
             payload_kind = str(line.get("kind"))
             self.drops["by_kind"][payload_kind] = self.drops["by_kind"].get(payload_kind, 0) + 1
+            self._drop_node(self.drops, node_id)
         elif record_type == "dropped_event":
             self.event_drops["total"] += 1
             reason = str(line.get("reason"))
             self.event_drops["by_reason"][reason] = self.event_drops["by_reason"].get(reason, 0) + 1
+            self._drop_node(self.event_drops, node_id)
         elif record_type == "result_dropped":
             self.result_drops["total"] += 1
             reason = line.get("reason") or "unknown"
@@ -280,6 +283,14 @@ class Scan:
             wallclock_time, line.get("result"), line.get("trigger"), line.get("instance_id"))
         self.constraint_type[line["constraint_id"]] = line.get("constraint_type")
 
+    @staticmethod
+    def _drop_node(bucket: dict, node_id) -> None:
+        if node_id is None:
+            return
+        by_node = bucket.setdefault("by_node", {})
+        key = f"node-{node_id}"
+        by_node[key] = by_node.get(key, 0) + 1
+
     def _queues(self, line: dict, node_id: int, wallclock_time: int) -> None:
         if self.windows.contains(self.windows.load, wallclock_time):
             samples, node_max = self.queues, self.queue_node_max
@@ -294,6 +305,9 @@ class Scan:
             samples.setdefault(name, []).append((wallclock_time, depth_sample[1], depth_sample[2]))
             per_node = node_max.setdefault(name, {})
             per_node[node_id] = max(per_node.get(node_id, 0), depth_sample[1])
+            if samples is self.queues:
+                self.queues_by_node.setdefault((name, node_id), []).append(
+                    (wallclock_time, depth_sample[1], depth_sample[2]))
 
     def _case_end(self, line: dict, node_id: int, wallclock_time: int) -> None:
         case_id = line["case_id"]
@@ -318,6 +332,11 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
     idle_first: dict[int, dict] = {} # pid -> first sample in idle window
     idle_last: dict[int, dict] = {} # pid -> last sample in idle window
     idle_rss_max: dict[int, int] = {} # pid -> max rss in idle window
+    # processes outside the system under test (the sender, the sink), keyed by (group, pid)
+    other_first: dict[tuple[str, int], dict] = {}
+    other_last: dict[tuple[str, int], dict] = {}
+    other_rss_max: dict[tuple[str, int], int] = {}
+    other_role: dict[tuple[str, int], str] = {}
     host_first = host_last = None 
 
     for row in read_jsonl(path):
@@ -328,7 +347,18 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
                 host_first = host_first or row
                 host_last = row
             continue
+        # the load generator and the sink are not part of the system under test, but the sender's
+        # cpu decides whether a throughput number measures the system or the tooling, so it is
+        # summarised separately instead of being dropped
         if row.get("group") != "system":
+            if sample_type == "proc" and windows.contains(windows.steady, sample_time):
+                pid = row.get("pid")
+                group = str(row.get("group") or "other")
+                other_first.setdefault((group, pid), row)
+                other_last[(group, pid)] = row
+                other_rss_max[(group, pid)] = max(other_rss_max.get((group, pid), 0),
+                                                  row.get("rss_kb", 0))
+                other_role[(group, pid)] = row.get("role")
             continue
         pid = row.get("pid")
         if sample_type == "proc":
@@ -390,8 +420,24 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
         idle_ticks = host_last["cpu_idle_ticks"] - host_first["cpu_idle_ticks"]
         host_busy = (1.0 - idle_ticks / total_ticks) if total_ticks > 0 else None
 
+    non_system: dict[str, dict] = {}
+    for key, first_sample in other_first.items():
+        group, _pid = key
+        seconds = cpu_seconds(first_sample, other_last.get(key, first_sample))
+        entry = non_system.setdefault(group, {"cpu_seconds": 0.0, "rss_kb_max": 0, "processes": 0,
+                                              "roles": []})
+        entry["cpu_seconds"] += seconds
+        entry["rss_kb_max"] = max(entry["rss_kb_max"], other_rss_max.get(key, 0))
+        entry["processes"] += 1
+        role = other_role.get(key)
+        if role and role not in entry["roles"]:
+            entry["roles"].append(role)
+    for entry in non_system.values():
+        entry["cpu_percent"] = (entry["cpu_seconds"] / steady_s * 100.0) if steady_s else 0.0
+
     return {
         "per_node": per_node,
+        "non_system": non_system,
         "cpu_seconds_total": total_cpu,
         "cpu_seconds_excl_sink": total_cpu_excluded,
         "cpu_percent_mean_node": (sum(v["cpu_percent"] for v in included.values()) / len(included))
@@ -400,6 +446,9 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
         "busiest_node_id": busiest_node[0],
         "busiest_thread": busiest_thread,
         "rss_kb_total_max": sum(v["rss_kb_max"] for v in per_node.values()),
+        "rss_kb_max_node": max((v["rss_kb_max"] for v in included.values()), default=0),
+        "rss_kb_mean_node": (sum(v["rss_kb_max"] for v in included.values()) / len(included))
+                            if included else 0.0,
         "threads_total_max": sum(v["threads_max"] for v in per_node.values()),
         "host_cpu_busy_fraction": host_busy,
         "idle": {
@@ -645,6 +694,34 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
         "busiest_node": per_node_depths.get(busiest_dequeue_node),
     }
 
+    # one entry per (node, queue) that was sampled, sorted by standing depth
+    def summarise_queues_by_node(series_by_key: dict) -> list[dict]:
+        out = []
+        for (queue_name, node_id), samples in series_by_key.items():
+            samples = sorted(samples)
+            capacity = max((capacity for _t, _d, capacity in samples if capacity), default=0)
+            depths = [depth for _t, depth, _c in samples]
+            if not depths or not capacity:
+                continue
+            span_s = (samples[-1][0] - samples[0][0]) / 1e6
+            slope = slope_per_second([(t, depth) for t, depth, _c in samples])
+            out.append({
+                "queue": queue_name,
+                "node_id": node_id,
+                "capacity": capacity,
+                "samples": len(samples),
+                "window_s": span_s,
+                "p50_fill": quantile(sorted(depths), 0.50) / capacity,
+                "p95_fill": quantile(sorted(depths), 0.95) / capacity,
+                "p99_fill": quantile(sorted(depths), 0.99) / capacity,
+                "peak_fill": max(depths) / capacity,
+                "slope_per_s": slope,
+                # fraction of capacity the fitted line gains from the start of the window to its end
+                "growth_over_window": (slope * span_s / capacity) if span_s > 0 else None,
+            })
+        return sorted(out, key=lambda entry: -entry["p95_fill"])
+
+    queues_by_node_out = summarise_queues_by_node(scan.queues_by_node)
     queues_out = summarise_queues(scan.queues, scan.queue_node_max)
     queues_settle_out = summarise_queues(scan.queues_settle, scan.queue_node_max_settle)
 
@@ -718,6 +795,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "closed_case_event_drops": closed_case_event_drops,
             "closed_case_message_drops": closed_case_message_drops,
             "queues": queues_out,
+            "queues_by_node": queues_by_node_out,
             "queues_settle": queues_settle_out,
             "settle_queue_pressure": settle_pressure,
             "event_q_at_dequeue": dequeue_depth_out,
@@ -799,8 +877,14 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             "idle_only": idle_only_run,
             "no_send_log": bool(send.get("no_send_log")),
             "settlement_reason": timeline.get("system_settlement_reason"),
+            "settlement_seconds": timeline.get("system_settlement_seconds"),
+            "seconds_to_all_expected": timeline.get("seconds_to_all_expected"),
             "pairs_in_db": timeline.get("pairs_in_db"),
             "expected_pairs": timeline.get("expected_pairs"),
+            "hard_killed_nodes": timeline.get("hard_killed_nodes") or [],
+            "sender_preload_s": timeline.get("sender_preload_s"),
+            "sender_teardown_s": timeline.get("sender_teardown_s"),
+            "node_roles": {str(node_id): role for node_id, role in node_roles.items()},
         },
         "cpu_cap": timeline.get("cpu_cap"),
     }
@@ -925,6 +1009,8 @@ def process_run(run_dir: Path, args) -> str:
         "order_index": run_spec.get("order_index"),
         "provenance": {"input_signature": signature, "extractor": "extract_metrics.py"},
         "correctness": run_spec.get("compare_summary"),
+        "status": run_spec.get("status"),
+        "problems": run_spec.get("problems") or [],
         "systems": {},
     }
     observations = {"schema_version": SCHEMA_VERSION, "run_id": run_spec.get("run_id"),

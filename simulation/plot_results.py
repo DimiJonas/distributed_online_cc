@@ -62,12 +62,21 @@ PAYLOAD_COLORS = {"conformance": "#0072B2", "ce_gossip": "#56B4E9", "overlay": "
 # parameters that identify a repetition
 REPETITION_PARAMS = {"seed", "replicate", "start", "order_index"}
 IGNORED_PARAMS = {"stream_dir", "manifest", "metrics", "violation_sampling", "quiescence_s", "max_wait_for_settlement_s", "idle_window_s", 
-                  "msgtrace", "external_central_sink", "cases"}
+                  "msgtrace", "external_central_sink", "cases", "nodes"}
+
+AXIS_LABELS = {
+    "constraint_nodes": "constraint nodes (activity watching roles)",
+    "rate": "offered rate (events/s)",
+    "repeat": "catalog repeats (model size)",
+    "case_gap_secs": "case gap (s), smaller = more concurrency",
+    "netem_ms": "added link delay (ms)",
+    "cpu_cap_cores": "cpu cap (cores)",
+}
 
 
 def style_axes(axes, title: str, xlabel: str, ylabel: str, logx=False, logy=False) -> None:
     axes.set_title(title, fontsize=10)
-    axes.set_xlabel(xlabel, fontsize=9)
+    axes.set_xlabel(AXIS_LABELS.get(xlabel, xlabel), fontsize=9)
     axes.set_ylabel(ylabel, fontsize=9)
     axes.grid(True, alpha=0.25, linewidth=0.6)
     axes.tick_params(labelsize=8)
@@ -104,6 +113,10 @@ class Row:
         if cap.get("mode") and cap.get("mode") != "off":
             self.params.setdefault("cpu_cap_cores", cap.get("cores"))
         self.params["netem_ms"] = self.params.get("netem_ms", 0)
+        node_count = self.params.get("nodes")
+        if isinstance(node_count, int) and not isinstance(node_count, bool) and node_count > 1:
+            self.params["constraint_nodes"] = node_count - 1
+        self.processes = (self.metrics.get("nodes") or {}).get("by_role") or {}
 
     def value(self, path: str):
         if path.startswith("correctness."):
@@ -315,6 +328,72 @@ PANEL_GROUPS = [
 ]
 
 
+
+# what each deployment actually builds from one value of `constraint_nodes` (those who receive the events)
+def write_process_table(rows: list[Row], x_key: str, out_path: Path) -> Path | None:
+    if x_key != "constraint_nodes":
+        return None
+    table: dict[tuple, dict] = {}
+    for row in rows:
+        x = row.params.get(x_key)
+        if x is None or not row.processes:
+            continue
+        entry = table.setdefault((x, row.system), {})
+        for role, count in row.processes.items():
+            entry[role] = max(entry.get(role, 0), count)
+    if not table:
+        return None
+    roles = sorted({role for entry in table.values() for role in entry})
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow([x_key, "system"] + roles + ["processes_total", "processes_excl_sink"])
+        for (x, system), entry in sorted(table.items()):
+            counts = [entry.get(role, 0) for role in roles]
+            total = sum(counts)
+            excl_sink = total - entry.get("sink", 0)
+            writer.writerow([x, system] + counts + [total, excl_sink])
+    return out_path
+
+
+# the placement boundary: at one role per node, adding nodes stops buying anything and only adds gossip and overlay cost
+def mark_placement_boundary(axes, rows: list[Row], x_key: str) -> None:
+    if x_key != "constraint_nodes":
+        return
+    roles = {int(row.value("nodes.total") or 0) for row in rows}
+    boundary = max((row.params.get("constraint_nodes") for row in rows
+                    if row.params.get("constraint_nodes") is not None), default=None)
+    catalog_roles = max((row.value("nodes.by_role.constraint_node") or 0 for row in rows), default=0)
+    if not catalog_roles or boundary is None or catalog_roles >= boundary:
+        return
+    axes.axvline(catalog_roles, color="#666666", linestyle=":", linewidth=1.0, zorder=0)
+    axes.annotate("one role per node", xy=(catalog_roles, axes.get_ylim()[1]),
+                  xytext=(2, -8), textcoords="offset points", fontsize=7, color="#666666",
+                  va="top", rotation=90)
+
+
+# the margin is the gap between events minus the coordination latency
+# when it goes negative, coordination is slower than the stream and corrections have to clean up after it, so it should be read togther with the revision load
+MARGIN_PANELS = [
+    ("margin.margin_p50_us", "margin p50 (event gap minus coordination)", "us", 1.0, False),
+    ("margin.coordination_slower_than_gap_fraction", "share of events with a negative margin", "fraction", 1.0, False),
+    ("revisions.pairs_with_multiple", "pairs needing more than one revision", "pairs", 1.0, False),
+    ("revisions.correction_drops.total", "corrections that could not be applied", "corrections", 1.0, False),
+    ("latency_us.provisional_t3_t4.p95", "provisional window p95 (t3 to t4)", "ms", 1e-3, False),
+    ("latency_us.checking_t2_t3.p95", "checking delay p95 (t2 to t3)", "ms", 1e-3, False),
+]
+
+
+MEMORY_PANELS = [
+    ("resources.rss_kb_max_node", "resident memory, busiest node", "MB", 1 / 1024, False),
+    ("resources.rss_kb_mean_node", "resident memory, mean node", "MB", 1 / 1024, False),
+    ("resources.rss_kb_total_max", "resident memory, all nodes", "MB", 1 / 1024, False),
+    ("throughput.queues.event_q.max", "event queue peak depth", "events", 1.0, False),
+    ("revisions.pairs", "pairs the run produced", "pairs", 1.0, False),
+    ("quality.expected_pairs", "pairs expected", "pairs", 1.0, False),
+]
+
+
 def panel_figure(rows, x_key, panels, series_key, title, out_path, formats, logx=False):
     usable_panels = [panel for panel in panels if any(row.value(panel[0]) is not None for row in rows)]
     if not usable_panels:
@@ -326,6 +405,7 @@ def panel_figure(rows, x_key, panels, series_key, title, out_path, formats, logx
         axes = axes_grid[index // columns][index % columns]
         draw_curve(axes, curve(rows, x_key, metric, series_key, scale), series_key)
         style_axes(axes, panel_title, x_key, ylabel, logx=logx, logy=logy)
+        mark_placement_boundary(axes, rows, x_key)
     for index in range(len(usable_panels), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
 
@@ -731,6 +811,18 @@ CSV_METRICS = [
     ("pairs_multi_revision", "revisions.pairs_with_multiple", 1.0),
     ("revisions_total", "revisions.revisions_total", 1.0),
     ("margin_p50_us", "margin.margin_p50_us", 1.0),
+    ("margin_negative_frac", "margin.coordination_slower_than_gap_fraction", 1.0),
+    ("sender_cpu_pct", "resources.non_system.tooling.cpu_percent", 1.0),
+    ("host_busy_pct", "resources.host_cpu_busy_fraction", 100.0),
+    ("threads_total_max", "resources.threads_total_max", 1.0),
+    ("rss_mb_max_node", "resources.rss_kb_max_node", 1 / 1024),
+    ("gossip_reach_fraction", "latency_us.gossip_dissemination.reach_fraction", 1.0),
+    ("revision_pairs", "revisions.pairs", 1.0),
+    ("expected_pairs", "quality.expected_pairs", 1.0),
+    ("peer_churn_created", "messages.peer_churn.created", 1.0),
+    ("peer_churn_removed", "messages.peer_churn.removed", 1.0),
+    ("repair_drops", "revisions.correction_drops.total", 1.0),
+    ("result_drops", "revisions.result_drops.total", 1.0),
     ("saturated", "throughput.saturated", 1.0),
     ("complete", "quality.complete", 1.0),
 ]
@@ -901,6 +993,21 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
             figure = panel_figure(workload_rows, x_key, panels, series_key, f"{experiment}: {group_name} against {x_key}", target / group_name, formats, logx)
             if figure:
                 written.append(figure)
+
+        # the margin mainly important when there is delay to make it negative
+        # and the memory split only once the case population moves
+        for group_name, panels in (("margin", MARGIN_PANELS), ("memory", MEMORY_PANELS)):
+            note(group_name)
+            figure = panel_figure(workload_rows, x_key, panels, series_key,
+                                  f"{experiment}: {group_name} against {x_key}",
+                                  target / group_name, formats, logx)
+            if figure:
+                written.append(figure)
+
+        process_table = write_process_table(rows, x_key, target / "processes.csv")
+        if process_table:
+            note("process counts")
+            written.append(process_table)
 
         note("message breakdown")
         figure = message_breakdown_figure(workload_rows, x_key, target / "message_breakdown", formats)

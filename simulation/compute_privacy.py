@@ -407,10 +407,15 @@ def load_ground_truth(manifest: Path) -> dict:
 # the variants containing a given activity are precomputed as bitmasks, so resolving a candidate intersects a few integers instead of scanning the log
 class DisclosureIndex:
 
-    def __init__(self, ground_truth_event_log: dict):
-        variant_counts = Counter(case["trace"] for case in ground_truth_event_log.values())
-        self.variants = list(variant_counts.keys())
-        self.counts = [variant_counts[variant] for variant in self.variants]
+    def __init__(self, ground_truth_event_log: dict | None = None, variants=None, counts=None):
+        if variants is not None:
+            # rebuilt from a prebuilt index file
+            self.variants = [tuple(variant) for variant in variants]
+            self.counts = list(counts or [])
+        else:
+            variant_counts = Counter(case["trace"] for case in (ground_truth_event_log or {}).values())
+            self.variants = list(variant_counts.keys())
+            self.counts = [variant_counts[variant] for variant in self.variants]
         self.total_traces = sum(self.counts)
 
         self.activity_mask: dict[str, int] = {} # activity -> bitmask of variants containing it
@@ -820,6 +825,27 @@ def log_baseline_disclosure(ground_truth_event_log: dict, index, bk_types) -> di
     return baseline
 
 
+DISCLOSURE_INDEX_NAME = "disclosure_index.json.gz"
+
+
+def load_disclosure_index(path: Path) -> dict | None:
+    try:
+        with gzip.open(path, "rt") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (payload.get("schema_version") or 0) < 1 or "cases" not in payload:
+        return None
+    return payload
+
+
+def _index_file_for(manifest: Path, explicit: Path | None) -> Path | None:
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    candidate = manifest.parent / DISCLOSURE_INDEX_NAME
+    return candidate if candidate.exists() else None
+
+
 # cache ground truth (from event log/manifest) - holds parsed log, log baseline disclosure and trace variant index
 _GROUND_TRUTH_CACHE: dict[tuple, dict] = {} # (manifest identity uple) -> (log, index, baselines)
 _GROUND_TRUTH_CACHE_LIMIT = 4
@@ -831,14 +857,36 @@ def _manifest_identity(manifest: Path) -> tuple:
 
 
 # returns (log, index, baselines) and builds only what is missing
-def ground_truth_for(manifest: Path, bk_types: tuple, reporter=None, label: str = "") -> tuple:
-    key = _manifest_identity(manifest)
+def ground_truth_for(manifest: Path, bk_types: tuple, reporter=None, label: str = "",
+                     index_file: Path | None = None) -> tuple:
+    # a prebuilt index identifies the stream on its own; the manifest may well be gone by now
+    if index_file is not None:
+        key = ("index", str(index_file))
+    elif manifest is not None:
+        key = _manifest_identity(manifest)
+    else:
+        raise SystemExit("ground_truth_for needs a manifest or a prebuilt disclosure index")
     entry = _GROUND_TRUTH_CACHE.get(key)
 
     if entry is None:
-        if reporter is not None:
-            reporter.note(f"{label}: reading the ground truth log")
-        entry = {"log": load_ground_truth(manifest), "index": None, "baselines": {}}
+        prebuilt = load_disclosure_index(index_file) if index_file is not None else None
+        if prebuilt is not None:
+            if reporter is not None:
+                reporter.note(f"{label}: ground truth from {index_file.name}")
+            entry = {"log": {case_id: {"activities": case["activities"],
+                                       "trace": tuple(case["trace"])}
+                             for case_id, case in prebuilt["cases"].items()},
+                     "index": None, "baselines": {}, "prebuilt": prebuilt}
+            if prebuilt.get("variants") is not None:
+                entry["index"] = DisclosureIndex(variants=prebuilt["variants"],
+                                                 counts=prebuilt.get("variant_counts"))
+            stored = prebuilt.get("baselines") or {}
+            for key_text, baseline in stored.items():
+                entry["baselines"][tuple(part for part in key_text.split("|") if part)] = baseline
+        else:
+            if reporter is not None:
+                reporter.note(f"{label}: reading the ground truth log")
+            entry = {"log": load_ground_truth(manifest), "index": None, "baselines": {}}
         _GROUND_TRUTH_CACHE[key] = entry
         while len(_GROUND_TRUTH_CACHE) > _GROUND_TRUTH_CACHE_LIMIT:
             _GROUND_TRUTH_CACHE.pop(next(iter(_GROUND_TRUTH_CACHE)))
@@ -873,11 +921,19 @@ def process_run(run_dir: Path, args, reporter=None) -> str:
         run_spec = json.loads((run_dir / "run.json").read_text())
         candidate = (run_spec.get("stream") or {}).get("manifest")
         manifest = Path(candidate) if candidate else None
-    if manifest is None or not Path(manifest).exists():
+    index_file = None
+    if args.disclosure_index is not None:
+        index_file = args.disclosure_index if args.disclosure_index.exists() else None
+    elif manifest is not None:
+        index_file = _index_file_for(Path(manifest), None)
+    if index_file is None and (manifest is None or not Path(manifest).exists()):
         if reporter is not None:
             reporter.step(f"{run_dir.name} skipped")
-        return f"skip {run_dir.name}: no manifest (pass --manifest)"
-    ground_truth_event_log, index, baseline = ground_truth_for(Path(manifest), bk_types, reporter, run_dir.name)
+        return (f"skip {run_dir.name}: no manifest and no {DISCLOSURE_INDEX_NAME} "
+                f"(pass --manifest or --disclosure-index, or run build_disclosure_index.py)")
+    ground_truth_event_log, index, baseline = ground_truth_for(
+        Path(manifest) if manifest is not None else None, bk_types, reporter, run_dir.name,
+        index_file=index_file)
 
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -889,7 +945,8 @@ def process_run(run_dir: Path, args, reporter=None) -> str:
                      "bk_types": list(bk_types),
                      "disclosure_measures": bool(bk_types),
                      "compromise_sizes": args.sizes,
-                     "manifest": str(manifest)},
+                     "manifest": str(manifest) if manifest is not None else None,
+                     "disclosure_index": str(index_file) if index_file is not None else None},
         "ground_truth": baseline,
         "systems": {},
     }
@@ -920,6 +977,11 @@ def main() -> None:
     parser.add_argument("--run", type=Path, action="append", default=[])
     parser.add_argument("--experiment", default=None, help="only experiments matching this glob")
     parser.add_argument("--manifest", type=Path, default=None, help="manifest.jsonl of the stream (default: from run.json)")
+    parser.add_argument("--disclosure-index", type=Path, default=None,
+                        help=f"prebuilt ground truth from build_disclosure_index.py. by default the "
+                             f"{DISCLOSURE_INDEX_NAME} next to the manifest is used when it exists, which "
+                             f"skips re-parsing and re-indexing the stream on every run and lets the stream "
+                             f"directory be deleted")
     parser.add_argument("--seed", type=int, default=1234, help="seed for drawing compromised nodes")
     parser.add_argument("--draws", type=int, default=200, help="random subsets per compromise size")
     parser.add_argument("--sizes", type=int, nargs="*", default=None, help="explicit compromise sizes (default: spaced over the pool)")

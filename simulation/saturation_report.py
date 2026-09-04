@@ -549,6 +549,227 @@ def parse_records(run_dir: Path, system: str, window: tuple[int, int] | None, ro
 
 
 # collect stats for a specific systems run
+METRICS_SCHEMA_MIN = 4
+
+
+def _infra_split(per_node: dict, infra_roles: tuple[str, ...]) -> tuple[list, list]:
+    system_nodes, infra_nodes = [], []
+    for node_id, values in (per_node or {}).items():
+        entry = {"node": f"{values.get('role')}/{node_id}",
+                 "cpu_pct": values.get("cpu_percent") or 0.0,
+                 "rss_mb": (values.get("rss_kb_max") or 0) / 1024}
+        (infra_nodes if values.get("role") in infra_roles else system_nodes).append(entry)
+    system_nodes.sort(key=lambda entry: -entry["cpu_pct"])
+    infra_nodes.sort(key=lambda entry: -entry["cpu_pct"])
+    return system_nodes, infra_nodes
+
+
+def _queue_stats_from_metrics(system_metrics: dict, infra_roles, infra_queues) -> dict:
+    throughput = system_metrics.get("throughput") or {}
+    node_roles = ((system_metrics.get("quality") or {}).get("node_roles")) or {}
+    profile = []
+    for entry in throughput.get("queues_by_node") or []:
+        role = node_roles.get(str(entry.get("node_id")))
+        if entry.get("queue") in infra_queues or role in infra_roles:
+            continue
+        profile.append({"node": f"node-{entry.get('node_id')}", "queue": entry.get("queue"),
+                        "capacity": entry.get("capacity"),
+                        "p95_fill": entry.get("p95_fill"), "p99_fill": entry.get("p99_fill"),
+                        "peak_fill": entry.get("peak_fill"),
+                        "slope_per_s": entry.get("slope_per_s"),
+                        "growth": entry.get("growth_over_window")})
+    profile.sort(key=lambda entry: -(entry["p95_fill"] or 0))
+
+    out: dict = {"records_present": True, "queue_profile": profile}
+    if profile:
+        worst = profile[0]
+        out.update({"queue_fill_p95_max": worst["p95_fill"],
+                    "queue_fill_p95_max_queue": worst["queue"],
+                    "queue_fill_p95_max_node": worst["node"],
+                    "queue_slope_at_p95_max": worst["slope_per_s"],
+                    "queue_fill_p99_at_p95_max": worst["p99_fill"],
+                    "queue_growth_at_p95_max": worst["growth"]})
+        peak = max(profile, key=lambda entry: entry["peak_fill"] or 0)
+        out.update({"queue_fill_max": peak["peak_fill"], "queue_fill_max_queue": peak["queue"],
+                    "queue_fill_max_node": peak["node"]})
+
+    # the sink queue is evaluation scaffolding: measured, warned about, never a saturation signal
+    infra = [entry for entry in (throughput.get("queues_by_node") or [])
+             if entry.get("queue") in infra_queues
+             or node_roles.get(str(entry.get("node_id"))) in infra_roles]
+    if infra:
+        worst_infra = max(infra, key=lambda entry: entry.get("peak_fill") or 0)
+        out.update({"infra_queue_fill_max": worst_infra.get("peak_fill"),
+                    "infra_queue_fill_max_queue": worst_infra.get("queue"),
+                    "infra_queue_fill_max_node": f"node-{worst_infra.get('node_id')}"})
+
+    dequeue = throughput.get("event_q_at_dequeue") or {}
+    out["dequeue_backlog_frac"] = dequeue.get("backlog_fraction")
+    out["dequeue_depth_p95"] = dequeue.get("p95")
+    out["dequeue_depth_p99"] = dequeue.get("p99")
+    for entry in throughput.get("queues_by_node") or []:
+        if entry.get("queue") == "event_q":
+            out.setdefault("event_q_capacity", entry.get("capacity"))
+    return out
+
+
+def _drop_stats_from_metrics(system_metrics: dict) -> dict:
+    throughput = system_metrics.get("throughput") or {}
+    revisions = system_metrics.get("revisions") or {}
+    message_drops = throughput.get("message_drops") or {}
+    event_drops = throughput.get("event_drops") or {}
+    correction_drops = revisions.get("correction_drops") or {}
+    result_drops = revisions.get("result_drops") or {}
+
+    input_reasons = {}
+    for kind, bucket in (("message_drop", message_drops), ("dropped_event", event_drops)):
+        for reason, count in (bucket.get("by_reason") or {}).items():
+            input_reasons[f"{kind}/{reason}"] = count
+    by_node: dict[str, int] = {}
+    for bucket in (message_drops, event_drops):
+        for node, count in (bucket.get("by_node") or {}).items():
+            by_node[node] = by_node.get(node, 0) + count
+
+    repair_reasons = {f"correction_dropped/{reason}": count
+                      for reason, count in (correction_drops.get("by_reason") or {}).items()}
+    stale = 0
+    for reason, count in (result_drops.get("by_reason") or {}).items():
+        if str(reason) in ("result_already_final", "ResultAlreadyFinal"):
+            repair_reasons[f"result_dropped/{reason}"] = count
+        else:
+            stale += count
+
+    return {
+        "message_drops": message_drops.get("total") or 0,
+        "event_drops": event_drops.get("total") or 0,
+        "input_drops": (message_drops.get("total") or 0) + (event_drops.get("total") or 0),
+        "input_drop_reasons": input_reasons,
+        "input_drops_by_node": dict(sorted(by_node.items(), key=lambda item: -item[1])),
+        "repair_drops": sum(repair_reasons.values()),
+        "repair_drop_reasons": repair_reasons,
+        "stale_result_drops": stale,
+        "drop_reasons": {**input_reasons, **repair_reasons},
+    }
+
+
+def collect_point_from_metrics(run_dir: Path, system: str, x_param: str,
+                               infra_roles: tuple[str, ...] = INFRA_ROLES,
+                               infra_queues: tuple[str, ...] = INFRA_QUEUES) -> dict | None:
+    metrics_path = run_dir / "metrics.json"
+    if not metrics_path.exists():
+        return None
+    try:
+        metrics = json.loads(metrics_path.read_text())
+    except json.JSONDecodeError:
+        return None
+    if (metrics.get("schema_version") or 0) < METRICS_SCHEMA_MIN:
+        return None
+    system_metrics = (metrics.get("systems") or {}).get(system)
+    if system_metrics is None:
+        return None
+
+    params = metrics.get("params") or {}
+    quality = system_metrics.get("quality") or {}
+    throughput = system_metrics.get("throughput") or {}
+    resources = system_metrics.get("resources") or {}
+    windows = system_metrics.get("windows") or {}
+    revisions = system_metrics.get("revisions") or {}
+
+    point: dict = {
+        "run_id": metrics.get("run_id"),
+        "run_dir": str(run_dir),
+        "system": system,
+        "x_param": x_param,
+        "x": params.get(x_param),
+        "status": metrics.get("status"),
+        "order_index": metrics.get("order_index"),
+        "seed": params.get("seed"),
+        "replicate": metrics.get("replicate"),
+        "msgtrace": params.get("msgtrace", True),
+        "metrics": params.get("metrics", True),
+        "nodes": params.get("nodes"),
+        "hard_killed": len(quality.get("hard_killed_nodes") or []),
+        "window_source": windows.get("load_source", "none"),
+        "sender_preload_s": quality.get("sender_preload_s"),
+        "sender_teardown_s": quality.get("sender_teardown_s"),
+        "settlement_reason": quality.get("settlement_reason"),
+        "settlement_s": quality.get("settlement_seconds"),
+        "seconds_to_all_expected": quality.get("seconds_to_all_expected"),
+        "pairs_in_db": quality.get("pairs_in_db"),
+        "expected_pairs": quality.get("expected_pairs"),
+        "incomplete_record_files": quality.get("writer_shutdown_missing") or [],
+        "run_problems": [problem for problem in (list(metrics.get("problems") or [])
+                                                 + list(quality.get("problems") or []))
+                         if not _problem_is_other_system(problem, system)],
+        "point_source": "metrics.json",
+    }
+
+    # sender: rates, pacing and the socket writes
+    point["events_sent"] = throughput.get("events_sent")
+    point["elapsed_s"] = windows.get("load_seconds")
+    point["late"] = throughput.get("pacer_late") or 0
+    point["max_lag_ms"] = throughput.get("pacer_max_lag_ms") or 0.0
+    point["resyncs"] = throughput.get("pacer_resyncs") or 0
+    point["blocked_sends"] = throughput.get("blocked_sends_over_1ms")
+    max_send_us = throughput.get("max_send_us")
+    point["max_send_ms"] = (max_send_us / 1000.0) if max_send_us is not None else None
+    point["send_log_spills"] = throughput.get("send_log_spills")
+    point["send_log_max_spill_us"] = throughput.get("send_log_max_spill_us")
+    point["pacer_burst"] = throughput.get("pacer_burst")
+    point["pacer_burst_seconds"] = throughput.get("pacer_burst_seconds")
+    if point["events_sent"] and point["late"] is not None:
+        point["late_frac"] = point["late"] / point["events_sent"]
+
+    target = params.get("rate")
+    source = "target: metrics.json params.rate"
+    if target is None:
+        target = throughput.get("offered_rate")
+        source = "target: pacer summary (rounded)"
+    effective = throughput.get("effective_rate")
+    point["target_rate"] = float(target) if target is not None else None
+    point["effective_rate"] = effective
+    point["achieved_ratio"] = (effective / target) if (effective and target) else None
+    point["sustained_ratio"] = None
+    point["rate_source"] = f"{source}; effective: pacer summary"
+    point["rate_source_exact"] = "rounded" not in source
+
+    # resources
+    system_nodes, infra_nodes = _infra_split(resources.get("per_node") or {}, infra_roles)
+    if system_nodes:
+        point["sys_cpu_profile"] = system_nodes
+        point["sys_cpu_sum_pct"] = sum(entry["cpu_pct"] for entry in system_nodes)
+        point["sys_cpu_max_pct"] = system_nodes[0]["cpu_pct"]
+        point["sys_cpu_max_node"] = system_nodes[0]["node"]
+        point["sys_rss_sum_mb"] = sum(entry["rss_mb"] for entry in system_nodes)
+        point["sys_rss_max_mb"] = max(entry["rss_mb"] for entry in system_nodes)
+        point["sys_processes"] = len(system_nodes)
+    if infra_nodes:
+        point["infra_cpu_sum_pct"] = sum(entry["cpu_pct"] for entry in infra_nodes)
+        point["infra_cpu_max_pct"] = infra_nodes[0]["cpu_pct"]
+        point["infra_cpu_max_node"] = infra_nodes[0]["node"]
+        point["infra_rss_sum_mb"] = sum(entry["rss_mb"] for entry in infra_nodes)
+    host_busy = resources.get("host_cpu_busy_fraction")
+    point["host_busy_pct"] = (host_busy * 100.0) if host_busy is not None else None
+    tooling = (resources.get("non_system") or {}).get("tooling") or {}
+    point["sender_cpu_pct"] = tooling.get("cpu_percent")
+    point["sender_rss_mb"] = (tooling.get("rss_kb_max") or 0) / 1024 or None
+
+    point.update(_queue_stats_from_metrics(system_metrics, infra_roles, infra_queues))
+    point.update(_drop_stats_from_metrics(system_metrics))
+    point.update(cpu_ceiling(system_metrics.get("cpu_cap") or {}, point))
+
+    # correctness of the final verdicts
+    correctness = metrics.get("correctness") or {}
+    per_system = (correctness.get("per_system") or {}).get(system) or {}
+    for key in ("accuracy", "correct", "wrong", "absent", "spurious"):
+        if key in per_system:
+            point[key] = per_system[key]
+    point["revisions_total"] = revisions.get("revisions_total")
+    point["pairs_with_multiple_revisions"] = revisions.get("pairs_with_multiple")
+    point["max_revisions_on_a_pair"] = revisions.get("max_on_a_pair")
+    return point
+
+
 def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[str, ...] = INFRA_ROLES, infra_queues: tuple[str, ...] = INFRA_QUEUES) -> dict | None:
     run_file_path = run_dir / "run.json"
     if not run_file_path.exists():
@@ -596,6 +817,7 @@ def collect_point(run_dir: Path, system: str, x_param: str, infra_roles: tuple[s
         "run_problems": [problem for problem in (list(run_file.get("problems") or [])
                                                  + list(timeline.get("problems") or []))
                          if not _problem_is_other_system(problem, system)],
+        "point_source": "raw run files",
     }
     send_summary_path = run_dir / "send" / f"{system}.summary.json"
     if send_summary_path.exists():
@@ -1490,6 +1712,11 @@ def main() -> int:
                              "relative to capacity and window length is what makes it comparable between a 1024 slot "
                              "gossip queue and an 8192 slot event queue, and between a 65s and a 13s run. a plain "
                              "'slope > 0' test fires on measurement noise")
+    parser.add_argument("--source", choices=("auto", "metrics", "raw"), default="auto",
+                        help="where to read each point from. 'metrics' uses metrics.json only (schema 4+), "
+                             "which means records/ and resources/ can be deleted after extract_metrics.py "
+                             "has run. 'raw' reads the run files directly. 'auto' (default) prefers "
+                             "metrics.json and falls back to the raw files when it is missing or too old")
     parser.add_argument("--hot-cpu-pct", type=float, default=90.0,
                         help="nodes at or above this %% of ONE CORE are listed under each point as a hot "
                              "node (default 90). informational only - it never decides saturation, it just "
@@ -1580,7 +1807,13 @@ def main() -> int:
     for run_directory in run_directories:
         for system in args.systems:
             progress.note(f"{run_directory.name} {system}")
-            point = collect_point(run_directory, system, args.x_param, tuple(args.infra_roles), tuple(args.infra_queues))
+            point = None
+            if args.source in ("auto", "metrics"):
+                point = collect_point_from_metrics(run_directory, system, args.x_param,
+                                                   tuple(args.infra_roles), tuple(args.infra_queues))
+            if point is None and args.source in ("auto", "raw"):
+                point = collect_point(run_directory, system, args.x_param,
+                                      tuple(args.infra_roles), tuple(args.infra_queues))
             progress.step(f"{run_directory.name} {system}")
             if point is None:
                 continue
