@@ -973,6 +973,7 @@ def classify(point: dict, thresholds: dict) -> dict:
     reasons: list[str] = []
     warnings: list[str] = []
     notes: list[str] = []
+    signals: list[dict] = []
 
     # LOSS (message/event/result/correction drops)
     if point.get("input_drops"):
@@ -981,6 +982,8 @@ def classify(point: dict, thresholds: dict) -> dict:
         by_node = point.get("input_drops_by_node") or {}
         where = ("" if thresholds.get("only_max_node") or not by_node else
                  " on " + ", ".join(f"{node} ({count})" for node, count in by_node.items()))
+        signals.append({"kind": "LOSS", "where": ", ".join(by_node) or "unattributed",
+                        "value": point["input_drops"]})
         reasons.append(f"{point['input_drops']} input record(s) dropped{where} "
                        f"({detail or 'reason not recorded'}) - work was destroyed, and a late "
                        f"revision cannot repair a message or event that never arrived")
@@ -1008,21 +1011,26 @@ def classify(point: dict, thresholds: dict) -> dict:
             crossed = [entry for entry in (point.get("queue_profile") or [])
                        if entry["p95_fill"] > thresholds["queue_fill"]
                        and (entry.get("growth") or 0) > thresholds["queue_growth"]]
-            if thresholds.get("only_max_node") or len(crossed) <= 1:
+            signals.append({"kind": "BACKLOG", "where": f"{standing_queue} on {standing_node}",
+                            "value": standing_fill, "growth": standing_growth,
+                            "crossed": len(crossed)})
+            if thresholds.get("only_max_node"):
                 reasons.append(f"{standing_queue} on {standing_node} is a standing backlog: p95 depth "
                                f"{standing_fill:.0%} of capacity (> {thresholds['queue_fill']:.0%}) and "
                                f"the depth trend rises by {standing_growth:.0%} of capacity across the "
                                f"send window ({standing_slope:+.1f} slots/s)"
                                + (f", p99 {standing_p99:.0%}" if standing_p99 is not None else "")
-                               + (f"  [{len(crossed)} queues crossed the threshold in total, "
+                               + (f"  [{len(crossed)} queues over the threshold in total, "
                                   f"--only-max-node hides them]" if len(crossed) > 1 else ""))
             else:
-                reasons.append(f"{len(crossed)} standing backlogs (p95 > {thresholds['queue_fill']:.0%} "
-                               f"of capacity AND still growing), worst first:")
+                reasons.append(f"{len(crossed)} queue(s) over the backlog threshold "
+                               f"(p95 > {thresholds['queue_fill']:.0%} of capacity AND trend "
+                               f"> {thresholds['queue_growth']:.0%}), deepest first:")
                 for entry in crossed:
-                    reasons.append(f"     {entry['queue']} on {entry['node']}: p95 {entry['p95_fill']:.0%} "
-                                   f"p99 {entry['p99_fill']:.0%} of {entry['capacity']} slots, "
-                                   f"trend {entry['growth']:+.0%} of capacity over the window "
+                    reasons.append(f"     {entry['queue']} on {entry['node']}: p95 "
+                                   f"{entry['p95_fill']:.0%} p99 {entry['p99_fill']:.0%} of "
+                                   f"{entry['capacity']} slots, trend {entry['growth']:+.0%} of "
+                                   f"capacity over the window "
                                    f"({fmt(entry['slope_per_s'], '+.1f')} slots/s)")
         else:
             warnings.append(f"{standing_queue} on {standing_node}: p95 depth {standing_fill:.0%} of "
@@ -1048,10 +1056,14 @@ def classify(point: dict, thresholds: dict) -> dict:
     if of_cap is not None:
         if of_cap >= thresholds["cpu_pinned"] / 100.0:
             cpu_fired = True
+            signals.append({"kind": "CPU CAP", "where": point.get("sys_cpu_max_node") or "system",
+                            "value": of_cap})
             reasons.append(f"{cap_text} - pinned at the cap "
                            f"(>= {thresholds['cpu_pinned']:.0f}%), there is no cpu left to go faster")
         elif of_cap >= thresholds["cpu_pct"] / 100.0 and ratio is not None and ratio < thresholds["achieved_ratio"]:
             cpu_fired = True
+            signals.append({"kind": "CPU CAP", "where": point.get("sys_cpu_max_node") or "system",
+                            "value": of_cap})
             reasons.append(f"{cap_text} AND only {ratio:.3f} of the target rate was delivered "
                            f"- the cpu it was given ran out and the shortfall shows it "
                            f"(cap >= {thresholds['cpu_pct']:.0f}%, rate < {thresholds['achieved_ratio']:.2f})")
@@ -1103,6 +1115,7 @@ def classify(point: dict, thresholds: dict) -> dict:
     # STALL (blocked sends)
     max_send = point.get("max_send_ms")
     if max_send is not None and max_send >= thresholds["stall_ms"]:
+        signals.append({"kind": "STALL", "where": "sender socket", "value": max_send / 1000})
         reasons.append(f"one socket write blocked for {max_send / 1000:.1f}s "
                        f"(>= {thresholds['stall_ms'] / 1000:.1f}s) - a node stopped reading its socket "
                        f"altogether")
@@ -1147,7 +1160,8 @@ def classify(point: dict, thresholds: dict) -> dict:
                         f"into the system and confound everything above it")
 
     return {"saturated": bool(reasons), "reasons": reasons, "invalid": invalid,
-            "warnings": warnings, "notes": notes, "tooling_limited": tooling_limited}
+            "warnings": warnings, "notes": notes, "signals": signals,
+            "tooling_limited": tooling_limited}
 
 
 def fmt(value, spec="", dash="-"):
@@ -1336,6 +1350,31 @@ def print_system_table(system: str, points: list[dict], x_param: str) -> None:
             print(f"{'':>7}   .. {note}")
 
 
+def summarise_signals(points: list[dict]) -> list[str]:
+    grouped: dict[tuple[str, str], list[tuple[float, str]]] = {}
+    for point in points:
+        for signal in point["_class"].get("signals", []):
+            key = (signal["kind"], str(signal.get("where")))
+            grouped.setdefault(key, []).append((signal.get("value"), point.get("run_id")))
+    lines = []
+    for (kind, where), hits in sorted(grouped.items(), key=lambda item: -len(item[1])):
+        values = [value for value, _run in hits if value is not None]
+        span = ""
+        if values:
+            if kind == "BACKLOG" or kind == "CPU CAP":
+                span = (f", {min(values):.0%} of the threshold quantity"
+                        if len(values) == 1 else
+                        f", {min(values):.0%} to {max(values):.0%}")
+            elif kind == "STALL":
+                span = f", {min(values):.1f}s to {max(values):.1f}s"
+            else:
+                span = f", {min(values):.0f} to {max(values):.0f}"
+        runs = [run for _value, run in hits]
+        shown = ", ".join(runs[:3]) + (f" and {len(runs) - 3} more" if len(runs) > 3 else "")
+        lines.append(f"{kind} at {where} in {len(hits)}/{len(points)} replicate(s){span}  [{shown}]")
+    return lines
+
+
 def summarise_system(system: str, points: list[dict], x_parameter: str, knee_frac: float = 0.5, x_direction: str = "increasing") -> dict:
 
     usable = [point for point in points
@@ -1388,8 +1427,7 @@ def summarise_system(system: str, points: list[dict], x_parameter: str, knee_fra
         "tooling_limited_points": [point["run_id"] for point in tooling_limited],
         "first_sustained_saturating_x": knee,
         "first_sustained_saturating_reasons": (
-            sorted({reason for point in by_level[knee] for reason in point["_class"]["reasons"]})
-            if knee is not None else []),
+            summarise_signals(by_level[knee]) if knee is not None else []),
         "isolated_saturating_x": early_minority,
         "early_majority_saturating_x": early_majority,
         "highest_sustainable_x": sustainable,

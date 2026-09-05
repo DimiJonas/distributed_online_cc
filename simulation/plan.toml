@@ -286,13 +286,13 @@ systems = ["decentralized", "central"]
   cpu_cap_scope = "node"
   cpu_cap_cores = 1
   [experiment.grid]
-  rate = [4000, 8000, 12000, 16000]
+  rate = [4000, 8000, 12000, 16000, 24000, 32000]
 
 [[experiment]]
 id = "E1c"
 seeds = [2, 3, 5]
 replicates = 3
-systems = ["decentralized", "central"]
+systems = ["decentralized"]       # decentralized only because central already saturated in tier M at 32k
   [experiment.params]
   cases = 30000                   # tier L
   msgtrace = false
@@ -301,7 +301,8 @@ systems = ["decentralized", "central"]
   cpu_cap_scope = "node"
   cpu_cap_cores = 1
   [experiment.grid]
-  rate = [24000, 32000, 40000, 50000]
+  rate = [35000, 38000, 40000, 42000, 44000]
+
 
 # E1cL: tier L extended down into the rates where tier M was clean
 [[experiment]]
