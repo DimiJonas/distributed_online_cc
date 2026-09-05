@@ -420,22 +420,33 @@ def panel_figure(rows, x_key, panels, series_key, title, out_path, formats, logx
     for index in range(len(usable_panels), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
 
-    handles, labels = axes_grid[0][0].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(title, fontsize=12)
-    figure.tight_layout(rect=(0, 0.03, 1, 0.96))
     return write_figure(figure, out_path, formats)
 
 
-# place the legend while considering the space it needs so it doesnt go over the plots
+def figure_handles(figure) -> tuple[list, list]:
+    seen: dict[str, object] = {}
+    for axes in figure.axes:
+        for handle, label in zip(*axes.get_legend_handles_labels()):
+            seen.setdefault(label, handle)
+    labels = sorted(seen, key=lambda label: (label.split(" (")[0], _label_sort_key(label)))
+    return [seen[label] for label in labels], labels
+
+
+def _label_sort_key(label: str):
+    digits = "".join(character for character in label.split("=")[-1] if character.isdigit())
+    return (int(digits) if digits else 0, label)
+
+
+# one legend placement for every figure that needs one
 def place_legend(figure, handles, labels, max_rows: int = 2, fontsize: int = 9) -> None:
     if not labels:
         figure.tight_layout(rect=(0, 0.02, 1, 0.94))
         return
     columns = max(1, min(6, -(-len(labels) // max_rows)))
     rows = -(-len(labels) // columns)
-    # how much of the figure height the legend needs, plus room for the x labels above it
     height = figure.get_size_inches()[1] or 4.0
     reserved = min(0.42, (0.30 + 0.19 * rows) / height)
     figure.tight_layout(rect=(0, reserved, 1, 0.94))
@@ -577,14 +588,13 @@ def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=Fa
     for index in range(len(usable_panels), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
 
-    handles, labels = axes_grid[0][0].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: local attacker" + (" (pool fraction)" if by_fraction else ""), fontsize=12)
     return write_figure(figure, out_path, formats)
 
 
-# collapse the (system, sweep value) keys into one key per system, concatenating the samples at each compromise size for the aggregated privacy figures
+# collapse the (system, sweep value) keys into one key per system, concatenating the samples at each compromise size (aggregate plot lines)
 def _pool_over_parameter(collected: dict, pools: dict) -> tuple[dict, dict]:
     pooled: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     pooled_pools: dict = {}
@@ -649,11 +659,9 @@ def fact_breakdown_figure(privacy, experiment, x_key, out_path, formats):
     for index in range(len(usable), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
 
-    handles, labels = axes_grid[0][0].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: disclosure per atom kind", fontsize=12)
-    figure.tight_layout(rect=(0, 0.03, 1, 0.96))
     return write_figure(figure, out_path, formats)
 
 
@@ -688,11 +696,9 @@ def fact_traffic_figure(privacy, experiment, x_key, out_path, formats):
                           label=f"{style['label']}, {condition}")
         style_axes(axes, title, "compromised fraction of the pool", ylabel)
         axes.set_ylim(-0.02, 1.05)
-    handles, labels = axes_grid[0][1].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: what the coordination traffic adds", fontsize=12)
-    figure.tight_layout(rect=(0, 0.06, 1, 0.95))
     return write_figure(figure, out_path, formats)
 
 
@@ -731,7 +737,7 @@ PRIVACY_VS_PARAMETER = [
 PRIVACY_LEVELS = [("1 node", None, 1), ("25% of pool", 0.25, None), ("50% of pool", 0.5, None)]
 
 
-# used to interpolate linearly between 2 values
+# interpolate between the fraction points
 def _value_at_fraction(per_size: dict, metric: str, pool: int, fraction: float):
     sizes = sorted(size for size in per_size if metric in per_size[size])
     if not sizes:
@@ -790,11 +796,9 @@ def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
         style_axes(axes, title, x_key, ylabel)
         axes.set_ylim(-0.02, 1.05)
 
-    handles, labels = axes_grid[0][0].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: privacy against {x_key}", fontsize=12)
-    figure.tight_layout(rect=(0, 0.05, 1, 0.95))
     return write_figure(figure, out_path, formats)
 
 
@@ -1045,11 +1049,9 @@ def sensitivity_figure(rows, varied, metrics, title, out_path, formats):
             draw_curve(axes, curve(spoke, param, metric, None, scale), None)
             style_axes(axes, panel_title if param_index == 0 else "", param, ylabel, logy=logy)
 
-    handles, labels = axes_grid[0][0].get_legend_handles_labels()
-    if handles:
-        place_legend(figure, handles, labels)
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
     figure.suptitle(title, fontsize=12)
-    figure.tight_layout(rect=(0, 0.02, 1, 0.97))
     return write_figure(figure, out_path, formats)
 
 
@@ -1188,7 +1190,7 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
     if not any(key[0] == experiment for key in privacy):
         return written
     note("privacy curves")
-    # every sweep value as its own line and one line per system pooled over the sweep
+    # both versions of each: every sweep value as its own line and one line per system pooled over the sweep
     swept = privacy_x is not None and len({(block["params"].get(privacy_x))
                                            for (exp, _r, _s), block in privacy.items()
                                            if exp == experiment}) > 1
