@@ -2,7 +2,7 @@
 """
 extract_metrics.py - extract metrics from the generated files of a simulation run
 
-writes metrics.json:  all one time metrics (throughput, latency, revisions, resources, message overhead, margin, correctness) for each system
+writes metrics.json:  all one time metrics (throughput, latency, revisions, resources, message overhead, correctness) for each system
 writes observations.json.gz:  what each node saw (local events, events inferable from coordination traffic, case end sightings) for computing privacy metrics with compute_privacy.py
 writes disclosure_index.json.gz next to the stream's manifest.jsonl:  the compacted ground truth log, the trace variant index and the log baseline that compute_privacy.py needs
 
@@ -28,7 +28,6 @@ import json
 import math
 import os
 import sys
-from bisect import bisect_left
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -37,7 +36,7 @@ from helpers import (CLK_TCK, load_system_configs, read_jsonl, quantile, slope_p
                      percentiles, case_id_hash_fraction, discover_runs, Progress,
                      DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
 CASE_CLOSED_REASON = "case closed"
@@ -638,24 +637,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     if reach and constraint_nodes:
         reach_fraction = (sum(reach.values()) / len(reach)) / len(constraint_nodes)
 
-    # --- margin: inter event gap of a case against the observed coordination latency
-    gaps = []
-    per_case_times: dict[str, list[int]] = {} # case -> [t1 from each instance]
-    for instance, (case_id, _event) in scan.instance_to_case_event.items():
-        if instance in scan.t1:
-            per_case_times.setdefault(case_id, []).append(scan.t1[instance])
-    for times in per_case_times.values():
-        times.sort()
-        gaps += [time_b - time_a for time_a, time_b in zip(times, times[1:])]
-    coordination = checking or detection
-    gap_p50 = quantile(gaps, 0.5)
-    coordination_p50 = quantile(coordination, 0.5)
-    negative_fraction = None
-    if gaps and coordination:
-        ordered_gaps = sorted(gaps)
-        negative = sum(1 for value in coordination
-                       if bisect_left(ordered_gaps, value) > len(ordered_gaps) / 2)
-        negative_fraction = negative / len(coordination)
+    cases_seen = {case_id for _instance, (case_id, _event) in scan.instance_to_case_event.items()}
 
     # --- throughput
     send = send_metrics(run_dir / "send", system)
@@ -763,7 +745,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     workload_messages = merge_message_buckets(load_messages, settle_messages)
 
     events = send.get("events_sent") or len(scan.t1) or 1
-    cases_count = send.get("cases") or len(per_case_times) or 1
+    cases_count = send.get("cases") or len(cases_seen) or 1
     idle_seconds = windows.seconds(windows.idle)
     settle_seconds = windows.seconds(windows.settle)
     idle_nodes = max(1, len(scan.nodes_seen))
@@ -866,12 +848,6 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             },
             "peer_churn": scan.peer_churn,
         },
-        "margin": {
-            "inter_event_gap_us": percentiles(gaps, (5, 50, 95)),
-            "coordination_latency_us": percentiles(coordination, (50, 95, 99)),
-            "margin_p50_us": (gap_p50 - coordination_p50) if gap_p50 is not None and coordination_p50 is not None else None,
-            "coordination_slower_than_gap_fraction": negative_fraction,
-        },
         "quality": {
             "record_files": len(record_files),
             "writer_shutdown_missing": sorted(scan.nodes_seen - scan.writer_shutdown),
@@ -894,6 +870,11 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
 
     # --- observations for compute_privacy.py
     nodes = load_system_configs(run_dir / "sys" / system / "configs")
+    # which activities each node watches
+    metrics["placement"] = {str(node.node_id): {"role": node.role,
+                                                "watches": sorted(node.event_ids or []),
+                                                "constraints": len(node.constraints or [])}
+                            for node in nodes}
     observations = build_observations(system, nodes, scan, case_limit)
     return metrics, observations
 
@@ -946,6 +927,15 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
 
     case_end = {str(node): cases for node, cases in scan.case_end_seen.items()}
 
+    # which activities each node watches and which constraint roles it carries
+    placement = {str(node.node_id): {"role": node.role,
+                                     "watches": sorted(node.event_ids or []),
+                                     "constraints": [{"id": c.get("id"), "type": c.get("type"),
+                                                      "event_id": c.get("event_id"),
+                                                      "role": c.get("role")}
+                                                     for c in (node.constraints or [])]}
+                 for node in nodes}
+
     node_roles = {node.node_id: node.role for node in nodes}
     if system == "central":
         attacker_node_pool = [node_id for node_id, node_role in node_roles.items() if node_role in ("central", "forwarder")]
@@ -956,6 +946,7 @@ def build_observations(system: str, nodes, scan: Scan, case_limit: int | None) -
         "system": system,
         "attacker_pool": sorted(attacker_node_pool),
         "node_roles": {str(node_id): node_role for node_id, node_role in node_roles.items()},
+        "node_placement": placement,
         "peer_to_node": peer_address_to_node_id,
         "coordination_quality": coordination_quality,
         "local_events": local,

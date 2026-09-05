@@ -21,7 +21,7 @@ which figures an experiment gets is decided by what is in its runs:
 
   a parameter sweep -> scalability panels against that parameter (rate, nodes, repeat, cap, ...)
   runs with no workload -> idle cost panels (per node cost against node count)
-  netem varies -> latency and margin against the delay (one line per rate)
+  netem varies -> latency against the delay (one line per rate)
   privacy.json present -> exposure, disclosure and first spy curves against the compromise size
   one factor at a time -> sensitivity panels (one small multiple per varied parameter)
 
@@ -284,6 +284,7 @@ def draw_curve(axes, by_series: dict, series_key: str | None, marker_every=True)
 THROUGHPUT_PANELS = [
     ("throughput.effective_rate", "achieved rate", "events/s", 1.0, False),
     ("throughput.pacer_max_lag_ms", "pacer lag (max)", "ms", 1.0, False),
+    ("throughput.queues.event_q.p95", "event queue depth p95", "events", 1.0, False),
     ("throughput.queues.event_q.max", "event queue peak depth", "events", 1.0, False),
     ("throughput.message_drops.total", "message drops", "messages", 1.0, False),
     ("throughput.closed_case_drops", "dropped after the case closed", "events + messages", 1.0, False),
@@ -303,6 +304,14 @@ RESOURCE_PANELS = [
     ("resources.busiest_thread.cpu_percent", "cpu of the busiest thread", "% of one core", 1.0, False),
     ("resources.rss_kb_total_max", "resident memory (all nodes)", "MB", 1 / 1024, False),
 ]
+GOSSIP_PANELS = [
+    ("throughput.queues.gossip_in_q.p95", "gossip inbound queue p95", "messages", 1.0, False),
+    ("throughput.queues.gossip_in_q.max", "gossip inbound queue peak", "messages", 1.0, False),
+    ("throughput.queues.gossip_out_q.p95", "gossip outbound queue p95", "messages", 1.0, False),
+    ("throughput.queues.gossip_out_q.max", "gossip outbound queue peak", "messages", 1.0, False),
+    ("latency_us.gossip_dissemination.p95", "case end dissemination p95", "ms", 1e-3, False),
+    ("latency_us.gossip_dissemination.reach_fraction", "constraint nodes reached", "fraction", 1.0, False),
+]
 MESSAGE_PANELS = [
     ("messages.derived.messages_per_event", "messages per event", "messages", 1.0, False),
     ("messages.derived.bytes_per_event_excl_sink", "bytes per event (sink excluded)", "bytes", 1.0, False),
@@ -317,7 +326,6 @@ CORRECTNESS_PANELS = [
     ("revisions.pairs_with_multiple", "pairs with more than one revision", "pairs", 1.0, False),
     ("revisions.revisions_total", "revisions in total", "revisions", 1.0, False),
     ("revisions.final_after_send_end", "verdicts finalised after the stream ended", "pairs", 1.0, False),
-    ("margin.coordination_slower_than_gap_fraction", "coordination slower than the event gap", "fraction", 1.0, False),
 ]
 IDLE_PANELS = [
     ("resources.idle.cpu_seconds_per_node_second", "idle cpu per node", "cpu-s per node-second", 1.0, False),
@@ -327,6 +335,7 @@ IDLE_PANELS = [
 ]
 PANEL_GROUPS = [
     ("throughput", THROUGHPUT_PANELS),
+    ("gossip", GOSSIP_PANELS),
     ("latency", LATENCY_PANELS),
     ("resources", RESOURCE_PANELS),
     ("messages", MESSAGE_PANELS),
@@ -378,11 +387,7 @@ def mark_placement_boundary(axes, rows: list[Row], x_key: str) -> None:
                   va="top", rotation=90)
 
 
-# the margin is the gap between events minus the coordination latency
-# when it goes negative, coordination is slower than the stream and corrections have to clean up after it, so it should be read togther with the revision load
-MARGIN_PANELS = [
-    ("margin.margin_p50_us", "margin p50 (event gap minus coordination)", "us", 1.0, False),
-    ("margin.coordination_slower_than_gap_fraction", "share of events with a negative margin", "fraction", 1.0, False),
+REVISION_PANELS = [
     ("revisions.pairs_with_multiple", "pairs needing more than one revision", "pairs", 1.0, False),
     ("revisions.correction_drops.total", "corrections that could not be applied", "corrections", 1.0, False),
     ("latency_us.provisional_t3_t4.p95", "provisional window p95 (t3 to t4)", "ms", 1e-3, False),
@@ -417,11 +422,26 @@ def panel_figure(rows, x_key, panels, series_key, title, out_path, formats, logx
 
     handles, labels = axes_grid[0][0].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=9,
-                      frameon=False, bbox_to_anchor=(0.5, -0.01))
+        place_legend(figure, handles, labels)
     figure.suptitle(title, fontsize=12)
     figure.tight_layout(rect=(0, 0.03, 1, 0.96))
     return write_figure(figure, out_path, formats)
+
+
+# place the legend while considering the space it needs so it doesnt go over the plots
+def place_legend(figure, handles, labels, max_rows: int = 2, fontsize: int = 9) -> None:
+    if not labels:
+        figure.tight_layout(rect=(0, 0.02, 1, 0.94))
+        return
+    columns = max(1, min(6, -(-len(labels) // max_rows)))
+    rows = -(-len(labels) // columns)
+    # how much of the figure height the legend needs, plus room for the x labels above it
+    height = figure.get_size_inches()[1] or 4.0
+    reserved = min(0.42, (0.30 + 0.19 * rows) / height)
+    figure.tight_layout(rect=(0, reserved, 1, 0.94))
+    figure.legend(handles, labels, loc="lower center", ncol=columns,
+                  fontsize=fontsize if len(labels) <= 8 else max(6, fontsize - 2),
+                  frameon=False, bbox_to_anchor=(0.5, 0.0))
 
 
 def write_figure(figure, out_path: Path, formats) -> Path:
@@ -514,8 +534,12 @@ def privacy_curves(privacy: dict, experiment: str, x_key: str | None):
     return collected, pools
 
 
-def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=False):
+def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=False,
+                   aggregate=False):
     collected, pools = privacy_curves(privacy, experiment, x_key)
+    if aggregate:
+        collected, pools = _pool_over_parameter(collected, pools)
+        x_key = None
     if not collected:
         return None
     usable_panels = [panel for panel in PRIVACY_PANELS if any(panel[0] in per_size for per_x in collected.values() for per_size in per_x.values())]
@@ -555,11 +579,23 @@ def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=Fa
 
     handles, labels = axes_grid[0][0].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=9,
-                      frameon=False, bbox_to_anchor=(0.5, -0.01))
+        place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: local attacker" + (" (pool fraction)" if by_fraction else ""), fontsize=12)
-    figure.tight_layout(rect=(0, 0.03, 1, 0.96))
     return write_figure(figure, out_path, formats)
+
+
+# collapse the (system, sweep value) keys into one key per system, concatenating the samples at each compromise size for the aggregated privacy figures
+def _pool_over_parameter(collected: dict, pools: dict) -> tuple[dict, dict]:
+    pooled: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    pooled_pools: dict = {}
+    for (system, x), per_size in collected.items():
+        for compromised, metrics in per_size.items():
+            for metric, values in metrics.items():
+                pooled[(system, None)][compromised][metric].extend(values)
+        pooled_pools[(system, None)] = max(pooled_pools.get((system, None), 0),
+                                           pools.get((system, x)) or 0)
+    return ({key: {size: dict(metrics) for size, metrics in per_size.items()}
+             for key, per_size in pooled.items()}, pooled_pools)
 
 
 # per atom kind facts
@@ -580,6 +616,7 @@ def fact_breakdown_figure(privacy, experiment, x_key, out_path, formats):
     collected, pools = privacy_curves(privacy, experiment, x_key)
     if not collected:
         return None
+    collected, pools = _pool_over_parameter(collected, pools)
     usable = [panel for panel in FACT_KIND_PANELS
               if any(panel[0] in per_size for per_x in collected.values() for per_size in per_x.values())]
     if not usable:
@@ -614,8 +651,7 @@ def fact_breakdown_figure(privacy, experiment, x_key, out_path, formats):
 
     handles, labels = axes_grid[0][0].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=9,
-                      frameon=False, bbox_to_anchor=(0.5, -0.01))
+        place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: disclosure per atom kind", fontsize=12)
     figure.tight_layout(rect=(0, 0.03, 1, 0.96))
     return write_figure(figure, out_path, formats)
@@ -626,6 +662,7 @@ def fact_traffic_figure(privacy, experiment, x_key, out_path, formats):
     collected, pools = privacy_curves(privacy, experiment, x_key)
     if not collected:
         return None
+    collected, pools = _pool_over_parameter(collected, pools)
     conditions = [("_config_only", "config only", ":"), ("", "with coordination traffic", "-")]
     panels = [("model_disclosure", "process model", "fraction of model atoms"),
               ("deployment_disclosure", "deployment", "fraction of deployment atoms")]
@@ -653,8 +690,7 @@ def fact_traffic_figure(privacy, experiment, x_key, out_path, formats):
         axes.set_ylim(-0.02, 1.05)
     handles, labels = axes_grid[0][1].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=2, fontsize=9, frameon=False,
-                      bbox_to_anchor=(0.5, -0.02))
+        place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: what the coordination traffic adds", fontsize=12)
     figure.tight_layout(rect=(0, 0.06, 1, 0.95))
     return write_figure(figure, out_path, formats)
@@ -695,6 +731,26 @@ PRIVACY_VS_PARAMETER = [
 PRIVACY_LEVELS = [("1 node", None, 1), ("25% of pool", 0.25, None), ("50% of pool", 0.5, None)]
 
 
+# used to interpolate linearly between 2 values
+def _value_at_fraction(per_size: dict, metric: str, pool: int, fraction: float):
+    sizes = sorted(size for size in per_size if metric in per_size[size])
+    if not sizes:
+        return None
+    target = fraction * pool
+    below = [size for size in sizes if size <= target]
+    above = [size for size in sizes if size >= target]
+    if not below or not above:
+        nearest = min(sizes, key=lambda size: abs(size - target))
+        return summarize(per_size[nearest][metric])[0]
+    low, high = max(below), min(above)
+    low_value = summarize(per_size[low][metric])[0]
+    if low == high:
+        return low_value
+    high_value = summarize(per_size[high][metric])[0]
+    weight = (target - low) / (high - low)
+    return low_value + weight * (high_value - low_value)
+
+
 def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
     collected, pools = privacy_curves(privacy, experiment, x_key)
     if not collected or all(x is None for _system, x in collected):
@@ -717,13 +773,14 @@ def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
                     pool = pools.get((system, x)) or 1
                     if exact is not None:
                         chosen = exact if exact in per_size else None
+                        if chosen is None or metric not in per_size.get(chosen, {}):
+                            continue
+                        points.append((x, summarize(per_size[chosen][metric])[0]))
                     else:
-                        candidates = [size for size in per_size if metric in per_size[size]]
-                        chosen = min(candidates, key=lambda size: abs(size / pool - fraction),
-                                     default=None)
-                    if chosen is None or metric not in per_size.get(chosen, {}):
-                        continue
-                    points.append((x, summarize(per_size[chosen][metric])[0]))
+                        value = _value_at_fraction(per_size, metric, pool, fraction)
+                        if value is None:
+                            continue
+                        points.append((x, value))
                 if not points:
                     continue
                 points.sort(key=lambda point: point[0])
@@ -735,7 +792,7 @@ def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
 
     handles, labels = axes_grid[0][0].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=min(3, len(labels)), fontsize=8, frameon=False, bbox_to_anchor=(0.5, -0.06))
+        place_legend(figure, handles, labels)
     figure.suptitle(f"{experiment}: privacy against {x_key}", fontsize=12)
     figure.tight_layout(rect=(0, 0.05, 1, 0.95))
     return write_figure(figure, out_path, formats)
@@ -871,8 +928,11 @@ def _nodes_vs_activities_panels(entries, out_path, formats, subtitle_prefix: str
 
     all_x = {distinct for system in collected for statistic in collected[system]
              for distinct in collected[system][statistic]}
-    upper = max(all_x) + 1
-    figure, axes_row = plt.subplots(1, 3, figsize=(13.5, 4.8))
+    all_y = [summarize(values)[0] for system in collected for statistic in collected[system]
+             for values in collected[system][statistic].values()]
+    x_low, x_high = min(all_x), max(all_x)
+    y_low, y_high = min(all_y), max(all_y)
+    figure, axes_row = plt.subplots(1, 3, figsize=(13.5, 4.4))
 
     for axes, (statistic, panel_title) in zip(axes_row, NODES_VS_ACTIVITIES_PANELS):
         for system in sorted(collected):
@@ -889,11 +949,10 @@ def _nodes_vs_activities_panels(entries, out_path, formats, subtitle_prefix: str
             axes.scatter(xs, ys, s=[12 + 80 * weight / largest for weight in weights],
                          color=style.get("color", "#888"), alpha=0.75, zorder=4,
                          marker=style.get("marker", "o"))
-        axes.plot([0, upper], [0, upper], linestyle=":", linewidth=1.4, color="#111111", zorder=6,
-                  label="one node per activity (y = x)")
-        axes.set_xlim(0, upper)
-        axes.set_ylim(0, upper)
-        axes.set_aspect("equal", adjustable="box")
+        pad_x = max(1.0, 0.06 * (x_high - x_low))
+        pad_y = max(0.5, 0.10 * (y_high - y_low))
+        axes.set_xlim(x_low - pad_x, x_high + pad_x)
+        axes.set_ylim(max(0.0, y_low - pad_y), y_high + pad_y)
         style_axes(axes, panel_title, "distinct activities in the case",
                    "nodes needed to reconstruct the case")
         axes.legend(fontsize=7, loc="upper left", framealpha=0.9)
@@ -988,7 +1047,7 @@ def sensitivity_figure(rows, varied, metrics, title, out_path, formats):
 
     handles, labels = axes_grid[0][0].get_legend_handles_labels()
     if handles:
-        figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=9, frameon=False, bbox_to_anchor=(0.5, -0.01))
+        place_legend(figure, handles, labels)
     figure.suptitle(title, fontsize=12)
     figure.tight_layout(rect=(0, 0.02, 1, 0.97))
     return write_figure(figure, out_path, formats)
@@ -1025,8 +1084,9 @@ CSV_METRICS = [
     ("coordination_ratio", "messages.derived.coordination_ratio", 1.0),
     ("pairs_multi_revision", "revisions.pairs_with_multiple", 1.0),
     ("revisions_total", "revisions.revisions_total", 1.0),
-    ("margin_p50_us", "margin.margin_p50_us", 1.0),
-    ("margin_negative_frac", "margin.coordination_slower_than_gap_fraction", 1.0),
+    ("event_q_p95", "throughput.queues.event_q.p95", 1.0),
+    ("gossip_in_q_p95", "throughput.queues.gossip_in_q.p95", 1.0),
+    ("gossip_out_q_p95", "throughput.queues.gossip_out_q.p95", 1.0),
     ("sender_cpu_pct", "resources.non_system.tooling.cpu_percent", 1.0),
     ("host_busy_pct", "resources.host_cpu_busy_fraction", 100.0),
     ("threads_total_max", "resources.threads_total_max", 1.0),
@@ -1128,10 +1188,19 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
     if not any(key[0] == experiment for key in privacy):
         return written
     note("privacy curves")
+    # every sweep value as its own line and one line per system pooled over the sweep
+    swept = privacy_x is not None and len({(block["params"].get(privacy_x))
+                                           for (exp, _r, _s), block in privacy.items()
+                                           if exp == experiment}) > 1
     for name, kwargs in (("privacy", {}), ("privacy_by_fraction", {"by_fraction": True})):
         figure = privacy_figure(privacy, experiment, privacy_x, target / name, formats, **kwargs)
         if figure:
             written.append(figure)
+        if swept:
+            figure = privacy_figure(privacy, experiment, privacy_x, target / f"{name}_aggregated",
+                                    formats, aggregate=True, **{**kwargs, "by_fraction": True})
+            if figure:
+                written.append(figure)
     if not sensitivity:
         figure = privacy_vs_parameter_figure(privacy, experiment, privacy_x,
                                              target / "privacy_vs_parameter", formats)
@@ -1210,9 +1279,7 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
             if figure:
                 written.append(figure)
 
-        # the margin mainly important when there is delay to make it negative
-        # and the memory split only once the case population moves
-        for group_name, panels in (("margin", MARGIN_PANELS), ("memory", MEMORY_PANELS)):
+        for group_name, panels in (("revisions", REVISION_PANELS), ("memory", MEMORY_PANELS)):
             note(group_name)
             figure = panel_figure(workload_rows, x_key, panels, series_key,
                                   f"{experiment}: {group_name} against {x_key}",

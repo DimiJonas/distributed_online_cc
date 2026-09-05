@@ -388,6 +388,7 @@ class SystemView:
         self.pool = list(observations["attacker_pool"])
         self.node_roles = observations.get("node_roles", {})
         self.truth = truth
+        self.placement = observations.get("node_placement") or {}
         self.index = index
         self.bk_types = tuple(bk_types)
         self.use_coordination = use_coordination
@@ -546,10 +547,12 @@ class SystemView:
 
         counts = []
         by_distinct_activities: dict[int, list[int]] = {}
+        witnesses: dict[int, dict] = {}
         for case_id in self.cases:
             needed = set(self.truth[case_id]["activities"])
             available = {node: self.local.get(node, {}).get(case_id, set()) & needed for node in self.pool}
             chosen = 0
+            picked: list = []
             remaining = set(needed)
             while remaining:
                 best = max(available.items(), key=lambda item: len(item[1] & remaining),
@@ -557,21 +560,37 @@ class SystemView:
                 if not best[1] & remaining:
                     chosen = None
                     break
+                picked.append((best[0], sorted(best[1] & remaining)))
                 remaining -= best[1]
                 available.pop(best[0])
                 chosen += 1
             if chosen is not None:
                 counts.append(chosen)
                 by_distinct_activities.setdefault(len(needed), []).append(chosen)
+                witness = {"case_id": case_id, "nodes_needed": chosen,
+                           "distinct_activities": sorted(needed),
+                           "trace": list(self.truth[case_id]["trace"]),
+                           "cover": [{"node": node, "named": activities,
+                                      "watches": (self.placement.get(str(node), {})
+                                                  .get("watches"))}
+                                     for node, activities in picked]}
+                slot = witnesses.setdefault(len(needed), {})
+                if not slot or chosen < slot["cheapest"]["nodes_needed"]:
+                    slot["cheapest"] = witness
+                if not slot.get("dearest") or chosen > slot["dearest"]["nodes_needed"]:
+                    slot["dearest"] = witness
         histogram: dict[str, int] = {}
         for count in counts:
             histogram[str(count)] = histogram.get(str(count), 0) + 1
 
         by_distinct: dict[str, dict] = {}
         for distinct, group in sorted(by_distinct_activities.items()):
+            slot = witnesses.get(distinct, {})
             by_distinct[str(distinct)] = {"cases": len(group),
                                           **percentiles([float(count) for count in group],
-                                                        points=(5, 50, 95))}
+                                                        points=(5, 50, 95)),
+                                          "cheapest_case": slot.get("cheapest"),
+                                          "dearest_case": slot.get("dearest")}
 
         return {"cases_covered": len(counts), "cases_total": len(self.cases), "histogram": histogram,
                 "by_distinct_activities": by_distinct,
@@ -790,6 +809,7 @@ def process_run(run_dir: Path, args, reporter=None) -> str:
 
         view = SystemView(system_observations, ground_truth_event_log, index, use_coordination=not args.local_events_only, bk_types=bk_types, nodes=nodes)
         payload["systems"][system] = {
+            "placement": system_observations.get("node_placement") or {},
             "local_attacker": evaluate_system(view, args.draws, args.seed, args.sizes, reporter,
                                               f"{run_dir.name} {system}"),
             "global_attacker": global_attacker(system_observations),
