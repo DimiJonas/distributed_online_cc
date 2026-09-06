@@ -34,7 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from helpers import (CLK_TCK, load_system_configs, read_jsonl, quantile, slope_per_second,
                      percentiles, case_id_hash_fraction, discover_runs, Progress,
-                     DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index)
+                     DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index,
+                     cpu_ceiling, saturation_signals, worst_queue)
 
 SCHEMA_VERSION = 5
 
@@ -713,27 +714,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     closed_case_message_drops = scan.drops["by_reason"].get(CASE_CLOSED_REASON, 0)
     closed_case_event_drops = scan.event_drops["by_reason"].get(CASE_CLOSED_REASON, 0)
     closed_case_drops = closed_case_message_drops + closed_case_event_drops
-    other_message_drops = scan.drops["total"] - closed_case_message_drops
-    other_event_drops = scan.event_drops["total"] - closed_case_event_drops
 
-    saturation_reasons = []
-    if send.get("no_send_log") and not idle_only_run:
-        saturation_reasons.append("no send log: the sender never ran, so every per event metric is meaningless")
-    if (send.get("pacer_max_lag_ms") or 0) > 100:
-        saturation_reasons.append("pacer lag over 100ms")
-    if closed_case_drops > 0:
-        saturation_reasons.append(f"{closed_case_drops} item(s) dropped after the case was closed "
-                                  f"({closed_case_event_drops} event(s), {closed_case_message_drops} "
-                                  f"message(s)): processing slower than the case end grace period")
-    if other_message_drops > 0:
-        saturation_reasons.append(f"{other_message_drops} message drops")
-    if other_event_drops > 0:
-        saturation_reasons.append(f"{other_event_drops} events dropped")
-    for queue_name, queue_stats in queues_out.items():
-        if queue_stats.get("max_utilization", 0.0) > 0.5:
-            saturation_reasons.append(f"{queue_name} above half capacity")
-        if queue_stats.get("slope_per_s", 0) > 1.0:
-            saturation_reasons.append(f"{queue_name} growing")
     settle_pressure = [f"{queue_name} at {queue_stats['max_utilization']:.0%} of capacity during settle"
                        for queue_name, queue_stats in queues_settle_out.items()
                        if queue_stats.get("max_utilization", 0.0) > 0.5]
@@ -763,6 +744,46 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     payload_bytes = workload_messages["bytes_sent"] - sink_bytes
 
     resources = resource_metrics(run_dir / "resources" / f"{system}.jsonl", windows)
+
+    queue_profile = [{"node": f"node-{entry['node_id']}", "queue": entry["queue"],
+                      "capacity": entry["capacity"], "p95_fill": entry["p95_fill"],
+                      "p99_fill": entry["p99_fill"], "growth": entry["growth_over_window"],
+                      "slope_per_s": entry["slope_per_s"]}
+                     for entry in queues_by_node_out]
+    cpu_profile = sorted(({"node": f"{values.get('role')}/{node_id}",
+                           "cpu_pct": values.get("cpu_percent") or 0.0,
+                           "rss_mb": (values.get("rss_kb_max") or 0) / 1024}
+                          for node_id, values in (resources.get("per_node") or {}).items()
+                          if values.get("role") != "sink"),
+                         key=lambda entry: -entry["cpu_pct"])
+    busiest = cpu_profile[0] if cpu_profile else {}
+    facts = {
+        "input_drops": scan.drops["total"] + scan.event_drops["total"],
+        "input_drop_reasons": {**{f"message_drop/{reason}": count
+                                  for reason, count in scan.drops["by_reason"].items()},
+                               **{f"dropped_event/{reason}": count
+                                  for reason, count in scan.event_drops["by_reason"].items()}},
+        "input_drops_by_node": {**(scan.drops.get("by_node") or {}),
+                                **(scan.event_drops.get("by_node") or {})},
+        "queue_profile": queue_profile,
+        "sys_cpu_profile": cpu_profile,
+        "sys_cpu_max_node": busiest.get("node"),
+        "achieved_ratio": ((send.get("achieved_rate") / send["offered_rate"])
+                           if send.get("achieved_rate") and send.get("offered_rate") else None),
+        "max_send_ms": ((send.get("max_send_us") / 1000.0)
+                        if send.get("max_send_us") is not None else None),
+        **worst_queue(queue_profile),
+    }
+    facts.update(cpu_ceiling(timeline.get("cpu_cap") or {},
+                             {"sys_cpu_max_pct": busiest.get("cpu_pct"),
+                              "sys_cpu_sum_pct": sum(entry["cpu_pct"] for entry in cpu_profile)}))
+    # an idle-only run offers no load so there is nothing for the saturation rules
+    decision = ({"saturated": False, "reasons": []} if idle_only_run
+                else saturation_signals(facts))
+    saturation_reasons = list(decision["reasons"])
+    if send.get("no_send_log") and not idle_only_run:
+        saturation_reasons.append("no send log: the sender never ran, so every per event metric "
+                                  "is meaningless")
 
     metrics = {
         "windows": windows.as_dict(),

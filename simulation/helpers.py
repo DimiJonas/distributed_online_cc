@@ -1213,3 +1213,219 @@ def build_payload(manifest: Path, log: dict, bk_types: tuple[str, ...]) -> dict:
         payload["variants"] = [list(variant) for variant in index.variants]
         payload["variant_counts"] = list(index.counts)
     return payload
+
+
+def _cpu_count_from_list(cpu_list) -> int | None:
+    if not cpu_list:
+        return None
+    total = 0
+    for chunk in str(cpu_list).split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "-" in chunk:
+            low, _, high = chunk.partition("-")
+            try:
+                total += int(high) - int(low) + 1
+            except ValueError:
+                return None
+        else:
+            total += 1
+    return total or None
+
+
+def cpu_ceiling(cap_info: dict, point: dict) -> dict:
+    out = {
+        "cpu_cap_mode": (cap_info or {}).get("mode", "off"),
+        "cpu_cap_scope": (cap_info or {}).get("scope"),
+        "cpu_cap_cores": (cap_info or {}).get("cores"),
+        "cpu_cap_note": (cap_info or {}).get("note"),
+        "cpu_ceiling_basis": None,      # which number is compared against the ceiling
+        "cpu_ceiling_label": None,
+        "cpu_ceiling_pct": None, 
+        "cpu_used_pct": None,
+        "cpu_of_ceiling": None,         # cpu_used_pct / cpu_ceiling_pct
+    }
+    mode = str((cap_info or {}).get("mode") or "off").lower()
+
+    if mode == "off":
+        out["cpu_ceiling_label"] = "uncapped - no cpu ceiling, so cpu cannot signal saturation here"
+        return out
+
+    scope = str((cap_info or {}).get("scope") or "system").lower()
+    cores = (cap_info or {}).get("cores")
+    if scope == "node":
+        per_node = (cap_info or {}).get("cpus_per_node") or cores
+        ceiling = float(per_node) * 100.0 if per_node else None
+        used = point.get("sys_cpu_max_pct")
+        out["cpu_ceiling_basis"] = "process"
+        out["cpu_ceiling_label"] = (f"{mode}/node: busiest node process vs its "
+                                    f"{_fmt_cores(per_node)} cpu(s)")
+    else:
+        cpus = _cpu_count_from_list((cap_info or {}).get("system_cpus")) or cores
+        ceiling = float(cpus) * 100.0 if cpus else None
+        used = point.get("sys_cpu_sum_pct")
+        out["cpu_ceiling_basis"] = "system"
+        out["cpu_ceiling_label"] = (f"{mode}/system: all node processes vs the shared "
+                                    f"{_fmt_cores(cpus)} cpu(s)")
+    out["cpu_ceiling_pct"] = ceiling
+    out["cpu_used_pct"] = used
+    if ceiling and used is not None:
+        out["cpu_of_ceiling"] = used / ceiling
+    return out
+
+
+def _fmt_cores(value) -> str:
+    if value is None:
+        return "?"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(number)) if number == int(number) else f"{number:g}"
+
+
+# saturation decision code
+DEFAULT_SATURATION_THRESHOLDS = {
+    "queue_fill": 0.25,       # standing p95 depth as a fraction of the queues capacity
+    "queue_growth": 0.05,     # depth trend over the window as a fraction of capacity
+    "cpu_pct": 80.0,          # % of the cpu ceiling that counts as exhausted with a rate shortfall
+    "cpu_pinned": 95.0,       # % of the ceiling that counts as exhausted on its own
+    "achieved_ratio": 0.98,   # delivered / offered rate below which the shortfall flags cpu
+    "stall_ms": 1000.0,       # a single socket write blocked at least this long
+    "only_max_node": False,   # name only the worst node instead of every node over the line
+}
+
+
+def saturation_thresholds(**overrides) -> dict:
+    merged = dict(DEFAULT_SATURATION_THRESHOLDS)
+    merged.update({key: value for key, value in overrides.items() if value is not None})
+    return merged
+
+
+def _fmt(value, spec="", dash="-"):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return dash
+    try:
+        return format(value, spec)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+# returns {"saturated", "reasons", "signals", "cpu_fired", "queue_fired"}
+def saturation_signals(facts: dict, thresholds: dict | None = None) -> dict:
+    thresholds = thresholds or DEFAULT_SATURATION_THRESHOLDS
+    reasons: list[str] = []
+    signals: list[dict] = []
+
+    # LOSS (message/event drops)
+    if facts.get("input_drops"):
+        detail = ", ".join(f"{count}x {reason}" for reason, count
+                           in (facts.get("input_drop_reasons") or {}).items())
+        by_node = facts.get("input_drops_by_node") or {}
+        where = ("" if thresholds.get("only_max_node") or not by_node else
+                 " on " + ", ".join(f"{node} ({count})" for node, count in by_node.items()))
+        signals.append({"kind": "LOSS", "where": ", ".join(by_node) or "unattributed",
+                        "value": facts["input_drops"]})
+        reasons.append(f"{facts['input_drops']} input record(s) dropped{where} "
+                       f"({detail or 'reason not recorded'}) - work was destroyed, and a late "
+                       f"revision cannot repair a message or event that never arrived")
+
+    # BACKLOG (queue fills)
+    standing_fill = facts.get("queue_fill_p95_max")
+    standing_queue = facts.get("queue_fill_p95_max_queue")
+    standing_node = facts.get("queue_fill_p95_max_node")
+    standing_slope = facts.get("queue_slope_at_p95_max")
+    standing_growth = facts.get("queue_growth_at_p95_max")
+    standing_p99 = facts.get("queue_fill_p99_at_p95_max")
+    queue_fired = False
+    if (standing_fill is not None and standing_fill > thresholds["queue_fill"]
+            and standing_growth is not None and standing_growth > thresholds["queue_growth"]):
+        queue_fired = True
+        crossed = [entry for entry in (facts.get("queue_profile") or [])
+                   if (entry.get("p95_fill") or 0) > thresholds["queue_fill"]
+                   and (entry.get("growth") or 0) > thresholds["queue_growth"]]
+        signals.append({"kind": "BACKLOG", "where": f"{standing_queue} on {standing_node}",
+                        "value": standing_fill, "growth": standing_growth, "crossed": len(crossed)})
+        if thresholds.get("only_max_node") or not crossed:
+            reasons.append(f"{standing_queue} on {standing_node} is a standing backlog: p95 depth "
+                           f"{standing_fill:.0%} of capacity (> {thresholds['queue_fill']:.0%}) and "
+                           f"the depth trend rises by {standing_growth:.0%} of capacity across the "
+                           f"send window ({_fmt(standing_slope, '+.1f')} slots/s)"
+                           + (f", p99 {standing_p99:.0%}" if standing_p99 is not None else "")
+                           + (f"  [{len(crossed)} queues over the threshold in total, hidden]"
+                              if len(crossed) > 1 else ""))
+        else:
+            reasons.append(f"{len(crossed)} queue(s) over the backlog threshold "
+                           f"(p95 > {thresholds['queue_fill']:.0%} of capacity AND trend "
+                           f"> {thresholds['queue_growth']:.0%}), deepest first:")
+            for entry in crossed:
+                reasons.append(f"     {entry['queue']} on {entry['node']}: p95 "
+                               f"{entry['p95_fill']:.0%} p99 {_fmt(entry.get('p99_fill'), '.0%')} of "
+                               f"{entry['capacity']} slots, trend {entry['growth']:+.0%} of capacity "
+                               f"over the window ({_fmt(entry.get('slope_per_s'), '+.1f')} slots/s)")
+
+    # CPU CAP
+    of_cap = facts.get("cpu_of_ceiling")
+    ratio = facts.get("achieved_ratio")
+    where = (f"{facts.get('sys_cpu_max_node')} at {_fmt(facts.get('cpu_used_pct'), '.0f')}%"
+             if facts.get("cpu_ceiling_basis") == "process"
+             else f"the node processes together at {_fmt(facts.get('cpu_used_pct'), '.0f')}%")
+    cap_text = (f"{where} of the {_fmt(facts.get('cpu_ceiling_pct'), '.0f')}% cpu cap "
+                f"({_fmt(of_cap, '.0%')} of it)")
+    cpu_fired = False
+    if of_cap is not None:
+        if of_cap >= thresholds["cpu_pinned"] / 100.0:
+            cpu_fired = True
+            reasons.append(f"{cap_text} - pinned at the cap "
+                           f"(>= {thresholds['cpu_pinned']:.0f}%), there is no cpu left to go faster")
+        elif (of_cap >= thresholds["cpu_pct"] / 100.0 and ratio is not None
+              and ratio < thresholds["achieved_ratio"]):
+            cpu_fired = True
+            reasons.append(f"{cap_text} AND only {ratio:.3f} of the target rate was delivered "
+                           f"- the cpu it was given ran out and the shortfall shows it "
+                           f"(cap >= {thresholds['cpu_pct']:.0f}%, "
+                           f"rate < {thresholds['achieved_ratio']:.2f})")
+        if cpu_fired:
+            signals.append({"kind": "CPU CAP", "where": facts.get("sys_cpu_max_node") or "system",
+                            "value": of_cap})
+        # under a per node cap the same threshold applies to every node, so name all of them
+        if cpu_fired and facts.get("cpu_ceiling_basis") == "process" and facts.get("cpu_ceiling_pct"):
+            ceiling = facts["cpu_ceiling_pct"]
+            hot = [entry for entry in (facts.get("sys_cpu_profile") or [])
+                   if entry["cpu_pct"] / ceiling >= thresholds["cpu_pct"] / 100.0]
+            if len(hot) > 1:
+                if thresholds.get("only_max_node"):
+                    reasons.append(f"     {len(hot)} nodes are at or above "
+                                   f"{thresholds['cpu_pct']:.0f}% of the cap, hidden")
+                else:
+                    reasons.append(f"     {len(hot)} nodes are at or above "
+                                   f"{thresholds['cpu_pct']:.0f}% of the cap:")
+                    for entry in hot:
+                        reasons.append(f"       {entry['node']}: {entry['cpu_pct']:.0f}% "
+                                       f"({entry['cpu_pct'] / ceiling:.0%} of the cap), "
+                                       f"{_fmt(entry.get('rss_mb'), '.0f')} MB")
+
+    # STALL (blocked sends)
+    max_send = facts.get("max_send_ms")
+    if max_send is not None and max_send >= thresholds["stall_ms"]:
+        signals.append({"kind": "STALL", "where": "sender socket", "value": max_send / 1000})
+        reasons.append(f"one socket write blocked for {max_send / 1000:.1f}s "
+                       f"(>= {thresholds['stall_ms'] / 1000:.1f}s) - a node stopped reading its "
+                       f"socket altogether")
+
+    return {"saturated": bool(reasons), "reasons": reasons, "signals": signals,
+            "cpu_fired": cpu_fired, "queue_fired": queue_fired}
+
+
+# the worst (node, queue) out of a per node queue profile, in the shape saturation_signals expects
+def worst_queue(queue_profile: list[dict]) -> dict:
+    if not queue_profile:
+        return {}
+    deepest = max(queue_profile, key=lambda entry: entry.get("p95_fill") or 0)
+    return {"queue_fill_p95_max": deepest.get("p95_fill"),
+            "queue_fill_p95_max_queue": deepest.get("queue"),
+            "queue_fill_p95_max_node": deepest.get("node"),
+            "queue_slope_at_p95_max": deepest.get("slope_per_s"),
+            "queue_growth_at_p95_max": deepest.get("growth"),
+            "queue_fill_p99_at_p95_max": deepest.get("p99_fill")}

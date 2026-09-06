@@ -38,7 +38,8 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from helpers import Progress  # noqa: E402
+from helpers import (Progress, cpu_ceiling, saturation_signals,  # noqa: E402
+                     DEFAULT_SATURATION_THRESHOLDS)
 
 SYSTEMS = ("decentralized", "central")
 
@@ -897,77 +898,6 @@ def _problem_is_other_system(problem, system: str) -> bool:
     return False
 
 
-def _cpu_count_from_list(cpu_list) -> int | None:
-    if not cpu_list:
-        return None
-    total = 0
-    for chunk in str(cpu_list).split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "-" in chunk:
-            low, _, high = chunk.partition("-")
-            try:
-                total += int(high) - int(low) + 1
-            except ValueError:
-                return None
-        else:
-            total += 1
-    return total or None
-
-
-def cpu_ceiling(cap_info: dict, point: dict) -> dict:
-    out = {
-        "cpu_cap_mode": (cap_info or {}).get("mode", "off"),
-        "cpu_cap_scope": (cap_info or {}).get("scope"),
-        "cpu_cap_cores": (cap_info or {}).get("cores"),
-        "cpu_cap_note": (cap_info or {}).get("note"),
-        "cpu_ceiling_basis": None,      # which number is compared against the ceiling
-        "cpu_ceiling_label": None,
-        "cpu_ceiling_pct": None, 
-        "cpu_used_pct": None,
-        "cpu_of_ceiling": None,         # cpu_used_pct / cpu_ceiling_pct
-    }
-    mode = str((cap_info or {}).get("mode") or "off").lower()
-
-    if mode == "off":
-        out["cpu_ceiling_label"] = "uncapped - no cpu ceiling, so cpu cannot signal saturation here"
-        return out
-
-    scope = str((cap_info or {}).get("scope") or "system").lower()
-    cores = (cap_info or {}).get("cores")
-    if scope == "node":
-        per_node = (cap_info or {}).get("cpus_per_node") or cores
-        ceiling = float(per_node) * 100.0 if per_node else None
-        used = point.get("sys_cpu_max_pct")
-        out["cpu_ceiling_basis"] = "process"
-        out["cpu_ceiling_label"] = (f"{mode}/node: busiest node process vs its "
-                                    f"{_fmt_cores(per_node)} cpu(s)")
-    else:
-        cpus = _cpu_count_from_list((cap_info or {}).get("system_cpus")) or cores
-        ceiling = float(cpus) * 100.0 if cpus else None
-        used = point.get("sys_cpu_sum_pct")
-        out["cpu_ceiling_basis"] = "system"
-        out["cpu_ceiling_label"] = (f"{mode}/system: all node processes vs the shared "
-                                    f"{_fmt_cores(cpus)} cpu(s)")
-    out["cpu_ceiling_pct"] = ceiling
-    out["cpu_used_pct"] = used
-    if ceiling and used is not None:
-        out["cpu_of_ceiling"] = used / ceiling
-    return out
-
-
-def _fmt_cores(value) -> str:
-    if value is None:
-        return "?"
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return str(value)
-    return str(int(number)) if number == int(number) else f"{number:g}"
-
-
-# decide whether this point shows the system failing to keep up
 def classify(point: dict, thresholds: dict) -> dict:
 
     reasons: list[str] = []
@@ -975,18 +905,10 @@ def classify(point: dict, thresholds: dict) -> dict:
     notes: list[str] = []
     signals: list[dict] = []
 
-    # LOSS (message/event/result/correction drops)
-    if point.get("input_drops"):
-        detail = ", ".join(f"{count}x {reason}" for reason, count
-                           in (point.get("input_drop_reasons") or {}).items())
-        by_node = point.get("input_drops_by_node") or {}
-        where = ("" if thresholds.get("only_max_node") or not by_node else
-                 " on " + ", ".join(f"{node} ({count})" for node, count in by_node.items()))
-        signals.append({"kind": "LOSS", "where": ", ".join(by_node) or "unattributed",
-                        "value": point["input_drops"]})
-        reasons.append(f"{point['input_drops']} input record(s) dropped{where} "
-                       f"({detail or 'reason not recorded'}) - work was destroyed, and a late "
-                       f"revision cannot repair a message or event that never arrived")
+    decision = saturation_signals(point, thresholds)
+    reasons.extend(decision["reasons"])
+    signals.extend(decision["signals"])
+    cpu_fired, queue_reason_fired = decision["cpu_fired"], decision["queue_fired"]
 
     if point.get("repair_drops"):
         detail = ", ".join(f"{count}x {reason}" for reason, count
@@ -997,46 +919,15 @@ def classify(point: dict, thresholds: dict) -> dict:
                         f"already closed. not a capacity signal, but it is how a saturated system loses "
                         f"correctness - read it next to the wrong count")
 
-    # BACKLOG (filled queues)
     standing_fill = point.get("queue_fill_p95_max")
-    standing_queue = point.get("queue_fill_p95_max_queue")
-    standing_node = point.get("queue_fill_p95_max_node")
-    standing_slope = point.get("queue_slope_at_p95_max")
-    standing_growth = point.get("queue_growth_at_p95_max")
-    standing_p99 = point.get("queue_fill_p99_at_p95_max")
-    queue_reason_fired = False
-    if standing_fill is not None and standing_fill > thresholds["queue_fill"]:
-        if standing_growth is not None and standing_growth > thresholds["queue_growth"]:
-            queue_reason_fired = True
-            crossed = [entry for entry in (point.get("queue_profile") or [])
-                       if entry["p95_fill"] > thresholds["queue_fill"]
-                       and (entry.get("growth") or 0) > thresholds["queue_growth"]]
-            signals.append({"kind": "BACKLOG", "where": f"{standing_queue} on {standing_node}",
-                            "value": standing_fill, "growth": standing_growth,
-                            "crossed": len(crossed)})
-            if thresholds.get("only_max_node"):
-                reasons.append(f"{standing_queue} on {standing_node} is a standing backlog: p95 depth "
-                               f"{standing_fill:.0%} of capacity (> {thresholds['queue_fill']:.0%}) and "
-                               f"the depth trend rises by {standing_growth:.0%} of capacity across the "
-                               f"send window ({standing_slope:+.1f} slots/s)"
-                               + (f", p99 {standing_p99:.0%}" if standing_p99 is not None else "")
-                               + (f"  [{len(crossed)} queues over the threshold in total, "
-                                  f"--only-max-node hides them]" if len(crossed) > 1 else ""))
-            else:
-                reasons.append(f"{len(crossed)} queue(s) over the backlog threshold "
-                               f"(p95 > {thresholds['queue_fill']:.0%} of capacity AND trend "
-                               f"> {thresholds['queue_growth']:.0%}), deepest first:")
-                for entry in crossed:
-                    reasons.append(f"     {entry['queue']} on {entry['node']}: p95 "
-                                   f"{entry['p95_fill']:.0%} p99 {entry['p99_fill']:.0%} of "
-                                   f"{entry['capacity']} slots, trend {entry['growth']:+.0%} of "
-                                   f"capacity over the window "
-                                   f"({fmt(entry['slope_per_s'], '+.1f')} slots/s)")
-        else:
-            warnings.append(f"{standing_queue} on {standing_node}: p95 depth {standing_fill:.0%} of "
-                            f"capacity but the trend only rises by {fmt(standing_growth, '.1%')} of "
-                            f"capacity across the window ({fmt(standing_slope, '+.1f')} slots/s) - a "
-                            f"deep but STABLE queue is a buffer absorbing bursts, not saturation")
+    if (standing_fill is not None and standing_fill > thresholds["queue_fill"]
+            and not queue_reason_fired):
+        warnings.append(f"{point.get('queue_fill_p95_max_queue')} on "
+                        f"{point.get('queue_fill_p95_max_node')}: p95 depth {standing_fill:.0%} of "
+                        f"capacity but the trend only rises by "
+                        f"{fmt(point.get('queue_growth_at_p95_max'), '.1%')} of capacity across the "
+                        f"window ({fmt(point.get('queue_slope_at_p95_max'), '+.1f')} slots/s) - a "
+                        f"deep but STABLE queue is a buffer absorbing bursts, not saturation")
 
     capacity = point.get("event_q_capacity")
     depth_p95, depth_p99 = point.get("dequeue_depth_p95"), point.get("dequeue_depth_p99")
@@ -1044,46 +935,7 @@ def classify(point: dict, thresholds: dict) -> dict:
         point["event_q_p95_fill"] = (depth_p95 / capacity) if depth_p95 is not None else None
         point["event_q_p99_fill"] = (depth_p99 / capacity) if depth_p99 is not None else None
 
-    # CPU CAP
-    of_cap = point.get("cpu_of_ceiling")
     ratio = point.get("achieved_ratio")
-    where = (f"{point.get('sys_cpu_max_node')} at {fmt(point.get('cpu_used_pct'), '.0f')}%"
-             if point.get("cpu_ceiling_basis") == "process"
-             else f"the node processes together at {fmt(point.get('cpu_used_pct'), '.0f')}%")
-    cap_text = (f"{where} of the {fmt(point.get('cpu_ceiling_pct'), '.0f')}% cpu cap "
-                f"({fmt(of_cap, '.0%')} of it)")
-    cpu_fired = False
-    if of_cap is not None:
-        if of_cap >= thresholds["cpu_pinned"] / 100.0:
-            cpu_fired = True
-            signals.append({"kind": "CPU CAP", "where": point.get("sys_cpu_max_node") or "system",
-                            "value": of_cap})
-            reasons.append(f"{cap_text} - pinned at the cap "
-                           f"(>= {thresholds['cpu_pinned']:.0f}%), there is no cpu left to go faster")
-        elif of_cap >= thresholds["cpu_pct"] / 100.0 and ratio is not None and ratio < thresholds["achieved_ratio"]:
-            cpu_fired = True
-            signals.append({"kind": "CPU CAP", "where": point.get("sys_cpu_max_node") or "system",
-                            "value": of_cap})
-            reasons.append(f"{cap_text} AND only {ratio:.3f} of the target rate was delivered "
-                           f"- the cpu it was given ran out and the shortfall shows it "
-                           f"(cap >= {thresholds['cpu_pct']:.0f}%, rate < {thresholds['achieved_ratio']:.2f})")
-        # under a per node cap the same threshold applies to every node, so name all of them
-        if cpu_fired and point.get("cpu_ceiling_basis") == "process" and point.get("cpu_ceiling_pct"):
-            ceiling = point["cpu_ceiling_pct"]
-            hot = [entry for entry in (point.get("sys_cpu_profile") or [])
-                   if entry["cpu_pct"] / ceiling >= thresholds["cpu_pct"] / 100.0]
-            if len(hot) > 1:
-                if thresholds.get("only_max_node"):
-                    reasons.append(f"     {len(hot)} nodes are at or above "
-                                   f"{thresholds['cpu_pct']:.0f}% of the cap "
-                                   f"[--only-max-node hides which]")
-                else:
-                    reasons.append(f"     {len(hot)} nodes are at or above "
-                                   f"{thresholds['cpu_pct']:.0f}% of the cap:")
-                    for entry in hot:
-                        reasons.append(f"       {entry['node']}: {entry['cpu_pct']:.0f}% "
-                                       f"({entry['cpu_pct'] / ceiling:.0%} of the cap), "
-                                       f"{entry['rss_mb']:.0f} MB")
 
     if point.get("cpu_cap_note"):
         warnings.append(f"cpu cap: {point['cpu_cap_note']}")
@@ -1111,14 +963,6 @@ def classify(point: dict, thresholds: dict) -> dict:
                         f"else fired: no cpu exhaustion, no backlog, no input loss"
                         + (f" (median second at {sustained:.3f} of target)" if sustained is not None else "")
                         + " - the load generator, a gc pause or a scheduler hiccup, NOT saturation")
-
-    # STALL (blocked sends)
-    max_send = point.get("max_send_ms")
-    if max_send is not None and max_send >= thresholds["stall_ms"]:
-        signals.append({"kind": "STALL", "where": "sender socket", "value": max_send / 1000})
-        reasons.append(f"one socket write blocked for {max_send / 1000:.1f}s "
-                       f"(>= {thresholds['stall_ms'] / 1000:.1f}s) - a node stopped reading its socket "
-                       f"altogether")
 
     wrong = point.get("wrong")
     if wrong:
@@ -1735,16 +1579,16 @@ def main() -> int:
     parser.add_argument("--x-param", default="rate", help="the swept parameter (default: rate)")
     parser.add_argument("--systems", nargs="*", default=list(SYSTEMS))
     parser.add_argument("--quiet", action="store_true", help="no progress output")
-    parser.add_argument("--achieved-ratio", type=float, default=0.98, help="saturated below this effective/target ratio (default 0.95)")
+    parser.add_argument("--achieved-ratio", type=float, default=DEFAULT_SATURATION_THRESHOLDS["achieved_ratio"], help="saturated below this effective/target ratio (default 0.95)")
     parser.add_argument("--sustained-ratio", type=float, default=0.95,
                         help="a level whose overall achieved ratio is low but whose MEDIAN per second rate is at least "
                              "this fraction of target is treated as stalled once, not saturated (default 0.95). set to 0 to always trust the overall ratio")
-    parser.add_argument("--cpu-threshold", type=float, default=80.0, help="cpu %% of the cap that counts as exhausted WHEN the delivered rate also fell short (default 80). runs without a cpu cap have no ceiling, so this rule cannot fire for them")
-    parser.add_argument("--queue-fill", type=float, default=0.25,
+    parser.add_argument("--cpu-threshold", type=float, default=DEFAULT_SATURATION_THRESHOLDS["cpu_pct"], help="cpu %% of the cap that counts as exhausted WHEN the delivered rate also fell short (default 80). runs without a cpu cap have no ceiling, so this rule cannot fire for them")
+    parser.add_argument("--queue-fill", type=float, default=DEFAULT_SATURATION_THRESHOLDS["queue_fill"],
                         help="a queue counts as saturated when its p95 depth exceeds this fraction of capacity AND "
                              "its depth is still growing (see --queue-slope). a peak above it is only a warning, "
                              "because one sample is not evidence of a standing backlog (default 0.25)")
-    parser.add_argument("--queue-growth", type=float, default=0.05,
+    parser.add_argument("--queue-growth", type=float, default=DEFAULT_SATURATION_THRESHOLDS["queue_growth"],
                         help="a queue only counts as saturated when its depth TREND gains at least this fraction of "
                              "its capacity over the measurement window (default 0.05 = 5%%). expressing growth "
                              "relative to capacity and window length is what makes it comparable between a 1024 slot "
@@ -1767,10 +1611,10 @@ def main() -> int:
     parser.add_argument("--per-run", action="store_true",
                         help="also print one row per replicate with the signals it fired. the default is the "
                              "median-per-level overview only")
-    parser.add_argument("--cpu-pinned", type=float, default=95.0,
+    parser.add_argument("--cpu-pinned", type=float, default=DEFAULT_SATURATION_THRESHOLDS["cpu_pinned"],
                         help="a node (or the deployment) at this %% of its cpu cap counts as saturated on its "
                              "own, with no second signal needed (default 95)")
-    parser.add_argument("--stall-ms", type=float, default=1000.0,
+    parser.add_argument("--stall-ms", type=float, default=DEFAULT_SATURATION_THRESHOLDS["stall_ms"],
                         help="saturated when a single socket write blocked for at least this long (default 1000 = 1s). "
                              "this is a node that stopped reading its socket altogether, not slow processing - keep it "
                              "high enough that ordinary scheduling jitter cannot reach it")

@@ -375,7 +375,6 @@ def write_process_table(rows: list[Row], x_key: str, out_path: Path) -> Path | N
 def mark_placement_boundary(axes, rows: list[Row], x_key: str) -> None:
     if x_key != "constraint_nodes":
         return
-    roles = {int(row.value("nodes.total") or 0) for row in rows}
     boundary = max((row.params.get("constraint_nodes") for row in rows
                     if row.params.get("constraint_nodes") is not None), default=None)
     catalog_roles = max((row.value("nodes.by_role.constraint_node") or 0 for row in rows), default=0)
@@ -1140,14 +1139,18 @@ def write_privacy_csv(privacy: dict, out_path: Path) -> None:
                                  + [entry.get(name, {}).get("mean") for name in metric_names])
 
 
-# feasibility: correctness over all runs split into nominal, overloaded and incomplete runs
+# feasibility: correctness over all runs split into nominal, overloaded, incomplete and degraded runs
 def run_regime(row: Row) -> str:
     # idle only runs send no events, so every expected pair is missing by construction and they should not be mixed with the other fasibility measurements
     if not row.has_workload:
         return "idle"
     if not row.value("quality.complete"):
         return "incomplete"
-    return "overload" if row.value("throughput.saturated") else "nominal"
+    saturated = bool(row.value("throughput.saturated"))
+    clean = not any(row.correctness.get(field) or 0 for field in ("wrong", "absent", "spurious"))
+    if saturated:
+        return "overload"
+    return "nominal" if clean else "degraded"
 
 
 FEASIBILITY_FIELDS = ("expected_pairs", "produced_pairs", "correct", "wrong", "absent", "spurious")
@@ -1179,7 +1182,7 @@ def write_feasibility(rows: list[Row], out_path: Path) -> dict:
             line(writer, regime, experiment, system, values)
             for key, value in values.items():
                 by_regime[regime][key] += value
-        for regime in ("nominal", "overload", "incomplete", "idle"):
+        for regime in ("nominal", "overload", "degraded", "incomplete", "idle"):
             if by_regime.get(regime):
                 line(writer, regime, "ALL", "ALL", by_regime[regime])
     return {regime: dict(values) for regime, values in by_regime.items()}
@@ -1357,7 +1360,10 @@ def main() -> None:
 
     tables = 3 * len(by_experiment) + (1 if args.experiment else 3)
     print(f"\n{written} figure(s) and {tables} table(s) in {out_dir}")
-    for regime, label in (("nominal", "within capacity"), ("overload", "saturated"), ("incomplete", "truncated records"), ("idle", "no workload, excluded from correctness")):
+    for regime, label in (("nominal", "within capacity"), ("overload", "saturated"),
+                          ("degraded", "IMPERFECT WITH NO SATURATION SIGNAL - investigate"),
+                          ("incomplete", "truncated records"),
+                          ("idle", "no workload, excluded from correctness")):
         values = totals.get(regime)
         if not values:
             continue
