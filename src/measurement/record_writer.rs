@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// how long 'shutdown_record_writer' signal waits for the writer to confirm
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Serialize)]
 struct Line {

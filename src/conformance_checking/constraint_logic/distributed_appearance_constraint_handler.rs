@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use async_trait::async_trait;
-use uuid::Uuid;
+use tokio::task::JoinSet;
 
 use crate::{
     config::node_config::{DistributedAppearanceCounterReset, MinMaxMode},
@@ -372,7 +372,7 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         self.counter_peers.clone()
     }
 
-    // pull counter values from counter peers and evaluate
+    /// record the evaluation and spawn the counter pull background task
     async fn handle_event(&self, event: &TracedEvent, state: AppState) {
         log::info!(
             "distributed appearance trigger handler: received configured event for constraint {}; event={}",
@@ -380,9 +380,28 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             event
         );
 
-        // record the evaluation before pulling with every configured peer seeded at 0
+        // record the evaluation before pulling with every configured peer seeded at count=0
         {
             let mut evaluations = state.evaluations.lock().unwrap();
+            // if two trigger events for the same pair overlap (counter pulls are detached from serialized event q processing), the older pull discards itself
+            // when it comes back (it compares trigger times), but its counters were already reset by the pull so the window boundary is blurred
+            if let Some(LastEvaluation {
+                detail:
+                    EvaluationDetail::DistributedCounterTotals {
+                        pending_pull: true, ..
+                    },
+                trigger_time,
+                ..
+            }) = evaluations.get_cloned(&event.case_id, self.index)
+            {
+                log::warn!(
+                    "distributed appearance trigger handler: a new trigger event for ({}/{}) at {} arrived while the pull of the trigger at {} was still running",
+                    event.case_id,
+                    self.constraint_id,
+                    event.timestamp,
+                    trigger_time
+                );
+            }
             evaluations.insert(
                 &event.case_id,
                 self.index,
@@ -397,83 +416,18 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             );
         }
 
-        let (per_peer, failed_peers) = self
-            .get_distributed_count(
-                state.clone(),
-                &event.case_id,
-                event.timestamp,
-                event.instance_id,
-            )
-            .await;
-
-        // a peer that could not be reached contributed no count. report failure and stop evaluating
-        if !failed_peers.is_empty() {
-            log::error!(
-                "distributed appearance trigger handler: {} of {} counter peer(s) did not answer for ({}/{}): {:?}. \
-                 the distributed count is incomplete and no verdict is emitted from this trigger event; \
-                 case end will decide instead",
-                failed_peers.len(),
-                self.counter_peers.len(),
-                event.case_id,
-                self.constraint_id,
-                failed_peers
-            );
-            measurement::api::correction_dropped(
-                &event.case_id,
-                &self.constraint_id,
-                ConstraintType::DistributedAppearance,
-                CorrectionDropReason::IncompletePeerPull,
-                failed_peers.first().copied(),
-            );
-        }
-
-        let pending = {
-            let mut evaluations = state.evaluations.lock().unwrap();
-            let distributed_count = match evaluations.merge_peer_totals(
-                &event.case_id,
-                self.index,
-                per_peer.clone(),
-            ) {
-                Some(total) => total,
-                None => {
-                    // the case was cleaned up while the pull was ongoing
-                    log::warn!(
-                        "distributed appearance trigger handler: no recorded evaluation for ({}/{}) after the pull (the case was cleaned up mid pull). evaluating the pulled counts alone",
-                        event.case_id,
-                        self.constraint_id
-                    );
-                    per_peer.values().sum()
-                }
-            };
-
-            if failed_peers.is_empty() {
-                self.evaluate_count(distributed_count)
-                    .map(|(info, result)| {
-                        (
-                            stamp_decision(&state, &event.case_id, &self.constraint_id),
-                            info,
-                            result,
-                        )
-                    })
-            } else {
-                None
-            }
+        let pull = CounterPull {
+            index: self.index,
+            role: self.role,
+            constraint_id: self.constraint_id.clone(),
+            mode: self.mode.clone(),
+            frequency: self.frequency,
+            counter_peers: self.counter_peers.clone(),
+            case_id: event.case_id.clone(),
+            trigger_time: event.timestamp,
+            triggering_event: event.instance_id,
         };
-
-        if let Some((stamp, info, result)) = pending {
-            emit_result_stamped(
-                stamp,
-                &event.case_id,
-                &self.constraint_id,
-                ConstraintType::DistributedAppearance,
-                result,
-                info,
-                state.clone(),
-                ResultTrigger::Event,
-                Some(event.instance_id),
-            )
-            .await;
-        }
+        tokio::spawn(pull.run(state));
     }
 
     // a counter peer reports an event that was delayed past the triggers pulltokenrequest
@@ -569,24 +523,14 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             corrected
         );
 
-        let (info, result) = match self.evaluate_count(corrected) {
-            Some((info, result)) => (format!("{info} (late correction)"), result),
-            None => (
-                format!(
-                    "counter {:?} within limit {:?} (late correction)",
-                    corrected, self.frequency
-                ),
-                ConstraintResultType::Satisfied,
-            ),
-        };
-
+        let (info, result) = evaluate_distributed_count(&self.mode, self.frequency, corrected);
         emit_result_stamped(
             stamp,
             &message.case_id,
             &self.constraint_id,
             ConstraintType::DistributedAppearance,
             result,
-            info,
+            format!("{info} (late correction)"),
             state.clone(),
             ResultTrigger::Event,
             message.triggering_event,
@@ -615,14 +559,29 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             case_id
         );
 
+        // check if a result exists
+        {
+            let results = state.cc_results.lock().unwrap();
+            if results
+                .get_constraint(case_id, &self.constraint_id)
+                .is_some()
+            {
+                return;
+            }
+        }
+
         let pending = {
-            let recorded_total = {
+            let recorded = {
                 let evaluations = state.evaluations.lock().unwrap();
                 match evaluations.get_cloned(case_id, self.index) {
                     Some(LastEvaluation {
-                        detail: EvaluationDetail::DistributedCounterTotals { per_peer, .. },
+                        detail:
+                            EvaluationDetail::DistributedCounterTotals {
+                                per_peer,
+                                pending_pull,
+                            },
                         ..
-                    }) => Some(per_peer.values().sum::<u64>()),
+                    }) => Some((per_peer.values().sum::<u64>(), pending_pull)),
                     _ => None,
                 }
             };
@@ -637,30 +596,51 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
             if result_exists {
                 None
             } else {
-                // the pull could not reach every counter peer, so decide on the recorded total
-                let (result, info) = match recorded_total {
-                    Some(total) => match self.evaluate_count(total) {
-                        Some((info, result)) => (result, format!("{info} (decided at case end)")),
-                        None => (
-                            ConstraintResultType::Satisfied,
-                            format!(
-                                "counter {:?} within limit {:?} (decided at case end)",
-                                total, self.frequency
-                            ),
-                        ),
-                    },
-                    None => (
+                match recorded {
+                    // the pull came back but somehow did not produce a verdict -  decide on it now
+                    Some((total, false)) => {
+                        let (info, result) =
+                            evaluate_distributed_count(&self.mode, self.frequency, total);
+                        Some((
+                            stamp_decision(&state, case_id, &self.constraint_id),
+                            result,
+                            format!("{info} (decided at case end)"),
+                        ))
+                    }
+                    // the pull never came back. the recorded total is incomplete, so say so
+                    // instead of passing it off as a finished check
+                    Some((total, true)) => {
+                        log::warn!(
+                            "distributed appearance trigger handler: the counter pull for ({}/{}) never finished. deciding on the incomplete total {}",
+                            case_id,
+                            self.constraint_id,
+                            total
+                        );
+                        measurement::api::correction_dropped(
+                            case_id,
+                            &self.constraint_id,
+                            ConstraintType::DistributedAppearance,
+                            CorrectionDropReason::IncompletePeerPull,
+                            self.counter_peers.first().copied(),
+                        );
+                        let (info, result) =
+                            evaluate_distributed_count(&self.mode, self.frequency, total);
+                        Some((
+                            stamp_decision(&state, case_id, &self.constraint_id),
+                            result,
+                            format!("{info} (decided at case end, counter pull never finished)"),
+                        ))
+                    }
+                    // no evaluation was ever recorded and no trigger has produced a verdict
+                    None => Some((
+                        stamp_decision(&state, case_id, &self.constraint_id),
                         ConstraintResultType::Satisfied,
                         "counter evaluation was never triggered".to_string(),
-                    ),
-                };
-                Some((
-                    stamp_decision(&state, case_id, &self.constraint_id),
-                    result,
-                    info,
-                ))
+                    )),
+                }
             }
         };
+
         if let Some((stamp, result, info)) = pending {
             // produce result because none was emitted yet
             emit_result_stamped(
@@ -679,101 +659,270 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
     }
 }
 
-impl DistributedAppearanceTriggerHandler {
-    /// pull every counter peer
-    async fn get_distributed_count(
-        &self,
-        state: AppState,
-        case_id: &CaseId,
-        trigger_time: EventTime,
-        triggering_event: EventInstanceId,
-    ) -> (HashMap<SocketAddr, u64>, Vec<SocketAddr>) {
-        let mut per_peer: HashMap<SocketAddr, u64> = HashMap::new();
-        let mut failed_peers: Vec<SocketAddr> = Vec::new();
-        for counter_peer in &self.counter_peers {
-            let mut cc_message = CCMessage::pull_token_request_with_creator(
-                case_id.clone(),
-                self.constraint_id.clone(),
-                self.role,
-            );
-            // the counter needs the triggers event time to tell a delayed event from one that genuinely belongs to the next window
-            cc_message.timestamp = Some(trigger_time);
-            cc_message.triggering_event = Some(triggering_event);
-            let pull_token_request = PeerMessage::conformance_req(Uuid::new_v4(), cc_message);
-            match send_and_receive_conformance(*counter_peer, pull_token_request, state.clone())
-                .await
-            {
-                Ok(response) => match response.payload {
-                    PeerMessagePayload::Conformance(cc_msg) => match cc_msg.token {
-                        Some(token) => {
-                            *per_peer.entry(*counter_peer).or_insert(0) +=
-                                token.payload.get_count();
-                        }
-                        None => {
-                            log::error!(
-                                "distributed appearance trigger handler: {} answered without a counter token",
-                                counter_peer
-                            );
-                            failed_peers.push(*counter_peer);
-                        }
-                    },
-                    _ => {
-                        log::error!(
-                            "distributed appearance trigger handler: received wrong message type: \"{}\"; expected type: \"conformance\"",
-                            response.payload
-                        );
-                        failed_peers.push(*counter_peer);
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    log::error!(
-                        "distributed appearance trigger handler: error requesting token from {}: {}",
-                        counter_peer,
-                        e
-                    );
-                    failed_peers.push(*counter_peer);
-                    continue;
-                }
+fn evaluate_distributed_count(
+    mode: &MinMaxMode,
+    frequency: u64,
+    distributed_count: u64,
+) -> (String, ConstraintResultType) {
+    match mode {
+        MinMaxMode::Min => {
+            if distributed_count < frequency {
+                (
+                    format!(
+                        "CounterMin: counter {:?} < limit {:?}",
+                        distributed_count, frequency
+                    ),
+                    ConstraintResultType::Violated,
+                )
+            } else {
+                (
+                    format!(
+                        "CounterMin: counter {:?} >= limit {:?}",
+                        distributed_count, frequency
+                    ),
+                    ConstraintResultType::Satisfied,
+                )
             }
         }
-        (per_peer, failed_peers)
-    }
-
-    fn evaluate_count(&self, distributed_count: u64) -> Option<(String, ConstraintResultType)> {
-        match self.mode {
-            MinMaxMode::Min => {
-                if distributed_count < self.frequency {
-                    Some((
-                        format!(
-                            "CounterMin: counter {:?} < limit {:?}",
-                            distributed_count, self.frequency
-                        ),
-                        ConstraintResultType::Violated,
-                    ))
-                } else {
-                    None
-                }
-            }
-            MinMaxMode::Max => {
-                if distributed_count > self.frequency {
-                    Some((
-                        format!(
-                            "CounterMax: counter {:?} > limit {:?}",
-                            distributed_count, self.frequency
-                        ),
-                        ConstraintResultType::Violated,
-                    ))
-                } else {
-                    None
-                }
+        MinMaxMode::Max => {
+            if distributed_count > frequency {
+                (
+                    format!(
+                        "CounterMax: counter {:?} > limit {:?}",
+                        distributed_count, frequency
+                    ),
+                    ConstraintResultType::Violated,
+                )
+            } else {
+                (
+                    format!(
+                        "CounterMax: counter {:?} <= limit {:?}",
+                        distributed_count, frequency
+                    ),
+                    ConstraintResultType::Satisfied,
+                )
             }
         }
     }
 }
 
+/// everything the counter pull of one trigger event needs so it can run detached in its own task
+struct CounterPull {
+    index: HandlerIndex,
+    role: ConstraintRole,
+    constraint_id: ConstraintId,
+    mode: MinMaxMode,
+    frequency: u64,
+    counter_peers: Vec<SocketAddr>,
+    case_id: CaseId,
+    trigger_time: EventTime,
+    triggering_event: EventInstanceId,
+}
+
+impl CounterPull {
+    /// pull all counter peers merge the counters into the recorded evaluation and publish
+    async fn run(self, state: AppState) {
+        let (per_peer, failed_peers) = self.pull_all(&state).await;
+
+        if !failed_peers.is_empty() {
+            log::error!(
+                "distributed appearance trigger handler: {} of {} counter peer(s) did not answer for ({}/{}): {:?}. 
+                the distributed count is incomplete and no verdict is emitted from this trigger event (case end will produce the verdict)",
+                failed_peers.len(),
+                self.counter_peers.len(),
+                self.case_id,
+                self.constraint_id,
+                failed_peers
+            );
+            measurement::api::correction_dropped(
+                &self.case_id,
+                &self.constraint_id,
+                ConstraintType::DistributedAppearance,
+                CorrectionDropReason::IncompletePeerPull,
+                failed_peers.first().copied(),
+            );
+        }
+
+        let pending = {
+            let mut evaluations = state.evaluations.lock().unwrap();
+
+            // a later trigger event for the same pair replaced one while still pulling
+            // (merging into it would mix two windows and the later trigger publishes its verdict anyway)
+            let superseded = evaluations
+                .get_cloned(&self.case_id, self.index)
+                .is_some_and(|evaluation| evaluation.trigger_time != self.trigger_time);
+            if superseded {
+                log::warn!(
+                    "distributed appearance trigger handler: the counter pull of the trigger at {} for ({}/{}) was superseded by a later trigger. discarding it",
+                    self.trigger_time,
+                    self.case_id,
+                    self.constraint_id
+                );
+                return;
+            }
+
+            let distributed_count = match evaluations.merge_peer_totals(
+                &self.case_id,
+                self.index,
+                per_peer.clone(),
+            ) {
+                Some(total) => total,
+                None => {
+                    // the case was cleaned up while the pull was ongoing and the evaluation for it is gone
+                    log::warn!(
+                        "distributed appearance trigger handler: no recorded evaluation for ({}/{}) after the pull (the case was cleaned up mid pull). evaluating the pulled counts alone",
+                        self.case_id,
+                        self.constraint_id
+                    );
+                    per_peer.values().sum()
+                }
+            };
+
+            if failed_peers.is_empty() {
+                let (info, result) =
+                    evaluate_distributed_count(&self.mode, self.frequency, distributed_count);
+                Some((
+                    stamp_decision(&state, &self.case_id, &self.constraint_id),
+                    info,
+                    result,
+                ))
+            } else {
+                None
+            }
+        };
+
+        let Some((stamp, info, result)) = pending else {
+            return;
+        };
+
+        // check if the case was closed during the pull
+        {
+            let case_state = state.case_state.lock().unwrap();
+            if case_state.is_closed(&self.case_id) {
+                log::warn!(
+                    "distributed appearance trigger handler: the case of ({}/{}) closed while the counter pull was running. dropping the verdict",
+                    self.case_id,
+                    self.constraint_id
+                );
+                drop(case_state);
+                measurement::api::correction_dropped(
+                    &self.case_id,
+                    &self.constraint_id,
+                    ConstraintType::DistributedAppearance,
+                    CorrectionDropReason::CaseAlreadyClosed,
+                    None,
+                );
+                return;
+            }
+        }
+
+        emit_result_stamped(
+            stamp,
+            &self.case_id,
+            &self.constraint_id,
+            ConstraintType::DistributedAppearance,
+            result,
+            info,
+            state.clone(),
+            ResultTrigger::Event,
+            Some(self.triggering_event),
+        )
+        .await;
+    }
+
+    /// pull every counter peer concurrently
+    async fn pull_all(&self, state: &AppState) -> (HashMap<SocketAddr, u64>, Vec<SocketAddr>) {
+        let mut requests = JoinSet::new();
+
+        for counter_peer in &self.counter_peers {
+            let counter_peer = *counter_peer;
+            let case_id = self.case_id.clone();
+            let constraint_id = self.constraint_id.clone();
+            let role = self.role;
+            let trigger_time = self.trigger_time;
+            let triggering_event = self.triggering_event;
+            let state = state.clone();
+
+            requests.spawn(async move {
+                let mut cc_message = CCMessage::pull_token_request_with_creator(case_id, constraint_id, role);
+                // the counter needs the triggers event time to tell a delayed event from one that belongs to the next window
+                cc_message.timestamp = Some(trigger_time);
+                cc_message.triggering_event = Some(triggering_event);
+                let pull_token_request = PeerMessage::conformance_req(RequestId::new_v4(), cc_message);
+
+                let count = match send_and_receive_conformance(
+                    counter_peer,
+                    pull_token_request,
+                    state,
+                )
+                .await
+                {
+                    Ok(response) => match response.payload {
+                        PeerMessagePayload::Conformance(cc_msg) => match cc_msg.token {
+                            Some(token) => Some(token.payload.get_count()),
+                            None => {
+                                log::error!(
+                                    "distributed appearance trigger handler: {} answered without a counter token",
+                                    counter_peer
+                                );
+                                None
+                            }
+                        },
+                        other => {
+                            log::error!(
+                                "distributed appearance trigger handler: received wrong message type: \"{}\"; expected type: \"conformance\"",
+                                other
+                            );
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        log::error!(
+                            "distributed appearance trigger handler: error requesting token from {}: {}",
+                            counter_peer,
+                            e
+                        );
+                        None
+                    }
+                };
+                (counter_peer, count)
+            });
+        }
+
+        let mut per_peer: HashMap<SocketAddr, u64> = HashMap::new();
+        let mut failed_peers: Vec<SocketAddr> = Vec::new();
+        while let Some(joined) = requests.join_next().await {
+            match joined {
+                Ok((peer, Some(count))) => {
+                    *per_peer.entry(peer).or_insert(0) += count;
+                }
+                Ok((peer, None)) => failed_peers.push(peer),
+                Err(e) => {
+                    log::error!(
+                        "distributed appearance trigger handler: counter pull task for ({}/{}) failed: {}",
+                        self.case_id,
+                        self.constraint_id,
+                        e
+                    );
+                    // the peer of a task that panicked is unknown, so mark the pull incomplete by blaming a peer that has not answered yet
+                    if let Some(peer) = self
+                        .counter_peers
+                        .iter()
+                        .find(|peer| !per_peer.contains_key(*peer) && !failed_peers.contains(peer))
+                    {
+                        failed_peers.push(*peer);
+                    }
+                }
+            }
+        }
+        (per_peer, failed_peers)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::{
         config::node_config::{ConstraintConfig, MinMaxMode},
         conformance_checking::constraint_logic::{
@@ -850,6 +999,18 @@ mod tests {
             .map(|r| r.constraint_result)
     }
 
+    /// handle_event doesnt wait for the counter pull, it hands it to a background task, so the
+    /// verdict shows up a moment after handle_event returned
+    async fn await_result(state: &AppState, case: &str) -> Option<ConstraintResultType> {
+        for _ in 0..200 {
+            if let Some(result) = result_type(state, case) {
+                return Some(result);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        None
+    }
+
     /// none: no counter peers, no trigger event → case end pulls 0 → Max 0<=2 → Satisfied.
     #[tokio::test]
     async fn none_satisfied_at_case_end_max() {
@@ -874,18 +1035,17 @@ mod tests {
 
         let h = handler(MinMaxMode::Min, 1, peers);
         let ev = make_traced_event_with_fixed_timestamp(case, EID);
-        let run = h.handle_event(&ev, state.clone());
-        let mock =
-            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 0));
-        tokio::join!(run, mock);
+        h.handle_event(&ev, state.clone()).await;
+        answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 0)).await;
 
         assert!(matches!(
-            result_type(&state, case),
+            await_result(&state, case).await,
             Some(ConstraintResultType::Violated)
         ));
     }
 
-    /// both: distributed count meets Min frequency -> no violation/result.
+    /// both: distributed count meets Min frequency -> Satisfied is published by the trigger event
+    /// itself, it is no longer left to the case end fallback
     #[tokio::test]
     async fn both_min_no_violation() {
         let case = "c3";
@@ -894,12 +1054,13 @@ mod tests {
 
         let h = handler(MinMaxMode::Min, 2, peers);
         let ev = make_traced_event_with_fixed_timestamp(case, EID);
-        let run = h.handle_event(&ev, state.clone());
-        let mock =
-            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3));
-        tokio::join!(run, mock);
+        h.handle_event(&ev, state.clone()).await;
+        answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3)).await;
 
-        assert!(result_type(&state, case).is_none(),);
+        assert!(matches!(
+            await_result(&state, case).await,
+            Some(ConstraintResultType::Satisfied)
+        ));
     }
 
     /// both: distributed count below Min frequency → Violated.
@@ -911,13 +1072,11 @@ mod tests {
 
         let h = handler(MinMaxMode::Min, 3, peers);
         let ev = make_traced_event_with_fixed_timestamp(case, EID);
-        let run = h.handle_event(&ev, state.clone());
-        let mock =
-            answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 2));
-        tokio::join!(run, mock);
+        h.handle_event(&ev, state.clone()).await;
+        answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 2)).await;
 
         assert!(matches!(
-            result_type(&state, case),
+            await_result(&state, case).await,
             Some(ConstraintResultType::Violated)
         ));
     }
@@ -936,5 +1095,26 @@ mod tests {
             ),
             "counter-only (no trigger) should be Satisfied"
         );
+    }
+
+    /// handle_event must return before the counter peer has answered: the event queue processor
+    /// awaits it, so a round trip inside it would cost this node one rtt of throughput per event
+    #[tokio::test]
+    async fn handle_event_does_not_wait_for_the_counter_pull() {
+        let case = "c6";
+        let (state, peers) = trigger_state(26050, Some(26051), case, MinMaxMode::Min, 5);
+        let _mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
+
+        let h = handler(MinMaxMode::Min, 5, peers);
+        let ev = make_traced_event_with_fixed_timestamp(case, EID);
+
+        // nobody ever answers the pull, so this would block for the response timeout if the pull
+        // were still inline
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            h.handle_event(&ev, state.clone()),
+        )
+        .await
+        .expect("handle_event must not block on the counter pull");
     }
 }

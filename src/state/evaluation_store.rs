@@ -123,11 +123,7 @@ impl EvaluationStore {
         }
     }
 
-    /// add the counts a completed pull collected to whatever is already recorded and close the pull
-    ///
-    /// the pulled values are ADDED, not assigned: a counter peer reports a late delta for an event
-    /// that it did not include in its pull response, so a delta that landed while the pull was in
-    /// flight is additional to the pulled count and must survive the merge
+    /// add the counts a completed pull collected to whatever is already recorded and close the pull (this enables late deltas)
     pub fn merge_peer_totals(
         &mut self,
         case_id: &CaseId,

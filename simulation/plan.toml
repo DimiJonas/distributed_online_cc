@@ -42,14 +42,14 @@ cpu_cap_exclude_roles = ["sink"]
 [baseline]
 event_queue_size = 8192
 loopback_queue_size = 8192
-case_end_grace_period = "15s"
+case_end_grace_period = "75s"
 case_janitor_cleanup_interval = "1s"
 
 [baseline.tcp_channels]
 tcp_channel_mpsc_channel_size = 1024
 peer_manager_mpsc_channel_size = 1024
 message_queue_size = 4096
-internal_message_ttl = "120s"
+internal_message_ttl = "30m"
 reconnect_start_delay = "200ms"
 reconnect_max_delay = "5s"
 wait_for_response_timeout = "60s"
@@ -88,14 +88,14 @@ case_gap_secs = 2.0               # ~13 concurrent cases (~26 roles/events per c
 burst = 16
 msgtrace = true
 idle_window_s = 20
-quiescence_s = 120
-max_wait_for_settlement_s = 240
+quiescence_s = 450
+max_wait_for_settlement_s = 480
 external_central_sink = true
 idle_only = false
 push_fanout = 5
 anti_entropy_secs = 2
 anti_entropy_fanout = 1
-case_end_ttl = 120
+case_end_ttl = 600
 shuffle_secs = 5
 shuffle_length = 4
 cache_size = 20
@@ -126,7 +126,7 @@ systems = ["decentralized", "central"]
   [experiment.params]
   msgtrace = false
   [experiment.grid]
-  worker_threads = ["per-cpu", "share", "2"]
+  worker_threads = ["per-cpu", "share", "2", "4"]
   rate = [4000, 16000]
 
 # E0c - find system cpu cap (cap has to be small enough such that both systems can saturate)
@@ -435,7 +435,7 @@ systems = ["decentralized", "central"]
   role_assignment = "round-robin"
   msgtrace = true
   [experiment.grid]
-  nodes = [3, 5, 7, 12, 23, 32, 46]
+  nodes = [3, 5, 7, 12, 23, 32, 46, 64]
 
 # E3b: system scale blocked
 # metrics: (same as E3a)
