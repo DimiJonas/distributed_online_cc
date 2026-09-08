@@ -22,8 +22,13 @@ pub fn spawn_loopback_q_processor(state: AppState, mut loopback_q: mpsc::Receive
                     dispatch_message(msg, state.config.tcp_listen_address, state.clone()).await;
                 }
                 Overlay(_) | CEGossip(_) => {
-                    dispatch_message(msg, state.config.overlay().listen_address, state.clone())
-                        .await;
+                    let Some(overlay) = state.config.overlay.as_ref() else {
+                        log::error!(
+                            "loopback queue: overlay/gossip message on a node without an overlay. dropping it"
+                        );
+                        continue;
+                    };
+                    dispatch_message(msg, overlay.listen_address, state.clone()).await;
                 }
                 Hello(_) => {
                     log::error!(

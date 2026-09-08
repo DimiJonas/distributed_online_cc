@@ -93,8 +93,8 @@ impl AppState {
         inbound_gossip_q: mpsc::Sender<CEGossipMessage>,
     ) -> Self {
         assert!(
-            config.is_decentralized(),
-            "new_distributed with a central config"
+            config.participates_in_overlay(),
+            "new_distributed without [overlay]/[gossip]"
         );
         let case_end_ttl = config.case_end_ttl;
         let dist = Arc::new(DistributedState {
@@ -113,8 +113,8 @@ impl AppState {
         result_sink_channel: mpsc::Sender<CCResultMessage>,
     ) -> Self {
         assert!(
-            !config.is_decentralized(),
-            "new_central with a distributed config"
+            !config.participates_in_overlay(),
+            "new_central with an overlay/gossip config"
         );
         Self::new_base(config, event_q, loopback_q, result_sink_channel, None)
     }

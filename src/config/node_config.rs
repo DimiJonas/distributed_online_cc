@@ -75,13 +75,14 @@ impl NodeConfig {
     pub fn validate(&self) {
         match self.mode {
             ConfigMode::Decentralized => {
-                assert!(
+                assert_eq!(
                     self.overlay.is_some(),
-                    "decentralized mode requires [overlay]"
+                    self.gossip.is_some(),
+                    "decentralized mode requires [overlay] and [gossip] together (or neither)"
                 );
                 assert!(
-                    self.gossip.is_some(),
-                    "decentralized mode requires [gossip]"
+                    self.participates_in_overlay() || self.constraints.is_empty(),
+                    "a decentralized node holding constraints requires [overlay] and [gossip]"
                 );
             }
             ConfigMode::Central => {
@@ -107,6 +108,10 @@ impl NodeConfig {
 
     pub fn is_decentralized(&self) -> bool {
         self.mode == ConfigMode::Decentralized
+    }
+
+    pub fn participates_in_overlay(&self) -> bool {
+        self.overlay.is_some() && self.gossip.is_some()
     }
 
     pub fn is_own_address(&self, addr: SocketAddr) -> bool {

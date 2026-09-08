@@ -100,7 +100,7 @@ fn observe(state: &AppState, accumulators: &mut Accumulators) {
     accumulators
         .result_sink_q
         .observe(depth_of(&state.result_sink_channel));
-    if state.config.is_decentralized() {
+    if state.dist.is_some() {
         accumulators
             .gossip_out_q
             .observe(depth_of(&state.dist().outbound_gossip_q));
@@ -111,7 +111,7 @@ fn observe(state: &AppState, accumulators: &mut Accumulators) {
 }
 
 fn do_report(state: &AppState, accumulators: &mut Accumulators, tick: u64) {
-    let (gossip_out_depth, gossip_in_depth) = if state.config.is_decentralized() {
+    let (gossip_out_depth, gossip_in_depth) = if state.dist.is_some() {
         (
             Some(accumulators.gossip_out_q.take()),
             Some(accumulators.gossip_in_q.take()),

@@ -1661,14 +1661,38 @@ fn emit_decentralized(
     baseline: Option<&Baseline>,
 ) {
     let sink_id = 0u64;
-    let total_nodes = role_nodes + 1; // total nodes incl. sink
+    let total_nodes = role_nodes + 1; // total nodes with sink
     create_dir_all(out_dir).unwrap();
 
-    for node_id in 0..total_nodes {
-        let peers: Vec<SocketAddr> = bootstrap_ids(node_id, total_nodes, common.cyclon.ring_degree)
-            .into_iter()
-            .map(|peer| addressing.reachable_overlay(peer))
-            .collect();
+    // the dedicated result sink is not part of the overlay
+    let sink_config = NodeConfigBuilder::decentralized_base()
+        .without_overlay()
+        .node_id(sink_id)
+        .tcp_listen(addressing.listen_conformance(sink_id))
+        .case_end_ttl(common.case_end_ttl)
+        .unix_socket(format!("/tmp/event_listener_{sink_id}.sock"))
+        .log_file(format!("node-{sink_id}.log"))
+        .result_sink(ResultSinkConfig {
+            db_path: db_path.to_string_lossy().into_owned(),
+            mpsc_channel_size: 1024,
+            retry_interval: Duration::from_secs(15),
+            retry_buffer_size: 4096,
+            max_batch_size: 512,
+            flush_interval: Duration::from_millis(200),
+        })
+        .build();
+    write_node_config(
+        &out_dir.join(format!("node-{sink_id}-config.toml")),
+        &sink_config,
+        baseline,
+    );
+
+    for node_id in 1..total_nodes {
+        let peers: Vec<SocketAddr> =
+            bootstrap_ids(node_id - 1, role_nodes, common.cyclon.ring_degree)
+                .into_iter()
+                .map(|peer| addressing.reachable_overlay(peer + 1))
+                .collect();
 
         let mut config_builder = NodeConfigBuilder::decentralized_base()
             .node_id(node_id)
@@ -1689,40 +1713,28 @@ fn emit_decentralized(
             .anti_entropy_fanout(common.gossip.anti_entropy_fanout)
             .push_fanout(common.gossip.push_fanout);
 
-        if node_id == sink_id {
-            // dedicated result sink: no constraints, owns the database
-            config_builder = config_builder.result_sink(ResultSinkConfig {
-                db_path: db_path.to_string_lossy().into_owned(),
-                mpsc_channel_size: 1024,
-                retry_interval: Duration::from_secs(15),
-                retry_buffer_size: 4096,
-                max_batch_size: 512,
-                flush_interval: Duration::from_millis(200),
-            });
-        } else {
-            // gather the roles placed on this node (layout slots start at 0, node ids start at 1)
-            let mut constraints = Vec::new();
-            for (instance_index, instance) in instances.iter().enumerate() {
-                let role_slots_here = &layout[instance_index];
-                for (role_index, role) in instance.roles.iter().enumerate() {
-                    if dist_node_of(role_slots_here[role_index]) != node_id {
-                        continue;
-                    }
-                    let resolve = |sib: usize| {
-                        addressing.reachable_conformance(dist_node_of(role_slots_here[sib]))
-                    };
-                    let config =
-                        to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
-                    constraints.push((config, role.buffer.clone(), role.constraint_id.clone()));
+        // gather the roles placed on this node (layout slots start at 0, node ids start at 1)
+        let mut constraints = Vec::new();
+        for (instance_index, instance) in instances.iter().enumerate() {
+            let role_slots_here = &layout[instance_index];
+            for (role_index, role) in instance.roles.iter().enumerate() {
+                if dist_node_of(role_slots_here[role_index]) != node_id {
+                    continue;
                 }
+                let resolve = |sib: usize| {
+                    addressing.reachable_conformance(dist_node_of(role_slots_here[sib]))
+                };
+                let config =
+                    to_constraint(&role.kind, &role.constraint_id, &role.event_id, &resolve);
+                constraints.push((config, role.buffer.clone(), role.constraint_id.clone()));
             }
-            config_builder = config_builder
-                .result_sink_addresses(vec![addressing.reachable_conformance(sink_id)]);
-            for (config, result_buffer, constraint_id) in constraints {
-                config_builder = config_builder.constraint(config);
-                if let Some(policy) = result_buffer {
-                    config_builder = config_builder.result_buffer(constraint_id, policy);
-                }
+        }
+        config_builder =
+            config_builder.result_sink_addresses(vec![addressing.reachable_conformance(sink_id)]);
+        for (config, result_buffer, constraint_id) in constraints {
+            config_builder = config_builder.constraint(config);
+            if let Some(policy) = result_buffer {
+                config_builder = config_builder.result_buffer(constraint_id, policy);
             }
         }
 

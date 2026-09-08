@@ -4,6 +4,7 @@
 /traffic_fines
 /simulation/__pycache__
 /results
+/old_results
 
 /simulation/test_plan.toml
 
@@ -18,3 +19,5 @@
 *.db-wal
 *.lock
 *.swp
+
+run.sh

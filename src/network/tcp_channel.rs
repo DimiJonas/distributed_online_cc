@@ -425,6 +425,13 @@ pub async fn dispatch_to_handler(msg: PeerMessage, address: SocketAddr, state: A
                 msg.request_id,
             ));
         }
+        PeerMessagePayload::Overlay(_) | PeerMessagePayload::CEGossip(_)
+            if state.dist.is_none() =>
+        {
+            log::warn!(
+                "dispatch_message: received an overlay/gossip message on a node without an overlay. dropping it"
+            );
+        }
         PeerMessagePayload::Overlay(overlay_msg) => {
             tokio::spawn(handle_overlay_message(
                 overlay_msg,

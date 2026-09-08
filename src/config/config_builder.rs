@@ -56,6 +56,13 @@ impl NodeConfigBuilder {
         self
     }
 
+    /// for the dedicated result sink that is not sitting on a constraint node
+    pub fn without_overlay(mut self) -> Self {
+        self.config.overlay = None;
+        self.config.gossip = None;
+        self
+    }
+
     // ---- private accessors ----
     fn overlay_mut(&mut self) -> &mut OverlayConfig {
         self.config

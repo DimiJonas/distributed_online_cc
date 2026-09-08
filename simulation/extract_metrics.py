@@ -729,7 +729,8 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
     cases_count = send.get("cases") or len(cases_seen) or 1
     idle_seconds = windows.seconds(windows.idle)
     settle_seconds = windows.seconds(windows.settle)
-    idle_nodes = max(1, len(scan.nodes_seen))
+    # exclude sink since its not part of the overlay
+    idle_nodes = max(1, sum(1 for node_id in scan.nodes_seen if node_roles.get(node_id) != "sink"))
 
     def sum_all(field: str, payloads) -> int:
         return sum(counts[field] for payload_type, counts in workload_messages["by_payload_type"].items() if payload_type in payloads)

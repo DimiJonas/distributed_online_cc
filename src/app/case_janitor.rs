@@ -27,7 +27,7 @@ pub fn spawn_case_janitor(state: AppState, cleanup_interval: Duration) {
             ticker.tick().await;
             let now = Utc::now();
 
-            if state.config.is_decentralized() {
+            if state.dist.is_some() {
                 let mut ce_cache = state.dist().ce_gossip_cache.lock().unwrap();
                 ce_cache.prune(now);
             }

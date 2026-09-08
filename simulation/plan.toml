@@ -383,7 +383,7 @@ replicates = 3
 systems = ["decentralized", "central"]
   [experiment.params]
   cases = 10000                   # tier M
-  rate = 16000
+  rate = 8000
   msgtrace = false
   [experiment.grid]
   netem_ms = [0, 1, 2, 4, 8]

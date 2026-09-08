@@ -38,8 +38,8 @@ pub async fn run(config: NodeConfig) {
     };
     let (sink_tx, sink_rx) = mpsc::channel(sink_channel_size);
 
-    let (state, outbound_gossip_rx, inbound_gossip_rx) = match config.mode {
-        ConfigMode::Decentralized => {
+    let (state, outbound_gossip_rx, inbound_gossip_rx) = match config.participates_in_overlay() {
+        true => {
             // gossip channels (only exist for distributed mode)
             let (outbound_gossip_tx, outbound_gossip_rx) =
                 mpsc::channel(config.gossip().gossip_outbound_mpsc_channel_size);
@@ -55,7 +55,7 @@ pub async fn run(config: NodeConfig) {
             );
             (state, Some(outbound_gossip_rx), Some(inbound_gossip_rx))
         }
-        ConfigMode::Central => (
+        false => (
             AppState::new_central(config, event_q_tx, loopback_q_tx, sink_tx),
             None,
             None,
@@ -72,11 +72,11 @@ pub async fn run(config: NodeConfig) {
         },
         state.config.constraints.len(),
         state.config.tcp_listen_address,
-        if state.config.is_decentralized() {
-            Some(state.config.overlay().listen_address)
-        } else {
-            None
-        },
+        state
+            .config
+            .overlay
+            .as_ref()
+            .map(|overlay_config| overlay_config.listen_address),
     );
 
     if stdin().is_terminal() {
@@ -94,7 +94,7 @@ pub async fn run(config: NodeConfig) {
     }
 
     // mode specific tasks
-    if state.config.mode == ConfigMode::Decentralized {
+    if state.dist.is_some() {
         crate::app::tcp_listener::spawn_overlay_network_listener(state.clone());
         crate::app::overlay_manager::spawn_cyclon_overlay_task(state.clone());
         crate::app::gossip_manager::spawn_case_end_gossip_manager(
