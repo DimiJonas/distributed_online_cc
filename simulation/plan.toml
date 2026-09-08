@@ -465,9 +465,9 @@ systems = ["decentralized", "central"]
   stream_dir = "sepsis/events/"
   msgtrace = true
   burst = 8
+  rate = 1000
   [experiment.grid]
   nodes = [2, 4, 8, 13, 17, 18]         # sepsis has 17 activities -> 17 nodes constraint nodes + 1 sink = 18 (with by-event assignment) 
-  rate = [500, 1000]
 
 # E5b: main privacy run traffic fines
 # ~561k events so depending on E0c extract_metrics.py --observation-case-fraction 0.2 might be needed, but this sampling of cases can increase trace uniqueness
@@ -483,7 +483,7 @@ systems = ["decentralized", "central"]
   stream_dir = "traffic_fines/events/" 
   msgtrace = true
   burst = 8
-  rate = 4000
+  rate = 1000
   [experiment.grid]
   nodes = [2, 4, 6, 8, 10, 13]           # traffic fines has 12 activities -> 12 nodes constraint nodes + 1 sink = 13 (with by-event assignment) 
 
