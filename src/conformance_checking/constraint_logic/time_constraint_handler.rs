@@ -49,7 +49,6 @@ impl ConstraintHandler for TimeStartHandler {
             self.constraint_id.clone(),
             ConstraintType::Time,
             Some(event.timestamp),
-            state.config.node_id,
         );
         let token_id = token.id;
 
@@ -547,7 +546,13 @@ mod tests {
             duration: Duration::from_secs(duration_secs),
             mode,
         }];
-        let cfg = make_config_with_buffers(constraints, buffers, ResultBufferConfig::Immediate);
+        let cfg = make_config_with_buffers(
+            constraints,
+            buffers,
+            ResultBufferConfig::Revocable {
+                duration: Duration::from_secs(10),
+            },
+        );
         let state = make_state_from_config(cfg);
         state.cc_results.lock().unwrap().register_case(CASE.into());
         state
@@ -768,7 +773,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn earliest_qualifying_stop_decides_regardless_of_arrival_order() {
         for descending in [false, true] {
-            let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+            let state = make_test_state(
+                10,
+                MinMaxMode::Max,
+                ResultBufferConfig::Revocable {
+                    duration: Duration::from_secs(10),
+                },
+            );
             let handler = make_handler(10, MinMaxMode::Max);
             handler
                 .handle_event(&make_traced_event_at(CASE, "start", 0), state.clone())
@@ -799,7 +810,13 @@ mod tests {
     /// a start event processed after a stop that does not qualify still arms a watchdog
     #[tokio::test(start_paused = true)]
     async fn start_after_a_non_qualifying_stop_still_arms_a_watchdog() {
-        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let state = make_test_state(
+            10,
+            MinMaxMode::Max,
+            ResultBufferConfig::Revocable {
+                duration: Duration::from_secs(10),
+            },
+        );
         let handler = make_handler(10, MinMaxMode::Max);
 
         // the stop arrives first and is earlier in event time than the start that follows
@@ -835,7 +852,13 @@ mod tests {
     /// token is still correctable by an even earlier stop afterwards
     #[tokio::test(start_paused = true)]
     async fn start_after_a_qualifying_stop_settles_immediately_and_stays_correctable() {
-        let state = make_test_state(10, MinMaxMode::Max, ResultBufferConfig::Immediate);
+        let state = make_test_state(
+            10,
+            MinMaxMode::Max,
+            ResultBufferConfig::Revocable {
+                duration: Duration::from_secs(10),
+            },
+        );
         let handler = make_handler(10, MinMaxMode::Max);
 
         // stop at +40s arrives before the start at +0s, so it is out of the 10s limit

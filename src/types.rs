@@ -322,7 +322,6 @@ pub struct Token {
     pub constraint_type: ConstraintType,
     pub event_time: Option<EventTime>,
     pub created_at: EventTime,
-    pub created_by: PeerId,
     pub payload: TokenPayload,
 }
 
@@ -332,7 +331,6 @@ impl Token {
         constraint_id: ConstraintId,
         constraint_type: ConstraintType,
         event_time: Option<EventTime>,
-        created_by: PeerId,
     ) -> Self {
         Self {
             id: TokenId::new_v4(),
@@ -341,7 +339,6 @@ impl Token {
             constraint_type,
             event_time,
             created_at: Utc::now(),
-            created_by,
             payload: TokenPayload::None,
         }
     }
@@ -351,18 +348,11 @@ impl Token {
         constraint_id: ConstraintId,
         constraint_type: ConstraintType,
         event_time: Option<EventTime>,
-        created_by: PeerId,
         payload: TokenPayload,
     ) -> Self {
         Self {
             payload,
-            ..Self::new(
-                case_id,
-                constraint_id,
-                constraint_type,
-                event_time,
-                created_by,
-            )
+            ..Self::new(case_id, constraint_id, constraint_type, event_time)
         }
     }
 }
@@ -388,11 +378,9 @@ mod tests {
             "my-constraint".to_string(),
             ConstraintType::Response,
             Some(Utc::now()),
-            7,
         );
         assert_eq!(token.case_id, "my-case");
         assert_eq!(token.constraint_id, "my-constraint");
-        assert_eq!(token.created_by, 7);
         assert!(matches!(token.payload, TokenPayload::None));
     }
 
@@ -403,14 +391,12 @@ mod tests {
             "x".to_string(),
             ConstraintType::Response,
             Some(Utc::now()),
-            1,
         );
         let t2 = Token::new(
             "c".to_string(),
             "x".to_string(),
             ConstraintType::Response,
             Some(Utc::now()),
-            1,
         );
         assert_ne!(t1.id, t2.id);
     }
@@ -441,7 +427,6 @@ mod tests {
             "x".to_string(),
             ConstraintType::Order,
             Some(now),
-            1,
             TokenPayload::Timestamps(vec![now]),
         );
         assert_eq!(token.payload.timestamps().len(), 1);

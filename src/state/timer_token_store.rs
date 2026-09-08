@@ -284,7 +284,6 @@ pub mod tests {
             constraint_id.to_string(),
             ConstraintType::Time,
             Some(at(start_secs)),
-            1,
         )
     }
 

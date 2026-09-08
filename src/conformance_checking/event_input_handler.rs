@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn sniff_rejects_an_implausible_length() {
         // zero high byte but an absurd length: not a frame we would ever send
-        let bogus = [0x00u8, 0xFF, 0xFF, 0xFF];
+        let bogus = [0x0Fu8, 0xFF, 0xFF, 0xFF];
         assert_eq!(detect_wire_mode(&bogus), Some(WireMode::Raw));
     }
 

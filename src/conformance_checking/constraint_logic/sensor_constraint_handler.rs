@@ -249,7 +249,6 @@ impl ConstraintHandler for SensorCollectorHandler {
                     self.constraint_id.clone(),
                     ConstraintType::Sensor,
                     None,
-                    state.config.node_id,
                 ),
                 self.index,
             );

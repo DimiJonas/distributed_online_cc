@@ -305,7 +305,6 @@ pub fn make_token(case_id: &str, constraint_id: &str) -> Token {
         constraint_id.to_string(),
         ConstraintType::Response,
         Some(Utc::now()),
-        1,
     )
 }
 
@@ -315,7 +314,6 @@ pub fn make_timer_token(case_id: &str, constraint_id: &str) -> Token {
         constraint_id.to_string(),
         ConstraintType::Time,
         Some(Utc::now()),
-        1,
     )
 }
 
@@ -470,7 +468,6 @@ pub fn make_counter_token(case_id: &str, constraint_id: &str, count: u64) -> Tok
         constraint_id.to_string(),
         ConstraintType::DistributedAppearance,
         None,
-        1,
         TokenPayload::Counter(count),
     )
 }

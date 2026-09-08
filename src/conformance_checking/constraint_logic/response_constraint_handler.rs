@@ -80,7 +80,6 @@ impl ConstraintHandler for ResponseProducerHandler {
                     self.constraint_id.clone(),
                     ConstraintType::Response,
                     Some(event.timestamp),
-                    state.config.node_id,
                 );
                 token_out.produce_with_overwrite(producer_token.clone(), self.index);
                 log::info!(
@@ -189,7 +188,6 @@ impl ConstraintHandler for ResponseProducerHandler {
                     self.constraint_id.clone(),
                     ConstraintType::Response,
                     Some(consumer_event_time),
-                    state.config.node_id,
                 );
                 token_in.receive_with_overwrite(consumer_token, self.index);
             }

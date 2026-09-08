@@ -95,7 +95,6 @@ impl ConstraintHandler for AppearanceCounterHandler {
                                 self.constraint_id.clone(),
                                 ConstraintType::Appearance,
                                 None,
-                                state.config.node_id,
                                 TokenPayload::Counter(1),
                             );
                             meta_tokens.insert_meta_token(counter_token.clone(), self.index);

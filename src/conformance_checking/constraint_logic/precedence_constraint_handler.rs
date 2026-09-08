@@ -63,7 +63,6 @@ impl ConstraintHandler for PrecedenceProducerHandler {
                 self.constraint_id.clone(),
                 ConstraintType::Precedence,
                 Some(event.timestamp),
-                state.config.node_id,
             );
             token_out.produce_without_overwrite(producer_token.clone(), self.index);
             log::info!(
@@ -141,7 +140,6 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
                         self.constraint_id.clone(),
                         ConstraintType::Precedence,
                         Some(event.timestamp),
-                        state.config.node_id,
                     ),
                     self.index,
                 );
@@ -440,10 +438,12 @@ impl ConstraintHandler for PrecedenceConsumerHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use chrono::{TimeZone, Utc};
 
     use crate::{
-        config::node_config::ConstraintConfig,
+        config::node_config::{ConstraintConfig, ResultBufferConfig},
         conformance_checking::constraint_logic::{
             constraint_handler_trait::ConstraintHandler,
             precedence_constraint_handler::PrecedenceConsumerHandler,
@@ -466,13 +466,17 @@ mod tests {
     }
 
     fn consumer_state(port: u16, case: &str) -> AppState {
-        let config = make_config_with_constraints_and_port(
+        let mut config = make_config_with_constraints_and_port(
             vec![ConstraintConfig::PrecedenceConsumer {
                 constraint_id: CID.to_string(),
                 event_id: EID.to_string(),
             }],
             port,
         );
+        config.default_result_buffer = ResultBufferConfig::Revocable {
+            duration: Duration::from_hours(1),
+        };
+
         let state = make_state_from_config(config);
         state
             .cc_results
@@ -504,7 +508,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::Precedence,
             Some(at(secs)),
-            1,
         );
         CCMessage::push_token(token, EventInstanceId::new_v4())
     }
@@ -626,7 +629,7 @@ mod tests {
     }
 
     /// a delayed producer token corrects the published violation, and the
-    /// correction gets the *higher* revision - this is the WIA regression.
+    /// correction gets the *higher* revision
     #[tokio::test]
     async fn late_producer_token_corrects_with_a_higher_revision() {
         let case = "c6";

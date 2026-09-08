@@ -87,7 +87,6 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
                                 self.constraint_id.clone(),
                                 ConstraintType::DistributedAppearance,
                                 None,
-                                state.config.node_id,
                                 TokenPayload::Counter(1),
                             );
                             meta_tokens.insert_meta_token(counter_token.clone(), self.index);
@@ -241,7 +240,6 @@ impl ConstraintHandler for DistributedAppearanceCounterHandler {
             self.constraint_id.clone(),
             ConstraintType::DistributedAppearance,
             None,
-            state.config.node_id,
             TokenPayload::Counter(total),
         );
 
@@ -311,7 +309,6 @@ impl DistributedAppearanceCounterHandler {
             self.constraint_id.clone(),
             ConstraintType::DistributedAppearance,
             Some(event.timestamp),
-            state.config.node_id,
             TokenPayload::Counter(1),
         );
         delta_token.event_time = Some(event.timestamp);

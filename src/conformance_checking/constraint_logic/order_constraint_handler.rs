@@ -89,7 +89,6 @@ impl ConstraintHandler for OrderFirstHandler {
                                 self.constraint_id.clone(),
                                 ConstraintType::Order,
                                 Some(event.timestamp),
-                                state.config.node_id,
                             );
                             recording_token.payload.push_timestamp(event.timestamp);
                             token_out.produce_without_overwrite(recording_token, self.index);
@@ -154,7 +153,7 @@ impl ConstraintHandler for OrderFirstHandler {
         };
 
         // check that token was contained in the message
-        let message_token = match message.token {
+        match message.token {
             Some(token) => token,
             None => {
                 log::error!(
@@ -178,7 +177,6 @@ impl ConstraintHandler for OrderFirstHandler {
                     self.constraint_id.clone(),
                     ConstraintType::Order,
                     Some(order_second_event_time),
-                    message_token.created_by,
                 );
                 token_in.receive_without_overwrite(new_blocking_token, self.index);
             }
@@ -317,7 +315,6 @@ impl ConstraintHandler for OrderSecondHandler {
                     self.constraint_id.clone(),
                     ConstraintType::Order,
                     Some(event.timestamp),
-                    state.config.node_id,
                 );
                 token_out.produce_without_overwrite(remembering_token, self.index);
                 true
@@ -375,7 +372,6 @@ async fn send_push_token_message(
         constraint_id,
         ConstraintType::Order,
         Some(event_timestamp),
-        state.config.node_id,
     );
     // create message
     let message = PeerMessage::conformance(CCMessage::push_token(token, triggering_event));
@@ -453,7 +449,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::Order,
             Some(at(secs)),
-            1,
         );
         CCMessage::push_token(token, EventInstanceId::new_v4())
     }

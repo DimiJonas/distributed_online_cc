@@ -497,7 +497,6 @@ mod tests {
             "c-1".to_string(),
             ConstraintType::Response,
             Some(Utc::now()),
-            1,
         );
         let msg = CCMessage::push_token(token.clone(), EventInstanceId::new_v4());
         assert_eq!(msg.message_type, CCMessageType::PushToken);

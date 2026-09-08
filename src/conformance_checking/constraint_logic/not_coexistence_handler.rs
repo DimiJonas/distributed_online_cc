@@ -86,7 +86,6 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         self.constraint_id.clone(),
                         ConstraintType::NotCoexistence,
                         Some(event.timestamp),
-                        state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     (claim_token, true)
@@ -213,7 +212,6 @@ impl ConstraintHandler for NotCoexistenceAHandler {
                         self.constraint_id.clone(),
                         ConstraintType::NotCoexistence,
                         None,
-                        state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     claim_token
@@ -479,7 +477,6 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         self.constraint_id.clone(),
                         ConstraintType::NotCoexistence,
                         Some(event.timestamp),
-                        state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     (claim_token, true)
@@ -606,7 +603,6 @@ impl ConstraintHandler for NotCoexistenceBHandler {
                         self.constraint_id.clone(),
                         ConstraintType::NotCoexistence,
                         None,
-                        state.config.node_id,
                     );
                     meta_tokens.insert_meta_token(claim_token.clone(), self.index);
                     claim_token
@@ -1053,7 +1049,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::NotCoexistence,
             b_time.map(at),
-            2,
         );
         CCMessage::push_token(token, EventInstanceId::new_v4())
     }
@@ -1137,7 +1132,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::NotCoexistence,
             None,
-            2,
         );
         state
             .meta_token_store
@@ -1209,7 +1203,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::NotCoexistence,
             None,
-            2,
         );
         state
             .meta_token_store
@@ -1241,7 +1234,6 @@ mod tests {
             CID.to_string(),
             ConstraintType::NotCoexistence,
             None,
-            2,
         );
         token.payload.deny_execution_permission();
         state
