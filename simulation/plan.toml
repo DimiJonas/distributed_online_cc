@@ -480,7 +480,7 @@ systems = ["decentralized", "central"]
   [experiment.params]
   catalog = "traffic-fines"
   role_assignment = "by-event"
-  stream_dir = "traffic_fines/events/" 
+  stream_dir = "traffic_fines/events30k/" 
   msgtrace = true
   burst = 8
   rate = 1000
