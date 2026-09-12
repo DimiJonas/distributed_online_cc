@@ -28,12 +28,7 @@ which figures an experiment gets is decided by what is in its runs:
 the x axis is the parameter that actually varies inside the experiment
 if two parameters vary, the second becomes the series
 """
-# TODO: change the x-axis on node count plots
-#   plot against constraint nodes = nodes − 1, not nodes. That makes 22 the 1:1 point for the default catalog, 17 for sepsis, 12 for traffic fines — all readable as "one role per node" without the sink-counting arithmetic in the reader's head. Then add a small table giving, for each x, the process count of each deployment:
-#       -> 22 constraint nodes: 
-#           decentralized processes = 22 + sink
-#           central processes = 22 forwarders + 1 coordinator + sink
-#   report CPU both as totals and normalised per capped core, so a reader can see the +1 and confirm it doesnt carry the result
+
 from __future__ import annotations
 
 import argparse

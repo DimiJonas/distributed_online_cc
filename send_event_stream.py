@@ -59,6 +59,8 @@ def load_nodes(config_dir):
             kind = "constraint-node"
         else:
             kind = "sink"
+
+        # only include forwarders and constraint-nodes (decentralized) for event routing
         if kind == "forwarder":
             events = list(config.get("forwarder", {}).get("include_event_ids") or [])
         elif kind == "constraint-node":

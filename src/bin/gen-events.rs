@@ -12,6 +12,7 @@
 //!   * one .xes file per event
 //!   * manifest.jsonl - one line per event (seq, case_id, event_id, file, attributes, timestamp); the global stream order (by timestamp)
 //!   * cases.jsonl - which deviations were applied to which case
+//!   * seed.txt - the seed used for the random generator
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use clap::Parser;
