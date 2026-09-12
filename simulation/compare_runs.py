@@ -25,7 +25,8 @@ from pathlib import Path
 
 
 DEFAULT_METRICS = ("achieved_rate", "detection_p50_ms", "detection_p95_ms", "cpu_s_total",
-                   "cpu_pct_max_node", "cpu_ms_per_event", "messages_per_event", "bytes_per_event",
+                   "cpu_pct_max_node", "cpu_ms_per_event", "coord_msgs_per_event", "load_bytes_per_event",
+                   "fixed_bytes_per_node_s_idle",
                    "rss_mb_total", "pacer_max_lag_ms", "event_q_max", "accuracy")
 
 # metrics where a larger value is the better outcome (everything else: smaller is better)
@@ -126,13 +127,13 @@ def main() -> None:
         if not base_cell:
             print("  no baseline run in this cell, skipped")
             continue
-        print(f"  {'metric':<22}" + "".join(f"{args.factor}={level}".ljust(COLUMN_WIDTH) for level in levels))
+        print(f"  {'metric':<28}" + "".join(f"{args.factor}={level}".ljust(COLUMN_WIDTH) for level in levels))
         incomparable: list[str] = []
         for metric in args.metrics:
             base_value = median_of(base_cell.get(metric, []))
             if base_value is None:
                 continue
-            line = f"  {metric:<22}"
+            line = f"  {metric:<28}"
             for level in levels:
                 value = median_of(cells.get((system, held, level), {}).get(metric, []))
                 is_baseline = level == baseline_level

@@ -251,8 +251,16 @@ class Scan:
             for key, field in (("by_cc_msg_type", "cc_msg_type"),
                                ("by_gossip_msg_type", "gossip_msg_type")):
                 value = line.get(field)
-                if value and direction == "sent":
-                    bucket[key][value] = bucket[key].get(value, 0) + 1
+                if not value:
+                    continue
+                per_subtype = bucket[key].setdefault(
+                    value, {"sent": 0, "received": 0, "bytes_sent": 0, "bytes_received": 0})
+                if direction == "sent":
+                    per_subtype["sent"] += 1
+                    per_subtype["bytes_sent"] += byte_count
+                else:
+                    per_subtype["received"] += 1
+                    per_subtype["bytes_received"] += byte_count
         self.serde_us.append(line.get("serde_us", 0))
 
         # privacy: a coordination message tells the endpoints that this case touched this constraint.
@@ -477,8 +485,15 @@ def merge_message_buckets(first_bucket: dict, second_bucket: dict) -> dict:
             for field, value in counts.items():
                 target[field] += value
         for key in ("by_cc_msg_type", "by_gossip_msg_type"):
-            for message_type, count in bucket[key].items():
-                merged[key][message_type] = merged[key].get(message_type, 0) + count
+            for message_type, counts in bucket[key].items():
+                target = merged[key].setdefault(
+                    message_type, {"sent": 0, "received": 0, "bytes_sent": 0, "bytes_received": 0})
+                # metrics written before subtype bytes were recorded hold a bare count
+                if isinstance(counts, dict):
+                    for field, value in counts.items():
+                        target[field] = target.get(field, 0) + value
+                else:
+                    target["sent"] += counts
     return merged
 
 

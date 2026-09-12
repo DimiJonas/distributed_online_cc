@@ -1327,7 +1327,8 @@ def saturation_signals(facts: dict, thresholds: dict | None = None) -> dict:
                  " on " + ", ".join(f"{node} ({count})" for node, count in by_node.items()))
         signals.append({"kind": "LOSS", "where": ", ".join(by_node) or "unattributed",
                         "value": facts["input_drops"]})
-        reasons.append(f"{facts['input_drops']} input record(s) dropped{where} "
+        split = f"{facts.get('event_drops') or 0} event(s), {facts.get('message_drops') or 0} message(s)"
+        reasons.append(f"{facts['input_drops']} input record(s) dropped{where} - {split} "
                        f"({detail or 'reason not recorded'}) - work was destroyed, and a late "
                        f"revision cannot repair a message or event that never arrived")
 

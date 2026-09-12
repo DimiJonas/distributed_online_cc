@@ -54,6 +54,16 @@ SYSTEM_STYLE = {
 SERIES_LINESTYLES = ["-", "--", ":", "-."]
 PAYLOAD_COLORS = {"conformance": "#0072B2", "ce_gossip": "#56B4E9", "overlay": "#009E73", "event": "#D55E00", "result": "#CC79A7", 
                   "hello": "#999999", "cli": "#666666"}
+
+LOAD_CLASSES = ("conformance", "gossip_case_end", "event", "result")
+FIXED_CLASSES = ("overlay", "gossip_anti_entropy", "connection_setup")
+CLASS_COLORS = {"conformance": "#0072B2", "gossip_case_end": "#56B4E9", "event": "#D55E00",
+                "result": "#CC79A7", "overlay": "#009E73", "gossip_anti_entropy": "#E69F00",
+                "connection_setup": "#999999"}
+CLASS_LABELS = {"conformance": "constraint coordination", "gossip_case_end": "case end gossip (push + repair)",
+                "event": "event transport", "result": "result delivery",
+                "overlay": "overlay maintenance", "gossip_anti_entropy": "anti entropy digests",
+                "connection_setup": "connection setup"}
 # parameters that identify a repetition
 REPETITION_PARAMS = {"seed", "replicate", "start", "order_index"}
 IGNORED_PARAMS = {"stream_dir", "manifest", "metrics", "violation_sampling", "quiescence_s", "max_wait_for_settlement_s", "idle_window_s", 
@@ -100,6 +110,124 @@ def derive_params(params: dict) -> dict:
     return params
 
 
+def _bucket_payload(bucket: dict, payload: str, field: str) -> float:
+    entry = (bucket.get("by_payload_type") or {}).get(payload) or {}
+    return float(entry.get(field) or 0)
+
+
+def _bucket_subtype(bucket: dict, key: str, subtype: str, field: str) -> float | None:
+    entry = (bucket.get(key) or {}).get(subtype)
+    if entry is None:
+        return 0.0 if field in ("sent", "received") else None
+    if isinstance(entry, dict):
+        return float(entry.get(field) or 0)
+    return float(entry) if field == "sent" else None
+
+
+# split every window into the load driven and the fixed traffic classes and normalise each by the denominator that fits it
+def traffic_decomposition(metrics: dict) -> dict:
+    messages = metrics.get("messages") or {}
+    windows = metrics.get("windows") or {}
+    throughput = metrics.get("throughput") or {}
+    by_role = ((metrics.get("nodes") or {}).get("by_role") or {})
+    # the sink is out of scope: it exists to collect verdicts for the evaluation, not as part of the deployment
+    nodes = max(1, sum(int(count) for role, count in by_role.items() if role != "sink"))
+
+    events = float(throughput.get("events_sent") or 0)
+    cases = float(throughput.get("cases") or 0)
+    verdicts = float((metrics.get("revisions") or {}).get("revisions_total") or 0)
+
+    idle_seconds = float(windows.get("idle_seconds") or 0.0)
+    load_seconds = float(windows.get("load_seconds") or 0.0)
+    settle = windows.get("settle") or []
+    settle_seconds = max(0.0, (settle[1] - settle[0]) / 1e6) if len(settle) == 2 else 0.0
+    workload_seconds = load_seconds + settle_seconds
+
+    classes: dict[str, dict] = {}
+    for window in ("workload", "load", "settle", "idle"):
+        bucket = messages.get(window) or {}
+        if not bucket:
+            continue
+        gossip_sent = _bucket_payload(bucket, "ce_gossip", "sent")
+        gossip_bytes = _bucket_payload(bucket, "ce_gossip", "bytes_sent")
+        digests = _bucket_subtype(bucket, "by_gossip_msg_type", "AeDigest", "sent") or 0.0
+        digest_bytes = _bucket_subtype(bucket, "by_gossip_msg_type", "AeDigest", "bytes_sent")
+        if digest_bytes is None:
+            digests, digest_bytes = 0.0, 0.0
+        digest_bytes = min(gossip_bytes, digest_bytes)
+        classes[window] = {
+            "conformance": {"sent": _bucket_payload(bucket, "conformance", "sent"),
+                            "bytes": _bucket_payload(bucket, "conformance", "bytes_sent")},
+            "gossip_case_end": {"sent": max(0.0, gossip_sent - digests),
+                                "bytes": max(0.0, gossip_bytes - digest_bytes)},
+            "event": {"sent": _bucket_payload(bucket, "event", "sent"),
+                      "bytes": _bucket_payload(bucket, "event", "bytes_sent")},
+            "result": {"sent": _bucket_payload(bucket, "result", "sent"),
+                       "bytes": _bucket_payload(bucket, "result", "bytes_sent")},
+            "overlay": {"sent": _bucket_payload(bucket, "overlay", "sent"),
+                        "bytes": _bucket_payload(bucket, "overlay", "bytes_sent")},
+            "gossip_anti_entropy": {"sent": digests, "bytes": digest_bytes},
+            "connection_setup": {"sent": _bucket_payload(bucket, "hello", "sent") + _bucket_payload(bucket, "cli", "sent"),
+                                 "bytes": _bucket_payload(bucket, "hello", "bytes_sent") + _bucket_payload(bucket, "cli", "bytes_sent")},
+        }
+
+    out: dict = {"classes": classes,
+                 "gossip_split_recorded": _bucket_subtype(messages.get("workload") or {},
+                                                          "by_gossip_msg_type", "AeDigest",
+                                                          "bytes_sent") is not None,
+                 "nodes_excl_sink": nodes,
+                 "idle_seconds": idle_seconds,
+                 "workload_seconds": workload_seconds}
+
+    workload = classes.get("workload") or {}
+    if workload:
+        # load driven traffic, normalised per event and per case
+        coordination_sent = workload["conformance"]["sent"] + workload["gossip_case_end"]["sent"]
+        coordination_bytes = workload["conformance"]["bytes"] + workload["gossip_case_end"]["bytes"]
+        load_sent = coordination_sent + workload["event"]["sent"]
+        load_bytes = coordination_bytes + workload["event"]["bytes"]
+        for unit_name, denominator in (("per_event", events), ("per_case", cases)):
+            if not denominator:
+                continue
+            out[f"bytes_{unit_name}"] = {name: workload[name]["bytes"] / denominator for name in LOAD_CLASSES}
+            out[f"messages_{unit_name}"] = {name: workload[name]["sent"] / denominator for name in LOAD_CLASSES}
+            out[f"bytes_{unit_name}"]["coordination"] = coordination_bytes / denominator
+            out[f"messages_{unit_name}"]["coordination"] = coordination_sent / denominator
+            out[f"bytes_{unit_name}"]["load_driven_excl_sink"] = load_bytes / denominator
+            out[f"messages_{unit_name}"]["load_driven_excl_sink"] = load_sent / denominator
+
+    # fixed traffic, normalised per node and second
+    fixed: dict = {}
+    for window, seconds in (("idle", idle_seconds), ("workload", workload_seconds)):
+        per_class = classes.get(window)
+        if not per_class or seconds <= 0:
+            continue
+        scale = 1.0 / (seconds * nodes)
+        fixed[window] = {
+            "bytes_per_node_second": {name: per_class[name]["bytes"] * scale for name in FIXED_CLASSES},
+            "messages_per_node_second": {name: per_class[name]["sent"] * scale for name in FIXED_CLASSES},
+        }
+        fixed[window]["bytes_per_node_second"]["total"] = sum(per_class[name]["bytes"] for name in FIXED_CLASSES) * scale
+        fixed[window]["messages_per_node_second"]["total"] = sum(per_class[name]["sent"] for name in FIXED_CLASSES) * scale
+    out["fixed"] = fixed
+
+    # gossip composition: push and repair (ae set) are load driven, the digest probe is not
+    workload_bucket = messages.get("workload") or {}
+    push = _bucket_subtype(workload_bucket, "by_gossip_msg_type", "Push", "sent") or 0.0
+    ae_set = _bucket_subtype(workload_bucket, "by_gossip_msg_type", "AeSet", "sent") or 0.0
+    ae_digest = _bucket_subtype(workload_bucket, "by_gossip_msg_type", "AeDigest", "sent") or 0.0
+    total_gossip = push + ae_set + ae_digest
+    out["gossip"] = {
+        "push": push, "ae_set": ae_set, "ae_digest": ae_digest,
+        "push_share": (push / total_gossip) if total_gossip else None,
+        "repair_share": (ae_set / total_gossip) if total_gossip else None,
+        "push_per_case": (push / cases) if cases else None,
+        "ae_set_per_case": (ae_set / cases) if cases else None,
+        "digests_per_node_second": (ae_digest / (workload_seconds * nodes)) if workload_seconds > 0 else None,
+    }
+    return out
+
+
 # parameters and metrics of a (run, system) pair
 class Row:
 
@@ -118,10 +246,13 @@ class Row:
             self.params.setdefault("cpu_cap_cores", cap.get("cores"))
         self.params = derive_params(self.params)
         self.processes = (self.metrics.get("nodes") or {}).get("by_role") or {}
+        self.traffic = traffic_decomposition(self.metrics)
 
     def value(self, path: str):
         if path.startswith("correctness."):
             return find_nested_value(self.correctness, path.split(".", 1)[1])
+        if path.startswith("traffic."):
+            return find_nested_value(self.traffic, path.split(".", 1)[1])
         return find_nested_value(self.metrics, path)
 
     # a run with a workload sent nothing if the pacer never ran
@@ -306,14 +437,19 @@ GOSSIP_PANELS = [
     ("throughput.queues.gossip_out_q.max", "gossip outbound queue peak", "messages", 1.0, False),
     ("latency_us.gossip_dissemination.p95", "case end dissemination p95", "ms", 1e-3, False),
     ("latency_us.gossip_dissemination.reach_fraction", "constraint nodes reached", "fraction", 1.0, False),
+    ("traffic.gossip.push_per_case", "push gossip messages per case", "messages", 1.0, False),
+    ("traffic.gossip.ae_set_per_case", "anti entropy repairs per case", "messages", 1.0, False),
+    ("traffic.gossip.push_share", "push share of gossip messages", "fraction", 1.0, False),
+    ("traffic.gossip.digests_per_node_second", "anti entropy digests per node", "messages/s per node", 1.0, False),
 ]
+# load driven traffic only to a per event denominator
 MESSAGE_PANELS = [
-    ("messages.derived.messages_per_event", "messages per event", "messages", 1.0, False),
-    ("messages.derived.bytes_per_event_excl_sink", "bytes per event (sink excluded)", "bytes", 1.0, False),
-    ("messages.derived.bytes_per_event_coordination", "coordination bytes per event", "bytes", 1.0, False),
-    ("messages.derived.bytes_per_event_transport", "event transport bytes per event", "bytes", 1.0, False),
-    ("messages.derived.messages_per_case", "messages per case", "messages", 1.0, False),
-    ("messages.derived.coordination_ratio", "coordination share of traffic", "fraction", 1.0, False),
+    ("traffic.bytes_per_event.coordination", "coordination bytes per event", "bytes", 1.0, False),
+    ("traffic.messages_per_event.coordination", "coordination messages per event", "messages", 1.0, False),
+    ("traffic.messages_per_case.coordination", "coordination messages per case", "messages", 1.0, False),
+    ("traffic.bytes_per_event.load_driven_excl_sink", "load driven bytes per event (sink excluded)", "bytes", 1.0, False),
+    ("traffic.bytes_per_event.event", "event transport bytes per event", "bytes", 1.0, False),
+    ("traffic.messages_per_case.gossip_case_end", "case end gossip messages per case", "messages", 1.0, False),
 ]
 CORRECTNESS_PANELS = [
     ("correctness.wrong", "wrong verdicts", "pairs", 1.0, False),
@@ -322,11 +458,14 @@ CORRECTNESS_PANELS = [
     ("revisions.revisions_total", "revisions in total", "revisions", 1.0, False),
     ("revisions.final_after_send_end", "verdicts finalised after the stream ended", "pairs", 1.0, False),
 ]
+# the fixed cost of holding a deployment open
 IDLE_PANELS = [
+    ("traffic.fixed.idle.bytes_per_node_second.total", "fixed traffic per node (idle)", "bytes/s per node", 1.0, False),
+    ("traffic.fixed.idle.bytes_per_node_second.overlay", "overlay maintenance per node", "bytes/s per node", 1.0, False),
+    ("traffic.fixed.idle.bytes_per_node_second.gossip_anti_entropy", "anti entropy digests per node", "bytes/s per node", 1.0, False),
+    ("traffic.fixed.workload.bytes_per_node_second.total", "fixed traffic per node (during load)", "bytes/s per node", 1.0, False),
     ("resources.idle.cpu_seconds_per_node_second", "idle cpu per node", "cpu-s per node-second", 1.0, False),
     ("resources.idle.rss_kb_total", "idle resident memory (all nodes)", "MB", 1 / 1024, False),
-    ("messages.derived.idle_bytes_per_node_second", "idle traffic per node", "bytes/s per node", 1.0, False),
-    ("messages.idle.sent", "idle messages sent", "messages", 1.0, False),
 ]
 PANEL_GROUPS = [
     ("throughput", THROUGHPUT_PANELS),
@@ -386,6 +525,7 @@ REVISION_PANELS = [
     ("revisions.correction_drops.total", "corrections that could not be applied", "corrections", 1.0, False),
     ("latency_us.provisional_t3_t4.p95", "provisional window p95 (t3 to t4)", "ms", 1e-3, False),
     ("latency_us.checking_t2_t3.p95", "checking delay p95 (t2 to t3)", "ms", 1e-3, False),
+    ("traffic.messages_per_case.result", "result messages per case", "messages", 1.0, False),
 ]
 
 
@@ -460,50 +600,111 @@ def write_figure(figure, out_path: Path, formats) -> Path:
     return written
 
 
-# stacked bytes per event by payload class
-def message_breakdown_figure(rows, x_key, out_path, formats):
-    payload_totals: dict[tuple, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list)) # (system, param) -> (payload type -> bytes/event)
+# stacked bars of one traffic class set
+def stacked_breakdown_figure(rows, x_key, panels, suptitle, out_path, formats, note: str | None = None,
+                             share_y: list[tuple[int, ...]] | None = None):
+    collected: dict[tuple, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for row in rows:
-        events = row.value("throughput.events_sent") or 0
-        by_type = row.value("messages.workload.by_payload_type") or {}
-        if not events or not by_type:
-            continue
-        for payload_type, counts in by_type.items():
-            payload_totals[(row.system, row.params.get(x_key))][payload_type].append(
-                counts.get("bytes_sent", 0) / events)
-    if not payload_totals:
+        for panel_index, (_title, _ylabel, prefix, classes) in enumerate(panels):
+            for name in classes:
+                value = row.value(f"{prefix}.{name}")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    collected[(panel_index, row.system, row.params.get(x_key))][name].append(float(value))
+    if not collected:
         return None
 
-    systems = sorted({system for system, _x in payload_totals})
-    x_values = sorted({x for _system, x in payload_totals if x is not None}, key=lambda value: (value is None, value))
-    payloads = sorted({payload for per_payload in payload_totals.values() for payload in per_payload},
-                      key=lambda name: list(PAYLOAD_COLORS).index(name) if name in PAYLOAD_COLORS else 99)
+    usable = [index for index in range(len(panels))
+              if any(key[0] == index and any(values for values in per_class.values())
+                     for key, per_class in collected.items())]
+    if not usable:
+        return None
 
-    figure, axes = plt.subplots(figsize=(1.6 + 1.5 * max(1, len(x_values)) * len(systems), 4.0))
-    width = 0.8 / max(1, len(systems))
-    for system_index, system in enumerate(systems):
-        bottoms = [0.0] * len(x_values)
-        positions = [index + system_index * width - 0.4 + width / 2 for index in range(len(x_values))]
-        for payload in payloads:
-            heights = []
-            for x_index, x in enumerate(x_values):
-                values = payload_totals[(system, x)].get(payload, [])
-                heights.append(summarize(values)[0] if values else 0.0)
-            heights = [0.0 if math.isnan(height) else height for height in heights]
-            axes.bar(positions, heights, width=width * 0.92, bottom=bottoms,
-                     color=PAYLOAD_COLORS.get(payload, "#888888"),
-                     edgecolor="white", linewidth=0.4,
-                     label=payload if system_index == 0 else None)
-            bottoms = [bottom + height for bottom, height in zip(bottoms, heights)]
-        for position, total in zip(positions, bottoms):
-            axes.text(position, total, system[:3], ha="center", va="bottom", fontsize=7, color="#333333")
+    systems = sorted({system for _index, system, _x in collected})
+    x_values = sorted({x for _index, _system, x in collected if x is not None},
+                      key=lambda value: (value is None, value))
+    if not x_values:
+        x_values = [None]
 
-    axes.set_xticks(range(len(x_values)))
-    axes.set_xticklabels([str(x) for x in x_values])
-    style_axes(axes, "bytes per event by payload class (bar label: system)", x_key, "bytes/event")
-    axes.legend(fontsize=8, frameon=False, ncol=min(4, len(payloads)), loc="upper center", bbox_to_anchor=(0.5, -0.13))
-    figure.tight_layout()
+    columns = min(3, len(usable))
+    figure_rows = math.ceil(len(usable) / columns)
+    width_per_panel = min(5.5, 2.0 + 0.75 * max(1, len(x_values)) * max(1, len(systems)))
+    figure, axes_grid = plt.subplots(figure_rows, columns,
+                                     figsize=(width_per_panel * columns, 3.8 * figure_rows),
+                                     squeeze=False)
+    bar_width = 0.8 / max(1, len(systems))
+    axes_of_panel: dict[int, object] = {}
+    for slot, panel_index in enumerate(usable):
+        title, ylabel, _prefix, classes = panels[panel_index]
+        axes = axes_grid[slot // columns][slot % columns]
+        axes_of_panel[panel_index] = axes
+        for system_index, system in enumerate(systems):
+            bottoms = [0.0] * len(x_values)
+            positions = [index + system_index * bar_width - 0.4 + bar_width / 2
+                         for index in range(len(x_values))]
+            for name in classes:
+                heights = []
+                for x in x_values:
+                    values = collected[(panel_index, system, x)].get(name, [])
+                    height = summarize(values)[0] if values else 0.0
+                    heights.append(0.0 if math.isnan(height) else height)
+                if not any(heights):
+                    continue
+                axes.bar(positions, heights, width=bar_width * 0.92, bottom=bottoms,
+                         color=CLASS_COLORS.get(name, "#888888"), edgecolor="white", linewidth=0.4,
+                         label=CLASS_LABELS.get(name, name) if slot == 0 else None)
+                bottoms = [bottom + height for bottom, height in zip(bottoms, heights)]
+            for position, total in zip(positions, bottoms):
+                if total:
+                    axes.text(position, total, system[:3], ha="center", va="bottom",
+                              fontsize=7, color="#333333")
+        axes.set_xticks(range(len(x_values)))
+        axes.set_xticklabels(["" if x is None else str(x) for x in x_values])
+        style_axes(axes, title, x_key, ylabel)
+    for slot in range(len(usable), figure_rows * columns):
+        axes_grid[slot // columns][slot % columns].axis("off")
+
+    # panels that are meant to be read against each other need the same scale
+    for group in (share_y or []):
+        drawn = [axes_of_panel[index] for index in group if index in axes_of_panel]
+        if len(drawn) > 1:
+            top = max(axes.get_ylim()[1] for axes in drawn)
+            for axes in drawn:
+                axes.set_ylim(0, top)
+
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
+    figure.suptitle(suptitle + "  (bar label: system)", fontsize=12)
+    if note:
+        figure.text(0.5, 0.005, note, ha="center", fontsize=7, color="#666666")
     return write_figure(figure, out_path, formats)
+
+
+# traffic that scales with the workload, normalised per event and per case
+def load_traffic_breakdown_figure(rows, x_key, out_path, formats):
+    panels = [("bytes per event", "bytes/event", "traffic.bytes_per_event", LOAD_CLASSES),
+              ("messages per event", "messages/event", "traffic.messages_per_event", LOAD_CLASSES),
+              ("messages per case", "messages/case", "traffic.messages_per_case", LOAD_CLASSES)]
+    split = all(row.value("traffic.gossip_split_recorded") for row in rows)
+    note = ("case end gossip is push and repair only; the periodic anti entropy digests are in the "
+            "fixed cost figure" if split else
+            "these runs predate per subtype byte recording, so the periodic anti entropy digests "
+            "are counted inside case end gossip")
+    return stacked_breakdown_figure(rows, x_key, panels, "load driven traffic by class",
+                                    out_path, formats, note)
+
+
+# fixed traffic that is paid per node and second
+def fixed_cost_breakdown_figure(rows, x_key, out_path, formats):
+    panels = [("bytes per node-second, idle window", "bytes/s per node",
+               "traffic.fixed.idle.bytes_per_node_second", FIXED_CLASSES),
+              ("bytes per node-second, during load and settle", "bytes/s per node",
+               "traffic.fixed.workload.bytes_per_node_second", FIXED_CLASSES),
+              ("messages per node-second, idle window", "messages/s per node",
+               "traffic.fixed.idle.messages_per_node_second", FIXED_CLASSES)]
+    note = ("the two byte panels share a scale: a class that is truly workload independent "
+            "has the same height in both")
+    return stacked_breakdown_figure(rows, x_key, panels, "fixed cost of the deployment by class",
+                                    out_path, formats, note, share_y=[(0, 1)])
 
 
 PRIVACY_PANELS = [
@@ -1071,13 +1272,20 @@ CSV_METRICS = [
     ("cpu_pct_max_node", "resources.cpu_percent_max_node", 1.0),
     ("rss_mb_total", "resources.rss_kb_total_max", 1 / 1024),
     ("idle_cpu_per_node_s", "resources.idle.cpu_seconds_per_node_second", 1.0),
-    ("idle_bytes_per_node_s", "messages.derived.idle_bytes_per_node_second", 1.0),
-    ("messages_per_event", "messages.derived.messages_per_event", 1.0),
-    ("bytes_per_event", "messages.derived.bytes_per_event_excl_sink", 1.0),
-    ("coord_bytes_per_event", "messages.derived.bytes_per_event_coordination", 1.0),
-    ("transport_bytes_per_event", "messages.derived.bytes_per_event_transport", 1.0),
-    ("messages_per_case", "messages.derived.messages_per_case", 1.0),
-    ("coordination_ratio", "messages.derived.coordination_ratio", 1.0),
+    ("coord_bytes_per_event", "traffic.bytes_per_event.coordination", 1.0),
+    ("coord_msgs_per_event", "traffic.messages_per_event.coordination", 1.0),
+    ("coord_msgs_per_case", "traffic.messages_per_case.coordination", 1.0),
+    ("transport_bytes_per_event", "traffic.bytes_per_event.event", 1.0),
+    ("load_bytes_per_event", "traffic.bytes_per_event.load_driven_excl_sink", 1.0),
+    ("gossip_push_per_case", "traffic.gossip.push_per_case", 1.0),
+    ("gossip_repair_per_case", "traffic.gossip.ae_set_per_case", 1.0),
+    ("gossip_push_share", "traffic.gossip.push_share", 1.0),
+    ("fixed_bytes_per_node_s_idle", "traffic.fixed.idle.bytes_per_node_second.total", 1.0),
+    ("fixed_bytes_per_node_s_load", "traffic.fixed.workload.bytes_per_node_second.total", 1.0),
+    ("overlay_bytes_per_node_s", "traffic.fixed.idle.bytes_per_node_second.overlay", 1.0),
+    ("ae_digest_bytes_per_node_s", "traffic.fixed.idle.bytes_per_node_second.gossip_anti_entropy", 1.0),
+    ("result_msgs_per_case", "traffic.messages_per_case.result", 1.0),
+    ("gossip_split_recorded", "traffic.gossip_split_recorded", 1.0),
     ("pairs_multi_revision", "revisions.pairs_with_multiple", 1.0),
     ("revisions_total", "revisions.revisions_total", 1.0),
     ("event_q_p95", "throughput.queues.event_q.p95", 1.0),
@@ -1267,9 +1475,13 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
     logx = bool(x_key in ("rate", "nodes", "repeat", "cases") and distinct_x > 3)
 
     if idle_only:
-        note("idle cost")
+        note("fixed cost")
         figure = panel_figure(rows, x_key, IDLE_PANELS, series_key,
-                              f"{experiment}: idle cost of the deployment", target / "idle", formats, logx)
+                              f"{experiment}: fixed cost of the deployment", target / "idle", formats, logx)
+        if figure:
+            written.append(figure)
+        note("fixed cost breakdown")
+        figure = fixed_cost_breakdown_figure(rows, x_key, target / "message_breakdown_fixed", formats)
         if figure:
             written.append(figure)
     else:
@@ -1292,15 +1504,20 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
             note("process counts")
             written.append(process_table)
 
-        note("message breakdown")
-        figure = message_breakdown_figure(workload_rows, x_key, target / "message_breakdown", formats)
+        note("load driven traffic breakdown")
+        figure = load_traffic_breakdown_figure(workload_rows, x_key, target / "message_breakdown_load", formats)
         if figure:
             written.append(figure)
 
-        if any(row.value("resources.idle.nodes") for row in rows):
-            note("idle cost")
+        note("fixed cost breakdown")
+        figure = fixed_cost_breakdown_figure(rows, x_key, target / "message_breakdown_fixed", formats)
+        if figure:
+            written.append(figure)
+
+        if any(row.value("traffic.fixed.idle") or row.value("resources.idle.nodes") for row in rows):
+            note("fixed cost")
             figure = panel_figure(rows, x_key, IDLE_PANELS, series_key,
-                                  f"{experiment}: idle cost against {x_key}", target / "idle", formats, logx)
+                                  f"{experiment}: fixed cost against {x_key}", target / "idle", formats, logx)
             if figure:
                 written.append(figure)
 

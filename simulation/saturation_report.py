@@ -1052,8 +1052,11 @@ def print_legend(thresholds: dict) -> None:
     print("    bklog     fraction of dequeues that found at least one more event already waiting behind them. 0% = the node was idle")
     print("              between events; 100% = there was always something queued. capacity independent, so it is comparable across")
     print("              queues and runs, and it moves long before q_p95 does.")
-    print("    drops     input the system threw away: message_drop + dropped_event records. unrecoverable - a revision repairs a LATE")
-    print("              message, never a destroyed one. this is the only drop kind that counts as saturation.")
+    print("    ev_drop   events the system threw away: dropped_event records. unrecoverable - a revision repairs a LATE event,")
+    print("              never a destroyed one. together with msg_drop this is the only drop kind that counts as saturation.")
+    print("              read the reason: closed_case means the event arrived after its case had already been closed, which is a")
+    print("              reordering and timing failure, not a queue that overflowed.")
+    print("    msg_drop  coordination messages the system threw away: message_drop records. same story as ev_drop.")
     print("    nofix     repairs that never landed: correction_dropped records, plus result_dropped with reason result_already_final")
     print("              (the revocable window closed before the correction arrived). a better verdict existed and the revision")
     print("              mechanism could not apply it, so a wrong verdict survives to the end of the run. this is not a capacity")
@@ -1082,7 +1085,7 @@ def print_legend(thresholds: dict) -> None:
 
 
 TABLE_HEADER = (f"{{x:>7}} {'runs':>5} {'dur_s':>7} {'eff/s':>8} {'eff/tgt':>8} | "
-                f"{'q_p95':>6} {'q_grow':>7} {'q_where':>16} {'bklog':>6} {'drops':>6} {'nofix':>7} | "
+                f"{'q_p95':>6} {'q_grow':>7} {'q_where':>16} {'bklog':>6} {'ev_drop':>8} {'msg_drop':>9} {'nofix':>7} | "
                 f"{'cpu_max':>8} {'of_cap':>7} {'busiest':>8} {'cpu_sum':>8} {'sink':>5} {'sender':>7} | "
                 f"{'wrong':>6} {'acc':>9}  verdict")
 
@@ -1114,7 +1117,8 @@ def _row(x_text: str, runs_text: str, get, tag: str) -> str:
             f"{fmt(get('queue_growth_at_p95_max'), '+.0%'):>7} "
             f"{queue_where:>16} "
             f"{fmt(get('dequeue_backlog_frac'), '.0%'):>6} "
-            f"{fmt(get('input_drops')):>6} "
+            f"{fmt(get('event_drops')):>8} "
+            f"{fmt(get('message_drops')):>9} "
             f"{fmt(get('repair_drops')):>7} | "
             f"{fmt(get('sys_cpu_max_pct'), '.0f'):>8} "
             f"{fmt(get('cpu_of_ceiling'), '.0%'):>7} "
@@ -1136,18 +1140,18 @@ def print_level_overview(system: str, points: list[dict], x_param: str) -> None:
         return
     ceiling_labels = {point.get("cpu_ceiling_label") for point in points if point.get("cpu_ceiling_label")}
     print()
-    print("=" * 158)
+    print("=" * 169)
     print(f"  {system.upper()}   median per {x_param} level, {len(points)} run(s)")
     if ceiling_labels:
         print(f"  cpu ceiling: {' | '.join(sorted(ceiling_labels))}")
-    print("=" * 158)
+    print("=" * 169)
     print(TABLE_HEADER.format(x=x_param))
-    print("-" * 158)
+    print("-" * 169)
     for level in sorted(by_level):
         rows = by_level[level]
         numeric = ("elapsed_s", "effective_rate", "achieved_ratio", "queue_fill_p95_max",
                    "queue_growth_at_p95_max", "dequeue_backlog_frac", "input_drops",
-                   "repair_drops",
+                   "event_drops", "message_drops", "repair_drops",
                    "sys_cpu_max_pct", "cpu_of_ceiling", "sys_cpu_sum_pct", "infra_cpu_max_pct",
                    "sender_cpu_pct", "wrong", "accuracy")
         values = {key: _median([row.get(key) for row in rows]) for key in numeric}
@@ -1164,13 +1168,13 @@ def print_level_overview(system: str, points: list[dict], x_param: str) -> None:
 def print_system_table(system: str, points: list[dict], x_param: str) -> None:
     ceiling_labels = {point.get("cpu_ceiling_label") for point in points if point.get("cpu_ceiling_label")}
     print()
-    print("=" * 158)
+    print("=" * 169)
     print(f"  {system.upper()}   ({len(points)} point(s), x = {x_param})")
     if ceiling_labels:
         print(f"  cpu ceiling: {' | '.join(sorted(ceiling_labels))}")
-    print("=" * 158)
+    print("=" * 169)
     print(TABLE_HEADER.format(x=x_param))
-    print("-" * 158)
+    print("-" * 169)
     for point in points:
         verdict = point["_class"]
         if verdict["invalid"]:
@@ -1400,7 +1404,8 @@ def explain_wrong_verdicts(point: dict) -> tuple[str, str]:
         return ", ".join(f"{count}x {reason}" for reason, count in (point.get(key) or {}).items())
 
     if point.get("input_drops"):
-        return "loss", (f"{point['input_drops']} input record(s) dropped "
+        split = f"{point.get('event_drops') or 0} event(s), {point.get('message_drops') or 0} message(s)"
+        return "loss", (f"{point['input_drops']} input record(s) dropped - {split} "
                         f"({detail('input_drop_reasons') or 'reason not recorded'}) - destroyed work "
                         f"cannot be repaired by a late revision, so the wrong verdicts follow from it. "
                         f"capacity, not a bug")
@@ -1468,9 +1473,9 @@ def print_runs_to_investigate(points_by_system: dict, summaries: dict, x_paramet
         return
 
     print()
-    print("=" * 158)
+    print("=" * 169)
     print("  RUNS TO INVESTIGATE")
-    print("=" * 158)
+    print("=" * 169)
 
     def dump(title: str, rows: list, advice: str, needs_a_look: bool) -> None:
         if not rows:
