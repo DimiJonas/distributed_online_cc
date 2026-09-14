@@ -22,7 +22,7 @@ which figures an experiment gets is decided by what is in its runs:
   a parameter sweep -> scalability panels against that parameter (rate, nodes, repeat, cap, ...)
   runs with no workload -> idle cost panels (per node cost against node count)
   netem varies -> latency against the delay (one line per rate)
-  privacy.json present -> exposure, disclosure and first spy curves against the compromise size
+  privacy.json present -> exposure, disclosure and first spy curves against the compromise size,
   one factor at a time -> sensitivity panels (one small multiple per varied parameter)
 
 the x axis is the parameter that actually varies inside the experiment
@@ -740,12 +740,8 @@ def privacy_curves(privacy: dict, experiment: str, x_key: str | None):
     return collected, pools
 
 
-def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=False,
-                   aggregate=False):
+def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=False):
     collected, pools = privacy_curves(privacy, experiment, x_key)
-    if aggregate:
-        collected, pools = _pool_over_parameter(collected, pools)
-        x_key = None
     if not collected:
         return None
     usable_panels = [panel for panel in PRIVACY_PANELS if any(panel[0] in per_size for per_x in collected.values() for per_size in per_x.values())]
@@ -789,20 +785,6 @@ def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=Fa
     return write_figure(figure, out_path, formats)
 
 
-# collapse the (system, sweep value) keys into one key per system, concatenating the samples at each compromise size (aggregate plot lines)
-def _pool_over_parameter(collected: dict, pools: dict) -> tuple[dict, dict]:
-    pooled: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-    pooled_pools: dict = {}
-    for (system, x), per_size in collected.items():
-        for compromised, metrics in per_size.items():
-            for metric, values in metrics.items():
-                pooled[(system, None)][compromised][metric].extend(values)
-        pooled_pools[(system, None)] = max(pooled_pools.get((system, None), 0),
-                                           pools.get((system, x)) or 0)
-    return ({key: {size: dict(metrics) for size, metrics in per_size.items()}
-             for key, per_size in pooled.items()}, pooled_pools)
-
-
 # per atom kind facts
 FACT_KIND_PANELS = [
     ("model_disclosure_activity", "activity(a)", "model"),
@@ -821,7 +803,6 @@ def fact_breakdown_figure(privacy, experiment, x_key, out_path, formats):
     collected, pools = privacy_curves(privacy, experiment, x_key)
     if not collected:
         return None
-    collected, pools = _pool_over_parameter(collected, pools)
     usable = [panel for panel in FACT_KIND_PANELS
               if any(panel[0] in per_size for per_x in collected.values() for per_size in per_x.values())]
     if not usable:
@@ -865,7 +846,6 @@ def fact_traffic_figure(privacy, experiment, x_key, out_path, formats):
     collected, pools = privacy_curves(privacy, experiment, x_key)
     if not collected:
         return None
-    collected, pools = _pool_over_parameter(collected, pools)
     conditions = [("_config_only", "config only", ":"), ("", "with coordination traffic", "-")]
     panels = [("model_disclosure", "process model", "fraction of model atoms"),
               ("deployment_disclosure", "deployment", "fraction of deployment atoms")]
@@ -935,14 +915,14 @@ PRIVACY_LEVELS = [("1 node", None, 1), ("25% of pool", 0.25, None), ("50% of poo
 # interpolate between the fraction points
 def _value_at_fraction(per_size: dict, metric: str, pool: int, fraction: float):
     sizes = sorted(size for size in per_size if metric in per_size[size])
-    if not sizes:
+    if not sizes or pool < 2:
         return None
     target = fraction * pool
+    # skip if the pool does not have enough points to show 1 node, 25% of nodes and 50% of nodes
+    if target < sizes[0] or target > sizes[-1]:
+        return None
     below = [size for size in sizes if size <= target]
     above = [size for size in sizes if size >= target]
-    if not below or not above:
-        nearest = min(sizes, key=lambda size: abs(size - target))
-        return summarize(per_size[nearest][metric])[0]
     low, high = max(below), min(above)
     low_value = summarize(per_size[low][metric])[0]
     if low == high:
@@ -1396,19 +1376,10 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
     if not any(key[0] == experiment for key in privacy):
         return written
     note("privacy curves")
-    # both versions of each: every sweep value as its own line and one line per system pooled over the sweep
-    swept = privacy_x is not None and len({(block["params"].get(privacy_x))
-                                           for (exp, _r, _s), block in privacy.items()
-                                           if exp == experiment}) > 1
     for name, kwargs in (("privacy", {}), ("privacy_by_fraction", {"by_fraction": True})):
         figure = privacy_figure(privacy, experiment, privacy_x, target / name, formats, **kwargs)
         if figure:
             written.append(figure)
-        if swept:
-            figure = privacy_figure(privacy, experiment, privacy_x, target / f"{name}_aggregated",
-                                    formats, aggregate=True, **{**kwargs, "by_fraction": True})
-            if figure:
-                written.append(figure)
     if not sensitivity:
         figure = privacy_vs_parameter_figure(privacy, experiment, privacy_x,
                                              target / "privacy_vs_parameter", formats)
