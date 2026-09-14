@@ -37,12 +37,16 @@ from helpers import (CLK_TCK, load_system_configs, read_jsonl, quantile, slope_p
                      DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index,
                      cpu_ceiling, saturation_signals, worst_queue)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
 CASE_CLOSED_REASON = "case closed"
 TRANSPORT_PAYLOADS = ("event")
 SINK_PAYLOADS = ("result")
+
+# RSS samples are used to create a memory timeline
+RSS_TIMELINE_BIN_S = 1.0
+RSS_TIMELINE_MAX_BINS = 2000
 
 
 # keeps the time windows of a run (idle, load, steady, settle) and provides some window functions
@@ -343,6 +347,7 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
     idle_first: dict[int, dict] = {} # pid -> first sample in idle window
     idle_last: dict[int, dict] = {} # pid -> last sample in idle window
     idle_rss_max: dict[int, int] = {} # pid -> max rss in idle window
+    rss_bins: dict[int, dict[int, int]] = {} # time bin -> (pid -> last rss in that bin), whole run
     # processes outside the system under test (the sender, the sink), keyed by (group, pid)
     other_first: dict[tuple[str, int], dict] = {}
     other_last: dict[tuple[str, int], dict] = {}
@@ -373,6 +378,9 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
             continue
         pid = row.get("pid")
         if sample_type == "proc":
+            if row.get("role") not in exclude_roles and row.get("rss_kb") is not None:
+                bin_index = int(sample_time // int(RSS_TIMELINE_BIN_S * 1_000_000))
+                rss_bins.setdefault(bin_index, {})[pid] = row["rss_kb"]
             if windows.contains(windows.steady, sample_time):
                 steady_first.setdefault(pid, row)
                 steady_last[pid] = row
@@ -389,6 +397,26 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
 
     steady_s = windows.seconds(windows.steady)
     idle_s = windows.seconds(windows.idle)
+
+    # contiguous series over the whole run
+    rss_timeline = None
+    if rss_bins:
+        first_bin, last_bin = min(rss_bins), max(rss_bins)
+        live: dict[int, int] = {}
+        totals: list[int] = []
+        peaks: list[int] = []
+        for bin_index in range(first_bin, last_bin + 1):
+            live.update(rss_bins.get(bin_index, {}))
+            totals.append(sum(live.values()))
+            peaks.append(max(live.values()) if live else 0)
+        # keep the series small on long runs by taking every n-th bin
+        stride = max(1, math.ceil(len(totals) / RSS_TIMELINE_MAX_BINS))
+        rss_timeline = {
+            "bin_seconds": RSS_TIMELINE_BIN_S * stride,
+            "first_bin_us": first_bin * int(RSS_TIMELINE_BIN_S * 1_000_000),
+            "rss_kb_total": totals[::stride],
+            "rss_kb_max_node": peaks[::stride],
+        }
 
     def cpu_seconds(interval_begin: dict, interval_end: dict) -> float:
         ticks = ((interval_end.get("utime_ticks", 0) + interval_end.get("stime_ticks", 0))
@@ -461,6 +489,7 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
         "rss_kb_mean_node": (sum(v["rss_kb_max"] for v in included.values()) / len(included))
                             if included else 0.0,
         "threads_total_max": sum(v["threads_max"] for v in per_node.values()),
+        "rss_timeline": rss_timeline,
         "host_cpu_busy_fraction": host_busy,
         "idle": {
             "cpu_seconds": idle_total_cpu,

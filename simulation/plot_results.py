@@ -539,6 +539,76 @@ MEMORY_PANELS = [
 ]
 
 
+RSS_TIMELINE_SERIES = [
+    ("rss_kb_total", "all nodes", "memory_timeline"),
+    ("rss_kb_max_node", "busiest node", "memory_timeline_max_node"),
+]
+RSS_TIMELINE_MAX_PANELS = 6
+
+
+# seconds since the start of the load window for one run
+def rss_series(row, metric: str = "rss_kb_total") -> tuple[list[float], list[float]] | None:
+    timeline = row.value("resources.rss_timeline")
+    if not timeline or not timeline.get(metric):
+        return None
+    values = timeline[metric]
+    bin_seconds = timeline.get("bin_seconds") or 1.0
+    first_us = timeline.get("first_bin_us") or 0
+    window = (row.value("windows.load") or [None, None]) + [None, None]
+    anchor_us = window[0] or first_us
+    start = (first_us - anchor_us) / 1e6
+    times = [start + index * bin_seconds for index in range(len(values))]
+    return times, [value / 1024.0 for value in values]
+
+
+def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total",
+                           scope="all nodes", max_panels=RSS_TIMELINE_MAX_PANELS):
+    by_value: dict = defaultdict(dict)
+    for row in sorted(rows, key=lambda item: (item.replicate, item.run_id)):
+        value = row.params.get(x_key) if x_key else None
+        by_value[value].setdefault(row.system, row) # first replicate stands for the configuration
+    values = sorted(by_value, key=lambda item: (item is None, item))
+    if not values:
+        return None
+    if len(values) > max_panels:
+        step = (len(values) - 1) / (max_panels - 1)
+        values = [values[round(index * step)] for index in range(max_panels)]
+
+    columns = min(3, len(values))
+    figure_rows = math.ceil(len(values) / columns)
+    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.6 * columns, 3.4 * figure_rows),
+                                     squeeze=False)
+    drawn = False
+    for index, value in enumerate(values):
+        axes = axes_grid[index // columns][index % columns]
+        for system, row in sorted(by_value[value].items()):
+            series = rss_series(row, metric)
+            if series is None:
+                continue
+            times, totals = series
+            style = SYSTEM_STYLE.get(system, {})
+            axes.plot(times, totals, color=style.get("color"),
+                      label=style.get("label", system), linewidth=1.4)
+            window = (row.value("windows.load") or [None, None]) + [None, None]
+            if window[0] and window[1]:
+                axes.axvline((window[1] - window[0]) / 1e6, color=style.get("color"),
+                             linestyle=":", linewidth=1.0)
+            drawn = True
+        axes.axvline(0.0, color="#999999", linestyle="--", linewidth=0.8)
+        title = "resident memory" if value is None else f"{x_key} = {value}"
+        style_axes(axes, title, "seconds since the load window started", f"MB, {scope}")
+    if not drawn:
+        plt.close(figure)
+        return None
+    for index in range(len(values), figure_rows * columns):
+        axes_grid[index // columns][index % columns].axis("off")
+    figure.suptitle(f"resident memory over the run, {scope} "
+                    f"(sink excluded, dotted = end of the load window)")
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
+    return write_figure(figure, out_path, formats)
+
+
 def panel_figure(rows, x_key, panels, series_key, title, out_path, formats, logx=False):
     usable_panels = [panel for panel in panels if any(row.value(panel[0]) is not None for row in rows)]
     if not usable_panels:
@@ -716,8 +786,13 @@ PRIVACY_PANELS = [
     ("model_disclosure_binding", "bindings disclosed", "fraction of binding atoms"),
     ("deployment_disclosure", "deployment disclosed", "fraction of deployment atoms"),
     ("first_spy_precision", "first spy precision", "precision"),
+    ("first_spy_recall", "first spy recall", "recall"),
     ("case_disclosure_set", "case disclosure (set knowledge)", "cd"),
+    ("case_disclosure_mult", "case disclosure (multiset knowledge)", "cd"),
+    ("case_disclosure_seq", "case disclosure (sequence knowledge)", "cd"),
     ("trace_disclosure_set", "trace disclosure (set knowledge)", "td"),
+    ("trace_disclosure_mult", "trace disclosure (multiset knowledge)", "td"),
+    ("trace_disclosure_seq", "trace disclosure (sequence knowledge)", "td"),
 ]
 
 
@@ -1467,6 +1542,13 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
             figure = panel_figure(workload_rows, x_key, panels, series_key,
                                   f"{experiment}: {group_name} against {x_key}",
                                   target / group_name, formats, logx)
+            if figure:
+                written.append(figure)
+
+        for metric, scope, name in RSS_TIMELINE_SERIES:
+            note(f"memory over time ({scope})")
+            figure = memory_timeline_figure(workload_rows, x_key, target / name, formats,
+                                            metric=metric, scope=scope)
             if figure:
                 written.append(figure)
 

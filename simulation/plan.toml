@@ -66,9 +66,17 @@ retry_buffer_size = 32768
 max_batch_size = 16384
 flush_interval = "100ms"
 
-[baseline.gossip]
+[baseline.gossip]             
+anti_entropy_interval = "2s"
+anti_entropy_fanout = 1
+push_fanout = 5
 gossip_outbound_mpsc_channel_size = 1024
 gossip_inbound_mpsc_channel_size = 1024
+
+[baseline.overlay]
+shuffle_interval = "5s"
+shuffle_length = 4
+max_peer_cache_size = 20
 
 [baseline.metrics]
 queue_report_interval = "20ms"
@@ -399,6 +407,7 @@ systems = ["decentralized", "central"]
   cases = 5000
   rate = 4000
   msgtrace = false
+  case_end_grace_period = "5s"    # cleaning up cases depends on it
   [experiment.grid]
   case_gap_secs = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1]
 
