@@ -493,8 +493,11 @@ systems = ["decentralized", "central"]
   msgtrace = true
   burst = 8
   rate = 1000
+  case_end_grace_period = "180s"    # ensure that central has enough time to settle after the stream
+  quiescence_s = 900                # ensure that central has enough time to settle after the stream
+  max_wait_for_settlement_s = 960   # ensure that central has enough time to settle after the stream
   [experiment.grid]
-  nodes = [2, 4, 6, 8, 10, 13]           # traffic fines has 12 activities -> 12 nodes constraint nodes + 1 sink = 13 (with by-event assignment) 
+  nodes = [2, 4, 6, 8, 10, 13]      # traffic fines has 12 activities -> 12 nodes constraint nodes + 1 sink = 13 (with by-event assignment) 
 
 # E6a: gossip sensitivity
 # towards R2: message overhead and case end verdict latency
