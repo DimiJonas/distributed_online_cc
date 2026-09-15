@@ -139,7 +139,7 @@ def traffic_decomposition(metrics: dict) -> dict:
 
     idle_seconds = float(windows.get("idle_seconds") or 0.0)
     load_seconds = float(windows.get("load_seconds") or 0.0)
-    settle = windows.get("settle") or []
+    settle = [bound for bound in (windows.get("settle") or []) if isinstance(bound, (int, float))]
     settle_seconds = max(0.0, (settle[1] - settle[0]) / 1e6) if len(settle) == 2 else 0.0
     workload_seconds = load_seconds + settle_seconds
 
