@@ -415,14 +415,21 @@ THROUGHPUT_PANELS = [
     ("throughput.message_drops.total", "message drops", "messages", 1.0, False),
     ("throughput.closed_case_drops", "dropped after the case closed", "events + messages", 1.0, False),
 ]
-LATENCY_PANELS = [
-    ("latency_us.detection_t1_t3.p50", "detection latency p50 (t1 to t3)", "ms", 1e-3, False),
-    ("latency_us.detection_t1_t3.p95", "detection latency p95", "ms", 1e-3, False),
-    ("latency_us.detection_t1_t3.p99", "detection latency p99", "ms", 1e-3, False),
-    ("latency_us.routing_t1_t2.p95", "routing delay p95 (t1 to t2)", "ms", 1e-3, False),
-    ("latency_us.checking_t2_t3.p95", "checking delay p95 (t2 to t3)", "ms", 1e-3, False),
-    ("latency_us.provisional_t3_t4.p95", "provisional window p95 (t3 to t4)", "ms", 1e-3, False),
+LATENCY_INTERVALS = [
+    ("routing_t1_t2", "routing delay (t1 to t2)"),
+    ("checking_t2_t3", "checking delay (t2 to t3)"),
+    ("detection_t1_t3", "detection latency (t1 to t3)"),
+    ("provisional_t3_t4", "provisional window (t3 to t4)"),
+    ("end_to_end_t1_t4", "event to final verdict (t1 to t4)"),
+    ("case_end_verdict", "case end verdict latency"),
+    ("gossip_dissemination", "case end dissemination"),
 ]
+LATENCY_PERCENTILES = ("p50", "p95", "p99")
+
+# overview figure: every interval at p95
+LATENCY_PANELS = [(f"latency_us.{key}.p95", f"{label} p95", "ms", 1e-3, False)
+                  for key, label in LATENCY_INTERVALS]
+
 RESOURCE_PANELS = [
     ("resources.cpu_seconds_per_event", "cpu per event", "cpu-ms/event", 1e3, False),
     ("resources.cpu_seconds_excl_sink", "cpu total (sink excluded)", "cpu-s", 1.0, False),
@@ -476,6 +483,11 @@ PANEL_GROUPS = [
     ("correctness_cost", CORRECTNESS_PANELS),
 ]
 
+
+# all three percentiles drawn into its own figure
+def latency_panels(key: str, label: str) -> list[tuple]:
+    return [(f"latency_us.{key}.{point}", f"{label} {point}", "ms", 1e-3, False)
+            for point in LATENCY_PERCENTILES]
 
 
 # what each deployment actually builds from one value of `constraint_nodes` (those who receive the events)
@@ -1534,6 +1546,14 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
         for group_name, panels in PANEL_GROUPS:
             note(group_name)
             figure = panel_figure(workload_rows, x_key, panels, series_key, f"{experiment}: {group_name} against {x_key}", target / group_name, formats, logx)
+            if figure:
+                written.append(figure)
+
+        for key, label in LATENCY_INTERVALS:
+            note(f"latency: {label}")
+            figure = panel_figure(workload_rows, x_key, latency_panels(key, label), series_key,
+                                  f"{experiment}: {label} against {x_key}",
+                                  target / f"latency_{key}", formats, logx)
             if figure:
                 written.append(figure)
 

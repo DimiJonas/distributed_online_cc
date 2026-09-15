@@ -42,7 +42,7 @@ from helpers import (
     remove_quota_cgroups, worker_threads_for_node, worker_threads_info,
     DEFAULT_STOP_GRACE_S, GROUP_TOOLING, GROUP_SYSTEM, NodeInfo, ProcSampler, assert_addresses_free,
     binary_cmd, check_records_complete, checkpoint_wal, db_progress, kill_stale_nodes,
-    load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
+    git_revision, load_expected, load_system_configs, log, netem_apply, netem_clear, now_us, read_jsonl,
     register_process, remove_sockets, run_logged, stable_key, stop_all_launched,
     stop_processes, wait_until_ready, write_toml,
 )
@@ -621,7 +621,8 @@ def execute_run(plan: dict, repo: Path, results_dir: Path, run: dict, force: boo
     paths.mkdirs()
 
     params = run["params"]
-    run_record = {**run, "started_at_us": now_us(), "host": os.uname().nodename, "cpu_count": os.cpu_count(), "systems_timeline": [],
+    run_record = {**run, "started_at_us": now_us(), "host": os.uname().nodename, "cpu_count": os.cpu_count(),
+              "git": git_revision(repo), "systems_timeline": [],
               "problems": [], "baseline": plan.get("baseline", {})}
 
     netem = params.get("netem_ms")

@@ -42,6 +42,22 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# which commit the code of a run was built from
+def git_revision(repo: Path) -> dict:
+    def git(*args: str) -> str | None:
+        try:
+            done = subprocess.run(["git", "-C", str(repo), *args],
+                                  capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    commit = git("rev-parse", "HEAD")
+    if not commit:
+        return {"commit": None}
+    return {"commit": commit, "committed_at": git("log", "-1", "--format=%cI")}
+
+
 # hash of a json serializable object for caches and run ids
 def stable_key(obj: Any, length: int = 12) -> str:
     blob = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()

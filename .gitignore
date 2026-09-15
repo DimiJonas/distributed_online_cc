@@ -5,6 +5,7 @@
 /simulation/__pycache__
 /results
 /old_results
+/recent_results
 
 /simulation/test_plan.toml
 
