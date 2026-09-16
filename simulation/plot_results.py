@@ -872,6 +872,187 @@ def privacy_figure(privacy, experiment, x_key, out_path, formats, by_fraction=Fa
     return write_figure(figure, out_path, formats)
 
 
+ECDF_METRICS = [
+    ("model_disclosure", "model disclosure"),
+    ("deployment_disclosure", "deployment disclosure"),
+    ("case_exposure_named", "case exposure (named activities)"),
+    ("case_exposure_with_anonymous", "case exposure incl. pseudonymous"),
+    ("first_spy_precision", "first spy precision"),
+    ("case_disclosure_set", "case disclosure (set knowledge)"),
+]
+ECDF_PANELS = 4
+# only used for the attacker pools that the systems dont share
+ECDF_POOL_FRACTIONS = (0.1, 0.25, 0.5, 0.75)
+
+
+# (value, count) pairs -> the staircase of the empirical distribution function
+def ecdf_points(counts: dict) -> tuple[list[float], list[float]] | None:
+    if not counts:
+        return None
+    total = sum(counts.values())
+    if not total:
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    seen = 0
+    for value in sorted(counts):
+        seen += counts[value]
+        xs += [value, value]
+        ys += [seen / total - counts[value] / total, seen / total]
+    return xs, ys
+
+
+# distributions per (system, compromise size), keeping the run identity so every replicate can be drawn as its own line
+def privacy_distributions(privacy: dict, experiment: str, metric: str):
+    per_run: dict = defaultdict(dict) # (system, size) -> run_id -> {value: count}
+    pools: dict = {} # system -> pool size
+    for (exp, run_id, system), block in privacy.items():
+        if exp != experiment:
+            continue
+        local = block["local"]
+        pools[system] = local.get("pool_size")
+        for entry in local.get("per_size", []):
+            distribution = (entry.get("distributions") or {}).get(metric)
+            if not distribution or distribution.get("kind") != "counts":
+                continue
+            counts = dict(zip(distribution["values"], distribution["counts"]))
+            per_run[(system, entry.get("compromised"))][run_id] = counts
+    return per_run, pools
+
+
+def ecdf_figure(privacy, experiment, metric, label, out_path, formats):
+    per_run, pools = privacy_distributions(privacy, experiment, metric)
+    if not per_run:
+        return None
+
+    sizes_by_system: dict = defaultdict(set)
+    for (system, size) in per_run:
+        if size:
+            sizes_by_system[system].add(size)
+    if not sizes_by_system:
+        return None
+
+    # the same compromise size in both deployments is the honest comparison
+    shared = sorted(set.intersection(*sizes_by_system.values())) if len(sizes_by_system) > 1 \
+        else sorted(next(iter(sizes_by_system.values())))
+    panels: list[tuple[str, dict]] = []
+    if shared:
+        picks = [shared[round(index * (len(shared) - 1) / (ECDF_PANELS - 1))]
+                 for index in range(min(ECDF_PANELS, len(shared)))]
+        for size in sorted(set(picks)):
+            panels.append((f"{size} of the nodes compromised",
+                           {system: size for system in sizes_by_system}))
+    else:
+        # no size was evaluated in both, so fall back to comparable shares of the pool
+        for target in ECDF_POOL_FRACTIONS:
+            chosen = {system: min(sizes, key=lambda size: abs(size / (pools.get(system) or 1) - target))
+                      for system, sizes in sizes_by_system.items() if pools.get(system)}
+            if chosen:
+                panels.append((f"{round(target * 100)}% of the pool", chosen))
+    if not panels:
+        return None
+
+    columns = min(len(panels), 4)
+    figure_rows = math.ceil(len(panels) / columns)
+    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.4 * columns, 3.4 * figure_rows),
+                                     squeeze=False)
+    drawn = False
+    for index, (title, chosen) in enumerate(panels):
+        axes = axes_grid[index // columns][index % columns]
+        annotations = []
+        for system, size in sorted(chosen.items()):
+            runs = per_run.get((system, size)) or {}
+            if not runs:
+                continue
+            style = SYSTEM_STYLE.get(system, {"color": "#444444", "label": system})
+            for counts in runs.values(): # one thin line per replicate
+                points = ecdf_points(counts)
+                if points:
+                    axes.plot(points[0], points[1], color=style["color"], linewidth=0.7, alpha=0.25)
+            pooled: dict = defaultdict(int)
+            for counts in runs.values():
+                for value, count in counts.items():
+                    pooled[value] += count
+            points = ecdf_points(pooled)
+            if points:
+                axes.plot(points[0], points[1], color=style["color"], linewidth=2.0,
+                          label=style["label"])
+                drawn = True
+            pool = pools.get(system)
+            share = f", {round(100 * size / pool)}% of {pool}" if pool else ""
+            annotations.append(f"{style['label']}: k={size}{share}, {len(runs)} runs")
+        style_axes(axes, title, label, "fraction of draws at or below")
+        if annotations:
+            axes.text(0.97, 0.05, "\n".join(annotations), transform=axes.transAxes,
+                      ha="right", va="bottom", fontsize=7, color="#444444")
+        axes.set_xlim(-0.02, 1.02)
+        axes.set_ylim(-0.02, 1.02)
+    if not drawn:
+        plt.close(figure)
+        return None
+    for index in range(len(panels), figure_rows * columns):
+        axes_grid[index // columns][index % columns].axis("off")
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
+    figure.suptitle(f"{experiment}: distribution of {label} over the compromised sets "
+                    f"(thin = one replicate, thick = pooled)", fontsize=12)
+    return write_figure(figure, out_path, formats)
+
+
+# best and worst subset of each size, as a bracket around the uniform average
+def privacy_extremes_figure(privacy, experiment, x_key, out_path, formats):
+    collected: dict = defaultdict(lambda: defaultdict(dict)) # system -> size -> metric -> (min, max)
+    pools: dict = {}
+    for (exp, _run_id, system), block in privacy.items():
+        if exp != experiment:
+            continue
+        local = block["local"]
+        pools[system] = local.get("pool_size")
+        for entry in local.get("per_size", []):
+            size = entry.get("compromised")
+            for metric, value in entry.items():
+                if not (isinstance(value, dict) and value.get("n")):
+                    continue
+                low, high = collected[system][size].get(metric, (value["min"], value["max"]))
+                collected[system][size][metric] = (min(low, value["min"]), max(high, value["max"]))
+    if not collected:
+        return None
+
+    usable = [panel for panel in PRIVACY_PANELS
+              if any(panel[0] in metrics for sizes in collected.values() for metrics in sizes.values())]
+    if not usable:
+        return None
+    columns = min(3, len(usable))
+    figure_rows = math.ceil(len(usable) / columns)
+    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.6 * columns, 3.4 * figure_rows),
+                                     squeeze=False)
+    for index, (metric, title, ylabel) in enumerate(usable):
+        axes = axes_grid[index // columns][index % columns]
+        for system, sizes in sorted(collected.items()):
+            points = [(size, sizes[size][metric]) for size in sorted(sizes) if metric in sizes[size]]
+            if not points:
+                continue
+            style = SYSTEM_STYLE.get(system, {"color": "#444444", "marker": "^", "label": system})
+            positions = [point[0] for point in points]
+            axes.plot(positions, [point[1][1] for point in points], color=style["color"],
+                      marker=style["marker"], markersize=3, linewidth=1.5,
+                      label=f"{style['label']} best subset")
+            axes.plot(positions, [point[1][0] for point in points], color=style["color"],
+                      marker=style["marker"], markersize=3, linewidth=1.2, linestyle="--",
+                      label=f"{style['label']} worst subset")
+            axes.fill_between(positions, [point[1][0] for point in points],
+                              [point[1][1] for point in points], color=style["color"],
+                              alpha=0.10, linewidth=0)
+        style_axes(axes, title, "compromised nodes", ylabel)
+        axes.set_ylim(-0.02, 1.05)
+    for index in range(len(usable), figure_rows * columns):
+        axes_grid[index // columns][index % columns].axis("off")
+    handles, labels = figure_handles(figure)
+    place_legend(figure, handles, labels)
+    figure.suptitle(f"{experiment}: best and worst compromised set of each size", fontsize=12)
+    return write_figure(figure, out_path, formats)
+
+
 # per atom kind facts
 FACT_KIND_PANELS = [
     ("model_disclosure_activity", "activity(a)", "model"),
@@ -1396,7 +1577,7 @@ def write_privacy_csv(privacy: dict, out_path: Path) -> None:
     metric_names: set = set()
     for block in privacy.values():
         for entry in block["local"].get("per_size", []):
-            metric_names |= {key for key, value in entry.items() if isinstance(value, dict)}
+            metric_names |= {key for key, value in entry.items() if isinstance(value, dict) and "n" in value}
     metric_names = sorted(metric_names)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as handle:
@@ -1476,6 +1657,17 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
     if figure:
         written.append(figure)
     written += min_nodes_vs_activities_figures(privacy, experiment, target, formats, privacy_x)
+
+    note("best and worst compromised set")
+    figure = privacy_extremes_figure(privacy, experiment, privacy_x, target / "privacy_extremes", formats)
+    if figure:
+        written.append(figure)
+
+    note("distribution over the compromised sets")
+    for metric, label in ECDF_METRICS:
+        figure = ecdf_figure(privacy, experiment, metric, label, target / f"privacy_ecdf_{metric}", formats)
+        if figure:
+            written.append(figure)
 
     note("fact disclosure per atom kind")
     for name, builder in (("privacy_facts_breakdown", fact_breakdown_figure), ("privacy_facts_traffic", fact_traffic_figure)):

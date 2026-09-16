@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import itertools
 import json
 import math
 import random
@@ -43,7 +44,17 @@ from helpers import (percentiles, discover_runs, load_system_configs, Progress,
                      load_disclosure_index, load_ground_truth, log_baseline_disclosure)
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# cap the recorded distinct values at 128 since thats enough to draw a smooth curve
+DISTRIBUTION_MAX_DISTINCT = 128
+DISTRIBUTION_QUANTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
+# round to 6 decimals to reduce fraction noise
+DISTRIBUTION_DECIMALS = 6
+
+# below this pool size every compromise size is evaluated
+# above it the sizes are spaced over the pool, since the node sweeps go up to pool sizes where every size would be wasteful
+EVERY_SIZE_UP_TO = 24
 
 
 # TYPE(r): role -> constraint type
@@ -604,7 +615,7 @@ _ANNOUNCED_POOL_SIZES: set[tuple] = set()
 def compromise_sizes(pool_size: int, requested: list[int] | None) -> list[int]:
     if requested:
         return [size for size in requested if 1 <= size <= pool_size]
-    if pool_size <= 12:
+    if pool_size <= EVERY_SIZE_UP_TO:
         return list(range(1, pool_size + 1))
     sizes = {1, 2, 3, pool_size}
     fraction = 0.05
@@ -612,6 +623,21 @@ def compromise_sizes(pool_size: int, requested: list[int] | None) -> list[int]:
         sizes.add(max(1, round(pool_size * fraction)))
         fraction *= 1.6
     return sorted(sizes)
+
+
+# the draws of one metric as a distribution (for drawing an ecdf)
+# exact counts while the metric takes few distinct values, a quantile ladder once it does not
+def distribution_of(values: list[float]) -> dict:
+    counts = Counter(round(value, DISTRIBUTION_DECIMALS) for value in values)
+    if len(counts) <= DISTRIBUTION_MAX_DISTINCT:
+        ordered = sorted(counts.items())
+        return {"kind": "counts",
+                "values": [value for value, _ in ordered],
+                "counts": [count for _, count in ordered]}
+    ladder = percentiles(values, points=DISTRIBUTION_QUANTILES)
+    return {"kind": "quantiles",
+            "points": list(DISTRIBUTION_QUANTILES),
+            "values": [ladder[f"p{point}"] for point in DISTRIBUTION_QUANTILES]}
 
 
 def evaluate_system(view: SystemView, draws: int, seed: int, sizes: list[int] | None, reporter=None, label: str = "") -> dict:
@@ -624,7 +650,7 @@ def evaluate_system(view: SystemView, draws: int, seed: int, sizes: list[int] | 
     announcement_key = (len(pool), tuple(points))
     if reporter is not None and announcement_key not in _ANNOUNCED_POOL_SIZES:
         _ANNOUNCED_POOL_SIZES.add(announcement_key)
-        spacing = "given with --sizes" if sizes else ("every size" if len(pool) <= 12 else "spaced over the pool")
+        spacing = "given with --sizes" if sizes else ("every size" if len(pool) <= EVERY_SIZE_UP_TO else "spaced over the pool")
         reporter.log(f"attacker set sizes for a pool of {len(pool)} node(s), {len(points)} point(s), "
                      f"{spacing}: {', '.join(str(point) for point in points)}")
 
@@ -634,19 +660,25 @@ def evaluate_system(view: SystemView, draws: int, seed: int, sizes: list[int] | 
                           fraction=(size_index - 1) / len(points))
         results: dict[str, list[float]] = {}
         # exhaustive when there is only one distinct subset, sampled otherwise
-        repeats = 1 if size >= len(pool) else draws
-        for _ in range(repeats):
-            subset = pool if size >= len(pool) else rng.sample(pool, size)
-            for key, value in view.evaluate(subset).items():
+        subset_count = math.comb(len(pool), size)
+        exhaustive = subset_count <= draws
+        subsets = (itertools.combinations(pool, size) if exhaustive
+                   else (rng.sample(pool, size) for _ in range(draws)))
+        repeats = subset_count if exhaustive else draws
+        for subset in subsets:
+            for key, value in view.evaluate(list(subset)).items():
                 if value is not None:
                     results.setdefault(key, []).append(value)
-                    
+
         per_size.append({"compromised": size,
                          "compromised_fraction": size / len(pool) if pool else None,
                          "draws": repeats,
+                         "exhaustive": exhaustive,
+                         "distributions": {key: distribution_of(values) for key, values in results.items()},
                          **{key: percentiles(values, points=(5, 50, 95)) for key, values in results.items()}})
 
-    for key in {key for entry in per_size for key in entry if isinstance(entry[key], dict)}:
+    for key in {key for entry in per_size for key in entry
+                if isinstance(entry[key], dict) and "n" in entry[key]}:
         curves[key] = {
             "compromised": [entry["compromised"] for entry in per_size],
             "mean": [entry.get(key, {}).get("mean") for entry in per_size],
