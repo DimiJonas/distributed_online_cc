@@ -56,6 +56,8 @@ PAYLOAD_COLORS = {"conformance": "#0072B2", "ce_gossip": "#56B4E9", "overlay": "
                   "hello": "#999999", "cli": "#666666"}
 
 LOAD_CLASSES = ("conformance", "gossip_case_end", "event", "result")
+# exclude the result message form the message breakdown panels because its not part of the system
+LOAD_BREAKDOWN_CLASSES = tuple(name for name in LOAD_CLASSES if name != "result")
 FIXED_CLASSES = ("overlay", "gossip_anti_entropy", "connection_setup")
 CLASS_COLORS = {"conformance": "#0072B2", "gossip_case_end": "#56B4E9", "event": "#D55E00",
                 "result": "#CC79A7", "overlay": "#009E73", "gossip_anti_entropy": "#E69F00",
@@ -763,9 +765,9 @@ def stacked_breakdown_figure(rows, x_key, panels, suptitle, out_path, formats, n
 
 # traffic that scales with the workload, normalised per event and per case
 def load_traffic_breakdown_figure(rows, x_key, out_path, formats):
-    panels = [("bytes per event", "bytes/event", "traffic.bytes_per_event", LOAD_CLASSES),
-              ("messages per event", "messages/event", "traffic.messages_per_event", LOAD_CLASSES),
-              ("messages per case", "messages/case", "traffic.messages_per_case", LOAD_CLASSES)]
+    panels = [("bytes per event", "bytes/event", "traffic.bytes_per_event", LOAD_BREAKDOWN_CLASSES),
+              ("messages per event", "messages/event", "traffic.messages_per_event", LOAD_BREAKDOWN_CLASSES),
+              ("messages per case", "messages/case", "traffic.messages_per_case", LOAD_BREAKDOWN_CLASSES)]
     split = all(row.value("traffic.gossip_split_recorded") for row in rows)
     note = ("case end gossip is push and repair only; the periodic anti entropy digests are in the "
             "fixed cost figure" if split else
