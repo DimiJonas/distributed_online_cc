@@ -72,7 +72,7 @@ IGNORED_PARAMS = {"stream_dir", "manifest", "metrics", "violation_sampling", "qu
                   "msgtrace", "external_central_sink", "cases", "nodes"}
 
 AXIS_LABELS = {
-    "constraint_nodes": "constraint nodes (activity watching roles)",
+    "constraint_nodes": "nodes",
     "rate": "offered rate (events/s)",
     "repeat": "catalog repeats (model size)",
     "case_gap_secs": "case gap (s), smaller = more concurrency",
@@ -434,7 +434,7 @@ LATENCY_PANELS = [(f"latency_us.{key}.p95", f"{label} p95", "ms", 1e-3, False)
 
 RESOURCE_PANELS = [
     ("resources.cpu_seconds_per_event", "cpu per event", "cpu-ms/event", 1e3, False),
-    ("resources.cpu_seconds_excl_sink", "cpu total (sink excluded)", "cpu-s", 1.0, False),
+    ("resources.cpu_seconds_excl_sink", "cpu total", "cpu-s", 1.0, False),
     ("resources.cpu_percent_max_node", "cpu of the busiest node", "% of one core", 1.0, False),
     ("resources.busiest_thread.cpu_percent", "cpu of the busiest thread", "% of one core", 1.0, False),
     ("resources.rss_kb_total_max", "resident memory (all nodes)", "MB", 1 / 1024, False),
@@ -456,7 +456,7 @@ MESSAGE_PANELS = [
     ("traffic.bytes_per_event.coordination", "coordination bytes per event", "bytes", 1.0, False),
     ("traffic.messages_per_event.coordination", "coordination messages per event", "messages", 1.0, False),
     ("traffic.messages_per_case.coordination", "coordination messages per case", "messages", 1.0, False),
-    ("traffic.bytes_per_event.load_driven_excl_sink", "load driven bytes per event (sink excluded)", "bytes", 1.0, False),
+    ("traffic.bytes_per_event.load_driven_excl_sink", "load driven bytes per event", "bytes", 1.0, False),
     ("traffic.bytes_per_event.event", "event transport bytes per event", "bytes", 1.0, False),
     ("traffic.messages_per_case.gossip_case_end", "case end gossip messages per case", "messages", 1.0, False),
 ]
@@ -506,16 +506,14 @@ def write_process_table(rows: list[Row], x_key: str, out_path: Path) -> Path | N
             entry[role] = max(entry.get(role, 0), count)
     if not table:
         return None
-    roles = sorted({role for entry in table.values() for role in entry})
+    roles = sorted({role for entry in table.values() for role in entry if role != "sink"})
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow([x_key, "system"] + roles + ["processes_total", "processes_excl_sink"])
+        writer.writerow([x_key, "system"] + roles + ["processes_total"])
         for (x, system), entry in sorted(table.items()):
             counts = [entry.get(role, 0) for role in roles]
-            total = sum(counts)
-            excl_sink = total - entry.get("sink", 0)
-            writer.writerow([x, system] + counts + [total, excl_sink])
+            writer.writerow([x, system] + counts + [sum(counts)])
     return out_path
 
 
@@ -617,7 +615,7 @@ def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total"
     for index in range(len(values), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
     figure.suptitle(f"resident memory over the run, {scope} "
-                    f"(sink excluded, dotted = end of the load window)")
+                    f"(dotted = end of the load window)")
     handles, labels = figure_handles(figure)
     place_legend(figure, handles, labels)
     return write_figure(figure, out_path, formats)

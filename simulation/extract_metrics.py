@@ -451,8 +451,9 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
                 busiest_thread = {"node_id": steady_last[pid].get("node_id"), "name": name,
                                   "cpu_percent": percent, "tid": thread_id}
 
+    idle_pids = [pid for pid, first in idle_first.items() if first.get("role") not in exclude_roles]
     idle_total_cpu = sum(cpu_seconds(idle_first[pid], idle_last.get(pid, idle_first[pid]))
-                     for pid in idle_first)
+                     for pid in idle_pids)
     host_busy = None
     if host_first and host_last:
         total_ticks = host_last["cpu_total_ticks"] - host_first["cpu_total_ticks"]
@@ -477,26 +478,26 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
     return {
         "per_node": per_node,
         "non_system": non_system,
-        "cpu_seconds_total": total_cpu,
-        "cpu_seconds_excl_sink": total_cpu_excluded,
+        "cpu_seconds_total": total_cpu_excluded,
+        "cpu_seconds_excl_sink": total_cpu_excluded,  # kept for old plot code, same value as cpu_seconds_total
         "cpu_percent_mean_node": (sum(v["cpu_percent"] for v in included.values()) / len(included))
                                  if included else 0.0,
         "cpu_percent_max_node": busiest_node[1].get("cpu_percent", 0.0),
         "busiest_node_id": busiest_node[0],
         "busiest_thread": busiest_thread,
-        "rss_kb_total_max": sum(v["rss_kb_max"] for v in per_node.values()),
+        "rss_kb_total_max": sum(v["rss_kb_max"] for v in included.values()),
         "rss_kb_max_node": max((v["rss_kb_max"] for v in included.values()), default=0),
         "rss_kb_mean_node": (sum(v["rss_kb_max"] for v in included.values()) / len(included))
                             if included else 0.0,
-        "threads_total_max": sum(v["threads_max"] for v in per_node.values()),
+        "threads_total_max": sum(v["threads_max"] for v in included.values()),
         "rss_timeline": rss_timeline,
         "host_cpu_busy_fraction": host_busy,
         "idle": {
             "cpu_seconds": idle_total_cpu,
-            "cpu_seconds_per_node_second": (idle_total_cpu / (len(idle_first) * idle_s))
-                                           if idle_first and idle_s else 0.0,
-            "rss_kb_total": sum(idle_rss_max.values()),
-            "nodes": len(idle_first),
+            "cpu_seconds_per_node_second": (idle_total_cpu / (len(idle_pids) * idle_s))
+                                           if idle_pids and idle_s else 0.0,
+            "rss_kb_total": sum(idle_rss_max[pid] for pid in idle_pids),
+            "nodes": len(idle_pids),
         },
     }
 

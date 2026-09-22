@@ -2,35 +2,19 @@
 """sample_stream.py - take a case level sample of a stream produced by convert_log_to_stream.py
 
 works on the CONVERTED stream, not on the XES log: it filters manifest.jsonl down to the sampled
-cases, renumbers seq, and links the event files that survive. that is a few seconds instead of
-re-parsing a 561k event log, and it guarantees the sample is a strict subset of the stream the full
-run used.
+cases, renumbers seq, and links the event files that survive.
 
 why sample at all: traffic fines has ~150k cases and ~14 constraint pairs per case, so a full run
-produces ~2.1M verdicts. the central coordinator settles those at roughly 1000 pairs/s no matter
+produces ~2.1M verdicts. the central node settles those at roughly 1000 pairs/s no matter
 what rate is offered, which is ~33 minutes per run before anything else. a case sample cuts that
 proportionally, and the privacy metrics do not need the whole log.
 
-why RANDOM and not the first N cases: taking the first N by timestamp takes a cohort from one period
-of the log. traffic fines spans years, and appeal behaviour and fine amounts drift over it, so an
-early slice is not a small version of the log - it is a different log. a uniform random sample of
-cases keeps the variant mix in expectation, which is what the disclosure measures resolve against.
-
-the one thing sampling DOES distort: trace uniqueness. a variant held by 5 cases in the full log may
-end up held by 1 in a 20% sample, and a variant of size 1 is a unique trace. so the sample looks
-slightly more identifying than the log it came from. this script prints the uniqueness of both so
-the distortion is a number you can quote rather than a caveat you have to hedge.
-
 usage:
-  # sample, and report what the sampling did to the variant distribution
   sample_stream.py --stream traffic_fines/events --out traffic_fines/events_30k --cases 30000
-
-  # report only, no output written - decide the size first
   sample_stream.py --stream traffic_fines/events --cases 30000 --dry-run
 
-after sampling, the derived files have to be rebuilt for the new manifest:
+after sampling:
   compute-expected-results --config-dir <a config dir> --manifest <out>/manifest.jsonl --out <out>/expected_results.jsonl
-  extract_metrics.py --build-index <out>/manifest.jsonl --bk-type set mult seq
 """
 
 from __future__ import annotations
@@ -66,7 +50,8 @@ def variant_stats(rows: list[dict]) -> dict:
     singletons = sum(1 for count in counts.values() if count == 1)
     return {"cases": len(traces), "events": sum(len(t) for t in traces.values()),
             "distinct_traces": len(counts), "singleton_variants": singletons,
-            "trace_uniqueness": (singletons / len(traces)) if traces else 0.0,
+            "trace_uniqueness": (len(counts) / len(traces)) if traces else 0.0,
+            "singleton_share": (singletons / len(traces)) if traces else 0.0,
             "largest_variant_share": (max(counts.values()) / len(traces)) if traces else 0.0,
             "activities": len({event for trace in traces.values() for event in trace})}
 
@@ -74,6 +59,7 @@ def variant_stats(rows: list[dict]) -> dict:
 def report(label: str, stats: dict) -> None:
     print(f"  {label:<18} {stats['cases']:>8} cases  {stats['events']:>9} events  "
           f"{stats['distinct_traces']:>6} variants  uniqueness {stats['trace_uniqueness']:.4f}  "
+          f"singleton share {stats['singleton_share']:.4f}  "
           f"largest variant {stats['largest_variant_share']:.1%}  {stats['activities']} activities")
 
 
@@ -173,10 +159,9 @@ def main() -> int:
 
     print(f"\nwrote {args.out}/manifest.jsonl: {len(kept_rows)} events, "
           f"{written} event files {'copied' if args.copy else 'symlinked'}")
-    print("next, rebuild what is derived from the manifest:")
+    print("next:")
     print(f"  compute-expected-results --config-dir <config dir> "
           f"--manifest {args.out}/manifest.jsonl --out {args.out}/expected_results.jsonl")
-    print(f"  extract_metrics.py --build-index {args.out}/manifest.jsonl --bk-type set mult seq")
     return 0
 
 
