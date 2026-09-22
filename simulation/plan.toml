@@ -404,10 +404,11 @@ seeds = [2, 3, 5]
 replicates = 2
 systems = ["decentralized", "central"]
   [experiment.params]
-  cases = 5000
-  rate = 4000
+  cases = 10000                   # mid tier amount of cases to keep the run duration high enough for multiple gossip state cleanups
+  rate = 2000                     # low rate to keep the run duration higher to include more cleanups
   msgtrace = false
   case_end_grace_period = "5s"    # cleaning up cases depends on it
+  case_end_ttl = 20               # cleaning up gossip state depends on it
   [experiment.grid]
   case_gap_secs = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1]
 
