@@ -87,9 +87,11 @@ pub fn spawn_record_writer(node_id: PeerId) {
             loop {
                 match record_queue_receiver.recv_timeout(FLUSH_INTERVAL) {
                     Ok(WriterMessage::Line(line)) => {
-                        match serde_json::to_writer(&mut writer, &line) {
-                            Ok(()) => {
-                                let _ = writer.write_all(b"\n");
+                        // serialize into memory first to handle lines with serialization errors (they will not be written)
+                        match serde_json::to_vec(&line) {
+                            Ok(mut bytes) => {
+                                bytes.push(b'\n');
+                                let _ = writer.write_all(&bytes);
                                 dirty = true;
                             }
                             Err(e) => {

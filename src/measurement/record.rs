@@ -171,7 +171,7 @@ pub enum Record {
         constraint_type: String,
         result: String,
         reason: ResultDropReason,
-        #[serde(flatten)]
+        #[serde(skip_serializing_if = "Option::is_none")]
         revision: Option<RevisionNumber>,
         trigger: ResultTrigger,
         decided_at: DateTime<Utc>,
