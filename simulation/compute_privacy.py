@@ -36,6 +36,7 @@ import itertools
 import json
 import math
 import random
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -44,12 +45,9 @@ from helpers import (percentiles, discover_runs, load_system_configs, Progress,
                      load_disclosure_index, load_ground_truth, log_baseline_disclosure)
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
-# cap the recorded distinct values at 128 since thats enough to draw a smooth curve
-DISTRIBUTION_MAX_DISTINCT = 128
-DISTRIBUTION_QUANTILES = (1, 5, 10, 25, 50, 75, 90, 95, 99)
-# round to 6 decimals to reduce fraction noise
+# round to 6 decimals to reduce fraction noise for distribution numbers
 DISTRIBUTION_DECIMALS = 6
 
 # below this pool size every compromise size is evaluated
@@ -625,19 +623,13 @@ def compromise_sizes(pool_size: int, requested: list[int] | None) -> list[int]:
     return sorted(sizes)
 
 
-# the draws of one metric as a distribution (for drawing an ecdf)
-# exact counts while the metric takes few distinct values, a quantile ladder once it does not
+# the draws of one metric as a distribution (for drawing an ecdf): exact (value, count) pairs, always
 def distribution_of(values: list[float]) -> dict:
     counts = Counter(round(value, DISTRIBUTION_DECIMALS) for value in values)
-    if len(counts) <= DISTRIBUTION_MAX_DISTINCT:
-        ordered = sorted(counts.items())
-        return {"kind": "counts",
-                "values": [value for value, _ in ordered],
-                "counts": [count for _, count in ordered]}
-    ladder = percentiles(values, points=DISTRIBUTION_QUANTILES)
-    return {"kind": "quantiles",
-            "points": list(DISTRIBUTION_QUANTILES),
-            "values": [ladder[f"p{point}"] for point in DISTRIBUTION_QUANTILES]}
+    ordered = sorted(counts.items())
+    return {"kind": "counts",
+            "values": [value for value, _ in ordered],
+            "counts": [count for _, count in ordered]}
 
 
 def evaluate_system(view: SystemView, draws: int, seed: int, sizes: list[int] | None, reporter=None, label: str = "") -> dict:
@@ -788,8 +780,26 @@ def ground_truth_for(manifest: Path, bk_types: tuple, reporter=None, label: str 
     return entry["log"], entry["index"], entry["baselines"][bk_types]
 
 
+# true when the run already holds a privacy.json written by this schema version
+def has_current_output(run_dir: Path, out_name: str) -> bool:
+    out_path = run_dir / out_name
+    if not out_path.exists():
+        return False
+    try:
+        with out_path.open() as out_file:
+            head = out_file.read(200)
+    except OSError:
+        return False
+    match = re.search(r'"schema_version":\s*(\d+)', head)
+    return bool(match) and int(match.group(1)) == SCHEMA_VERSION
+
+
 def process_run(run_dir: Path, args, reporter=None) -> str:
     bk_types = tuple(args.bk_type) if not args.no_disclosure else ()
+    if args.skip_existing and has_current_output(run_dir, args.out):
+        if reporter is not None:
+            reporter.step(f"{run_dir.name} skipped")
+        return f"skip {run_dir.name}: {args.out} already at schema {SCHEMA_VERSION} (drop --skip-existing to recompute)"
     observations_path = run_dir / "observations.json.gz"
     if not observations_path.exists():
         if reporter is not None:
@@ -878,6 +888,9 @@ def main() -> None:
     parser.add_argument("--local-events-only", action="store_true", help="ignore what coordination traffic reveals (lower bound on exposure)")
     parser.add_argument("--out", default="privacy.json", help="output file name inside the run dir")
     parser.add_argument("--quiet", action="store_true", help="no progress output")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help=f"leave runs alone whose output already carries schema version {SCHEMA_VERSION}. "
+                             f"by default every run with an observations.json.gz is recomputed")
     args = parser.parse_args()
 
     runs = list(args.run)

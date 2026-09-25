@@ -916,22 +916,29 @@ ECDF_METRICS = [
 ECDF_PANELS = 4
 # only used for the attacker pools that the systems dont share
 ECDF_POOL_FRACTIONS = (0.1, 0.25, 0.5, 0.75)
+# with fewer nodes than this in the smaller pool there is nothing to distribute over so no ecdf figure is drawn
+ECDF_MIN_POOL = 5
+# a metric whose draws never exceed this gets a zoomed x-axis, otherwise every curve is a vertical line at 0
+ECDF_ZOOM_BELOW = 0.25
 
 
 # (value, count) pairs -> the staircase of the empirical distribution function
-def ecdf_points(counts: dict) -> tuple[list[float], list[float]] | None:
+def ecdf_points(counts: dict, x_left: float = 0.0, x_right: float = 1.0) -> tuple[list[float], list[float]] | None:
     if not counts:
         return None
     total = sum(counts.values())
     if not total:
         return None
-    xs: list[float] = []
-    ys: list[float] = []
+    xs: list[float] = [min(x_left, min(counts))]
+    ys: list[float] = [0.0]
     seen = 0
     for value in sorted(counts):
         seen += counts[value]
         xs += [value, value]
         ys += [seen / total - counts[value] / total, seen / total]
+    # draw the curve fully to the right (stays at 1.0)
+    xs.append(max(x_right, max(counts)))
+    ys.append(1.0)
     return xs, ys
 
 
@@ -988,8 +995,15 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
         if not shared:
             continue
         smallest_pool = min((pools.get((system, x)) or 0) for system in sizes_by_system) or max(shared)
+        if smallest_pool < ECDF_MIN_POOL:
+            continue
         picks = sorted({min(shared, key=lambda size: abs(size / smallest_pool - target))
                         for target in ECDF_POOL_FRACTIONS})
+        largest = max((value for (system, run_x, size), runs in per_run.items() if run_x == x and size in picks
+                       for counts in runs.values() for value in counts), default=1.0)
+        zoomed = largest <= ECDF_ZOOM_BELOW
+        x_right = (largest * 1.15 if largest > 0 else 0.05) if zoomed else 1.0
+        x_left = -0.02 * x_right
         columns = min(len(picks), 4)
         figure_rows = math.ceil(len(picks) / columns)
         figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.4 * columns, 3.4 * figure_rows),
@@ -1004,14 +1018,14 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
                     continue
                 style = SYSTEM_STYLE.get(system, {"color": "#444444", "label": system})
                 for counts in runs.values(): # one thin line per replicate
-                    points = ecdf_points(counts)
+                    points = ecdf_points(counts, x_left, x_right)
                     if points:
                         axes.plot(points[0], points[1], color=style["color"], linewidth=0.7, alpha=0.25)
                 pooled: dict = defaultdict(float)
                 for counts in runs.values():
                     for value, count in counts.items():
                         pooled[value] += count
-                points = ecdf_points(pooled)
+                points = ecdf_points(pooled, x_left, x_right)
                 if points:
                     axes.plot(points[0], points[1], color=style["color"], linewidth=2.0,
                               linestyle="--" if (system, x, size) in approximate else "-",
@@ -1025,7 +1039,8 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
             if annotations:
                 axes.text(0.97, 0.05, "\n".join(annotations), transform=axes.transAxes,
                           ha="right", va="bottom", fontsize=7, color="#444444")
-            axes.set_xlim(-0.02, 1.02)
+            axes.set_xlim(x_left, x_right * 1.02)
+            axes.set_ylim(-0.02, 1.05)
         if not drawn:
             plt.close(figure)
             continue
@@ -1034,32 +1049,45 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
         handles, labels = figure_handles(figure)
         place_legend(figure, handles, labels)
         where = f", {x_key} = {x}" if x_key and x is not None else ""
+        zoom_note = f", x-axis zoomed to [0, {x_right:.2f}]" if zoomed else ""
         figure.suptitle(f"{experiment}{where}: distribution of {label} over the compromised sets "
-                        f"(thin = one replicate, thick = pooled, dashed = from quantiles)", fontsize=12)
+                        f"(thin = one replicate, thick = pooled, dashed = from quantiles{zoom_note})", fontsize=12)
         suffix = f"_{x_key}{x}" if x_key and x is not None else ""
         written.append(write_figure(figure, Path(str(out_path) + suffix), formats))
     return written
 
 
 # best and worst subset of each size, as a bracket around the uniform average
+# one figure per value of the swept parameter
 def privacy_extremes_figure(privacy, experiment, x_key, out_path, formats):
-    collected: dict = defaultdict(lambda: defaultdict(dict)) # system -> size -> metric -> (min, max)
-    pools: dict = {}
+    by_x: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict))) # x -> system -> size -> metric -> (min, max)
     for (exp, _run_id, system), block in privacy.items():
         if exp != experiment:
             continue
+        x = block["params"].get(x_key) if x_key else None
         local = block["local"]
-        pools[system] = local.get("pool_size")
         for entry in local.get("per_size", []):
             size = entry.get("compromised")
             for metric, value in entry.items():
                 if not (isinstance(value, dict) and value.get("n")):
                     continue
-                low, high = collected[system][size].get(metric, (value["min"], value["max"]))
-                collected[system][size][metric] = (min(low, value["min"]), max(high, value["max"]))
-    if not collected:
-        return None
+                low, high = by_x[x][system][size].get(metric, (value["min"], value["max"]))
+                by_x[x][system][size][metric] = (min(low, value["min"]), max(high, value["max"]))
+    if not by_x:
+        return []
+    written = []
+    for x in sorted(by_x, key=lambda value: (value is None, value)):
+        suffix = f"_{x_key}{x}" if x_key and x is not None else ""
+        where = f", {x_key} = {x}" if x_key and x is not None else ""
+        figure = _extremes_panels(by_x[x], f"{experiment}{where}: best and worst compromised set of each size "
+                                           f"(best = most revealing for the attacker)",
+                                  Path(str(out_path) + suffix), formats)
+        if figure:
+            written.append(figure)
+    return written
 
+
+def _extremes_panels(collected, title, out_path, formats):
     usable = [panel for panel in PRIVACY_PANELS
               if any(panel[0] in metrics for sizes in collected.values() for metrics in sizes.values())]
     if not usable:
@@ -1068,7 +1096,7 @@ def privacy_extremes_figure(privacy, experiment, x_key, out_path, formats):
     figure_rows = math.ceil(len(usable) / columns)
     figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.6 * columns, 3.4 * figure_rows),
                                      squeeze=False)
-    for index, (metric, title, ylabel) in enumerate(usable):
+    for index, (metric, panel_title, ylabel) in enumerate(usable):
         axes = axes_grid[index // columns][index % columns]
         for system, sizes in sorted(collected.items()):
             points = [(size, sizes[size][metric]) for size in sorted(sizes) if metric in sizes[size]]
@@ -1085,13 +1113,16 @@ def privacy_extremes_figure(privacy, experiment, x_key, out_path, formats):
             axes.fill_between(positions, [point[1][0] for point in points],
                               [point[1][1] for point in points], color=style["color"],
                               alpha=0.10, linewidth=0)
-        style_axes(axes, title, "compromised nodes", ylabel)
-        axes.set_ylim(-0.02, 1.05)
+        style_axes(axes, panel_title, "compromised nodes", ylabel)
+        if metric not in PRIVACY_PANELS_UNBOUNDED:
+            axes.set_ylim(-0.02, 1.05)
+        else:
+            axes.set_ylim(bottom=0)
     for index in range(len(usable), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
     handles, labels = figure_handles(figure)
     place_legend(figure, handles, labels)
-    figure.suptitle(f"{experiment}: best and worst compromised set of each size", fontsize=12)
+    figure.suptitle(title, fontsize=12)
     return write_figure(figure, out_path, formats)
 
 
@@ -1289,16 +1320,29 @@ def privacy_vs_parameter_figure(privacy, experiment, x_key, out_path, formats):
 
 
 # how many nodes an attacker needs before a case can be reconstructed 
-def min_nodes_figure(privacy, experiment, out_path, formats):
+def min_nodes_figure(privacy, experiment, out_path, formats, x_key=None):
+    blocks_by_x: dict = defaultdict(list)
+    for (exp, _run_id, system), block in privacy.items():
+        if exp == experiment:
+            blocks_by_x[block["params"].get(x_key) if x_key else None].append((system, block))
+    written = []
+    for x in sorted(blocks_by_x, key=lambda value: (value is None, value)):
+        suffix = f"_{x_key}{x}" if x_key and x is not None else ""
+        where = f", {x_key} = {x}" if x_key and x is not None else ""
+        figure = _min_nodes_panels(blocks_by_x[x], f"{experiment}{where}", Path(str(out_path) + suffix), formats)
+        if figure:
+            written.append(figure)
+    return written
+
+
+def _min_nodes_panels(entries, subtitle_prefix, out_path, formats):
     by_length: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     by_length_min: dict[str, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
     histogram: dict[str, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     headline: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     coverage: dict[str, list[float]] = defaultdict(list)
 
-    for (exp, _run_id, system), block in privacy.items():
-        if exp != experiment:
-            continue
+    for system, block in entries:
         stats = block["local"].get("min_nodes_full_case") or {}
         if not stats:
             continue
@@ -1378,7 +1422,7 @@ def min_nodes_figure(privacy, experiment, out_path, formats):
     dropped = [f"{SYSTEM_STYLE.get(system, {}).get('label', system)}: "
                f"{summarize(coverage[system])[0]:.0%} of cases coverable"
                for system in systems if coverage.get(system) and summarize(coverage[system])[0] < 0.999]
-    subtitle = f"{experiment}: nodes needed to reconstruct a case"
+    subtitle = f"{subtitle_prefix}: nodes needed to reconstruct a case"
     if dropped:
         subtitle += "   (" + "; ".join(dropped) + ")"
     figure.suptitle(subtitle, fontsize=11)
@@ -1696,15 +1740,11 @@ def privacy_figures(experiment, privacy, experiment_privacy, target, formats, pr
                                              target / "privacy_vs_parameter", formats)
         if figure:
             written.append(figure)
-    figure = min_nodes_figure(privacy, experiment, target / "privacy_min_nodes", formats)
-    if figure:
-        written.append(figure)
+    written += min_nodes_figure(privacy, experiment, target / "privacy_min_nodes", formats, x_key=privacy_x)
     written += min_nodes_vs_activities_figures(privacy, experiment, target, formats, privacy_x)
 
     note("best and worst compromised set")
-    figure = privacy_extremes_figure(privacy, experiment, privacy_x, target / "privacy_extremes", formats)
-    if figure:
-        written.append(figure)
+    written += privacy_extremes_figure(privacy, experiment, privacy_x, target / "privacy_extremes", formats)
 
     note("distribution over the compromised sets")
     for metric, label in ECDF_METRICS:
