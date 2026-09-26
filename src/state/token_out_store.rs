@@ -58,6 +58,10 @@ impl TokenOutStore {
         token
     }
 
+    pub fn case_count(&self) -> usize {
+        self.token_out.len()
+    }
+
     pub fn contains_out_token(&self, case_id: &CaseId, index: HandlerIndex) -> bool {
         self.token_out
             .get(case_id)

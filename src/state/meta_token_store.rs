@@ -28,6 +28,10 @@ impl MetaTokenStore {
         token
     }
 
+    pub fn case_count(&self) -> usize {
+        self.meta_tokens.len()
+    }
+
     pub fn contains_meta_token(&self, case_id: &CaseId, index: HandlerIndex) -> bool {
         self.meta_tokens
             .get(case_id)

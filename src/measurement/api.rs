@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use crate::measurement::record::{
     CaseEndSource, ChurnEvent, CorrectionDropReason, Direction, QueueDepths, Record,
-    ResultDropReason, ResultTrigger,
+    ResultDropReason, ResultTrigger, StateSizes,
 };
 use crate::measurement::record_writer::{enabled, message_trace_enabled, record};
 use crate::network::message_types::{PeerMessage, PeerMessagePayload};
@@ -246,6 +246,10 @@ pub fn case_end_seen(case_id: CaseId, source: CaseEndSource, source_peer: Option
 
 pub fn queues(tick: u64, depths: QueueDepths) {
     record(Record::Queues { tick, depths });
+}
+
+pub fn state_sizes(tick: u64, sizes: StateSizes) {
+    record(Record::StateSizes { tick, sizes });
 }
 
 /// helper to create queue depth measure for a bounded tokio channel

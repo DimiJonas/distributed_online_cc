@@ -43,7 +43,10 @@ impl CCResultStore {
         self.results.get(case_id)?.get(constraint_id)
     }
 
-    // check if case already exists (or if it is a new case)
+    pub fn case_count(&self) -> usize {
+        self.results.len()
+    }
+
     pub fn has_case(&self, case_id: &CaseId) -> bool {
         self.results.contains_key(case_id)
     }

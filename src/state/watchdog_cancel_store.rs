@@ -114,6 +114,10 @@ impl WatchdogCancelStore {
         }
     }
 
+    pub fn token_count(&self) -> usize {
+        self.parent_tokens.len() + self.cancel_tokens.len()
+    }
+
     pub fn has_parent(&self, case_id: &CaseId, constraint_id: &ConstraintId) -> bool {
         self.parent_tokens
             .contains_key(&(case_id.clone(), constraint_id.clone()))

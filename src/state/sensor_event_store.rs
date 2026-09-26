@@ -90,6 +90,10 @@ impl SensorEventStore {
         self.value_at(case_id, key, at).cloned()
     }
 
+    pub fn case_count(&self) -> usize {
+        self.sensor_events.len()
+    }
+
     pub fn remove_case(
         &mut self,
         case_id: &CaseId,

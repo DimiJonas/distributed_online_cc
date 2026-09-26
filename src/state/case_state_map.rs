@@ -113,6 +113,10 @@ impl CaseStateMap {
     pub fn ended_count(&self) -> usize {
         self.ended_cases.len()
     }
+
+    pub fn case_count(&self) -> usize {
+        self.case_state.len()
+    }
 }
 
 impl Default for CaseStateMap {

@@ -89,10 +89,12 @@ impl ResultRevisionStore {
 
     /// close the correction window
     pub fn mark_final(&mut self, case_id: &CaseId, constraint_id: &ConstraintId) {
-        self.revisions
-            .entry((case_id.clone(), constraint_id.clone()))
-            .or_default()
-            .finalized = true;
+        if let Some(entry) = self
+            .revisions
+            .get_mut(&(case_id.clone(), constraint_id.clone()))
+        {
+            entry.finalized = true;
+        }
     }
 
     /// a newer revision for this pair has already been published, so this one is obsolete
@@ -116,10 +118,12 @@ impl ResultRevisionStore {
         constraint_id: &ConstraintId,
         revision: RevisionNumber,
     ) {
-        let entry = self
+        let Some(entry) = self
             .revisions
-            .entry((case_id.clone(), constraint_id.clone()))
-            .or_default();
+            .get_mut(&(case_id.clone(), constraint_id.clone()))
+        else {
+            return;
+        };
         entry.highest_published = Some(match entry.highest_published {
             Some(previous) if previous > revision => previous,
             _ => revision,
@@ -200,6 +204,8 @@ mod tests {
     fn finality_is_per_pair() {
         let mut store = ResultRevisionStore::new();
         let case = "a".to_string();
+        store.next_revision(&case, &"c1".to_string());
+        store.next_revision(&case, &"c2".to_string());
         store.mark_final(&case, &"c1".to_string());
         assert!(store.is_final(&case, &"c1".to_string()));
         assert!(!store.is_final(&case, &"c2".to_string()));
@@ -214,9 +220,34 @@ mod tests {
         let case = "a".to_string();
         let constraint = "c".to_string();
 
+        store.next_revision(&case, &constraint);
         store.mark_final(&case, &constraint);
         store.remove_case(&case);
         assert!(!store.is_final(&case, &constraint));
+    }
+
+    /// the window timers fire after the case was closed and its entries removed. closing or publishing a pair the
+    /// store no longer knows must not put it back: every such entry would live until the node exits (one per
+    /// (case, constraint) pair whose last verdict fell inside the window - which is nearly all of them)
+    #[test]
+    fn closing_or_publishing_an_unknown_pair_stores_nothing() {
+        let mut store = ResultRevisionStore::new();
+        let case = "a".to_string();
+        let constraint = "c".to_string();
+
+        store.next_revision(&case, &constraint);
+        store.remove_case(&case);
+
+        store.mark_final(&case, &constraint);
+        store.note_published(&case, &constraint, 1);
+        assert_eq!(store.stored_revision_count(), 0);
+        assert!(!store.is_final(&case, &constraint));
+        assert!(!store.is_superseded(&case, &constraint, 0));
+
+        // a pair that was never stamped is not created by these calls either
+        store.mark_final(&"b".to_string(), &constraint);
+        store.note_published(&"b".to_string(), &constraint, 1);
+        assert_eq!(store.stored_revision_count(), 0);
     }
 
     // ── superseded revisions ─────────────────────────────────────────────
@@ -234,6 +265,7 @@ mod tests {
         let case = "a".to_string();
         let constraint = "c".to_string();
 
+        store.next_revision(&case, &constraint);
         store.note_published(&case, &constraint, 5);
         assert!(store.is_superseded(&case, &constraint, 4));
         // a retry of the same revision is not superseded
@@ -249,6 +281,7 @@ mod tests {
         let case = "a".to_string();
         let constraint = "c".to_string();
 
+        store.next_revision(&case, &constraint);
         store.note_published(&case, &constraint, 7);
         store.note_published(&case, &constraint, 3);
         assert!(store.is_superseded(&case, &constraint, 6));
@@ -260,8 +293,9 @@ mod tests {
         let case = "a".to_string();
         let constraint = "c".to_string();
 
+        store.next_revision(&case, &constraint);
         store.note_published(&case, &constraint, 3);
-        assert_eq!(store.current_revision(&case, &constraint), 0);
+        assert_eq!(store.current_revision(&case, &constraint), 1);
         assert!(!store.is_final(&case, &constraint));
     }
 

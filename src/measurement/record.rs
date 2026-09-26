@@ -70,6 +70,42 @@ pub struct QueueDepths {
     pub gossip_in_q: Option<[usize; 3]>,
 }
 
+/// number of entries in every per-case store
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct StateSizes {
+    /// case state map total
+    pub cases: usize,
+    /// case state map closed
+    pub ended_cases: usize,
+    /// case end gossip cache
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gossip_cache: Option<usize>,
+    /// result revision store
+    pub revisions: usize,
+    /// cc result store
+    pub results: usize,
+    /// token in store
+    pub token_in: usize,
+    /// token out store
+    pub token_out: usize,
+    /// meta token store
+    pub meta_tokens: usize,
+    /// evaluation store
+    pub evaluations: usize,
+    /// timer token store
+    pub timer_tokens: usize,
+    /// watchdog cancel store
+    pub watchdog_tokens: usize,
+    /// results send buffer pending
+    pub send_buffer_pending: usize,
+    /// result send buffer open
+    pub send_buffer_open: usize,
+    /// sensor event store
+    pub sensor_cases: usize,
+    /// pending requests
+    pub pending_requests: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Record {
@@ -217,6 +253,13 @@ pub enum Record {
         tick: u64,
         #[serde(flatten)]
         depths: QueueDepths,
+    },
+
+    /// the size of every per-case store
+    StateSizes {
+        tick: u64,
+        #[serde(flatten)]
+        sizes: StateSizes,
     },
 
     /// a node learned that a case has ended

@@ -233,6 +233,22 @@ impl TimerTokenStore {
         self.timer_start_seen.remove(&key);
     }
 
+    pub fn token_count(&self) -> usize {
+        self.timer_tokens.len()
+            + self
+                .fired_timer_tokens
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+            + self
+                .settled_timer_tokens
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+            + self.pending_stops.values().map(Vec::len).sum::<usize>()
+            + self.timer_start_seen.len()
+    }
+
     pub fn get_timer_token(&self, token_id: &TokenId) -> Option<&Token> {
         self.timer_tokens.get(token_id)
     }

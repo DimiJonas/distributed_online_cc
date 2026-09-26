@@ -146,6 +146,10 @@ impl EvaluationStore {
         }
     }
 
+    pub fn case_count(&self) -> usize {
+        self.evaluations.len()
+    }
+
     pub fn remove(&mut self, case_id: &CaseId, index: HandlerIndex) -> Option<LastEvaluation> {
         let inner = self.evaluations.get_mut(case_id)?;
         let evaluation = inner.remove(&index);

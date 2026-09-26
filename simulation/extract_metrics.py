@@ -37,7 +37,7 @@ from helpers import (CLK_TCK, load_system_configs, read_jsonl, quantile, slope_p
                      DISCLOSURE_INDEX_NAME as DEFAULT_NAME, ensure_index,
                      cpu_ceiling, saturation_signals, worst_queue)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 COORDINATION_PAYLOADS = ("conformance", "ce_gossip", "overlay")
 CASE_CLOSED_REASON = "case closed"
@@ -47,6 +47,11 @@ SINK_PAYLOADS = ("result")
 # RSS samples are used to create a memory timeline
 RSS_TIMELINE_BIN_S = 1.0
 RSS_TIMELINE_MAX_BINS = 2000
+
+# the per-case stores a node reports in its state_sizes records
+STATE_STORES = ("cases", "ended_cases", "gossip_cache", "revisions", "results", "token_in", "token_out",
+                "meta_tokens", "evaluations", "timer_tokens", "watchdog_tokens", "send_buffer_pending",
+                "send_buffer_open", "sensor_cases", "pending_requests")
 
 
 # keeps the time windows of a run (idle, load, steady, settle) and provides some window functions
@@ -135,6 +140,10 @@ class Scan:
         self.queue_node_max_settle: dict[str, dict[int, int]] = {}
         self.queues_by_node: dict[tuple[str, int], list[tuple[float, int, int]]] = {}
         self.tcp_queue_max = 0 # highest fill of a tcp channel queue
+        self.state_bins: dict[int, dict[int, int]] = {} # time bin -> (node id -> last total in that bin), whole run
+        self.state_peak: dict[int, int] = {} # node id -> highest total during the load window
+        self.state_last: dict[int, tuple[int, int]] = {} # node id -> (t_us, total) of the last sample
+        self.state_store_peak: dict[str, int] = {} # store -> highest count on any node, whole run
         self.peer_churn = {"created": 0, "removed": 0}
         self.meta: dict[int, dict] = {} # meta infos at node startup
         self.writer_shutdown: set[int] = set() # > 0 means correct shutdown
@@ -218,6 +227,8 @@ class Scan:
             self._queues(line, node_id, wallclock_time)
         elif record_type == "tcp_channel_queue_depth":
             self.tcp_queue_max = max(self.tcp_queue_max, int(line.get("depth", 0)))
+        elif record_type == "state_sizes":
+            self._state_sizes(line, node_id, wallclock_time)
         elif record_type == "case_end_seen":
             self._case_end(line, node_id, wallclock_time)
         elif record_type == "peer_churn":
@@ -324,6 +335,23 @@ class Scan:
                 self.queues_by_node.setdefault((name, node_id), []).append(
                     (wallclock_time, depth_sample[1], depth_sample[2]))
 
+    def _state_sizes(self, line: dict, node_id: int, wallclock_time: int) -> None:
+        if self.node_roles.get(node_id) == "sink" or wallclock_time is None:
+            return
+        total = 0
+        for store in STATE_STORES:
+            count = line.get(store)
+            if isinstance(count, int):
+                total += count
+                self.state_store_peak[store] = max(self.state_store_peak.get(store, 0), count)
+        bin_index = int(wallclock_time // int(RSS_TIMELINE_BIN_S * 1_000_000))
+        self.state_bins.setdefault(bin_index, {})[node_id] = total
+        if self.windows.contains(self.windows.load, wallclock_time):
+            self.state_peak[node_id] = max(self.state_peak.get(node_id, 0), total)
+        last = self.state_last.get(node_id)
+        if last is None or wallclock_time >= last[0]:
+            self.state_last[node_id] = (wallclock_time, total)
+
     def _case_end(self, line: dict, node_id: int, wallclock_time: int) -> None:
         case_id = line["case_id"]
         source = line.get("source")
@@ -335,6 +363,46 @@ class Scan:
         if case_id not in per_node or wallclock_time < per_node[case_id]["t_us"]:
             per_node[case_id] = {"t_us": wallclock_time, "source": source,
                                  "source_peer": line.get("source_peer")}
+
+
+# time bin -> (process or node -> last value in that bin) becomes two contiguous series over the whole run: the sum over the processes and the largest single process(per bin)
+def binned_timeline(bins: dict, total_key: str, max_key: str) -> dict | None:
+    if not bins:
+        return None
+    first_bin, last_bin = min(bins), max(bins)
+    live: dict = {}
+    totals: list[int] = []
+    peaks: list[int] = []
+    for bin_index in range(first_bin, last_bin + 1):
+        live.update(bins.get(bin_index, {}))
+        totals.append(sum(live.values()))
+        peaks.append(max(live.values()) if live else 0)
+    # keep the series small on long runs by taking every n-th bin
+    stride = max(1, math.ceil(len(totals) / RSS_TIMELINE_MAX_BINS))
+    return {
+        "bin_seconds": RSS_TIMELINE_BIN_S * stride,
+        "first_bin_us": first_bin * int(RSS_TIMELINE_BIN_S * 1_000_000),
+        total_key: totals[::stride],
+        max_key: peaks[::stride],
+    }
+
+
+# entries in the per-case stores from the state_sizes records
+def state_metrics(scan: "Scan") -> dict | None:
+    if not scan.state_bins:
+        return None
+    peaks = scan.state_peak or {node_id: total for node_id, (_t, total) in scan.state_last.items()}
+    ends = {node_id: total for node_id, (_t, total) in scan.state_last.items()}
+    return {
+        "entries_max_node": max(peaks.values(), default=0),
+        "entries_mean_node": (sum(peaks.values()) / len(peaks)) if peaks else 0.0,
+        "entries_total_max": sum(peaks.values()),
+        "entries_end_max_node": max(ends.values(), default=0),
+        "entries_end_total": sum(ends.values()),
+        "nodes": len(ends),
+        "peak_by_store": dict(sorted(scan.state_store_peak.items())),
+        "entries_timeline": binned_timeline(scan.state_bins, "entries_total", "entries_max_node"),
+    }
 
 
 def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> dict:
@@ -399,24 +467,7 @@ def resource_metrics(path: Path, windows: Windows, exclude_roles=("sink",)) -> d
     idle_s = windows.seconds(windows.idle)
 
     # contiguous series over the whole run
-    rss_timeline = None
-    if rss_bins:
-        first_bin, last_bin = min(rss_bins), max(rss_bins)
-        live: dict[int, int] = {}
-        totals: list[int] = []
-        peaks: list[int] = []
-        for bin_index in range(first_bin, last_bin + 1):
-            live.update(rss_bins.get(bin_index, {}))
-            totals.append(sum(live.values()))
-            peaks.append(max(live.values()) if live else 0)
-        # keep the series small on long runs by taking every n-th bin
-        stride = max(1, math.ceil(len(totals) / RSS_TIMELINE_MAX_BINS))
-        rss_timeline = {
-            "bin_seconds": RSS_TIMELINE_BIN_S * stride,
-            "first_bin_us": first_bin * int(RSS_TIMELINE_BIN_S * 1_000_000),
-            "rss_kb_total": totals[::stride],
-            "rss_kb_max_node": peaks[::stride],
-        }
+    rss_timeline = binned_timeline(rss_bins, "rss_kb_total", "rss_kb_max_node")
 
     def cpu_seconds(interval_begin: dict, interval_end: dict) -> float:
         ticks = ((interval_end.get("utime_ticks", 0) + interval_end.get("stime_ticks", 0))
@@ -887,6 +938,7 @@ def system_metrics(run_dir: Path, timeline: dict, params: dict, args) -> tuple[d
             **resources,
             "cpu_seconds_per_event": (resources["cpu_seconds_excl_sink"] / events) if events else None,
         },
+        "state": state_metrics(scan),
         "messages": {
             "load": load_messages,
             "settle": settle_messages,

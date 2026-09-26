@@ -46,6 +46,10 @@ impl TokenInStore {
         self.token_in.get(case_id)?.get(&index).cloned()
     }
 
+    pub fn case_count(&self) -> usize {
+        self.token_in.len()
+    }
+
     pub fn contains_in_token(&self, case_id: &CaseId, index: HandlerIndex) -> bool {
         self.token_in
             .get(case_id)

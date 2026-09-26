@@ -545,22 +545,30 @@ MEMORY_PANELS = [
     ("resources.rss_kb_max_node", "resident memory, busiest node", "MB", 1 / 1024, False),
     ("resources.rss_kb_mean_node", "resident memory, mean node", "MB", 1 / 1024, False),
     ("resources.rss_kb_total_max", "resident memory, all nodes", "MB", 1 / 1024, False),
+    ("state.entries_max_node", "state entries, busiest node (peak)", "entries", 1.0, False),
+    ("state.entries_mean_node", "state entries, mean node (peak)", "entries", 1.0, False),
+    ("state.entries_end_total", "state entries left after settling, all nodes", "entries", 1.0, False),
     ("throughput.queues.event_q.max", "event queue peak depth", "events", 1.0, False),
     ("revisions.pairs", "pairs the run produced", "pairs", 1.0, False),
     ("quality.expected_pairs", "pairs expected", "pairs", 1.0, False),
 ]
 
 
+RSS_TIMELINE = ("resources.rss_timeline", 1 / 1024.0, "MB", "resident memory")
+STATE_TIMELINE = ("state.entries_timeline", 1.0, "entries", "state entries")
 RSS_TIMELINE_SERIES = [
-    ("rss_kb_total", "all nodes", "memory_timeline"),
-    ("rss_kb_max_node", "busiest node", "memory_timeline_max_node"),
+    (RSS_TIMELINE, "rss_kb_total", "all nodes", "memory_timeline"),
+    (RSS_TIMELINE, "rss_kb_max_node", "busiest node", "memory_timeline_max_node"),
+    (STATE_TIMELINE, "entries_total", "all nodes", "state_timeline"),
+    (STATE_TIMELINE, "entries_max_node", "busiest node", "state_timeline_max_node"),
 ]
 RSS_TIMELINE_MAX_PANELS = 6
 
 
 # seconds since the start of the load window for one run
-def rss_series(row, metric: str = "rss_kb_total") -> tuple[list[float], list[float]] | None:
-    timeline = row.value("resources.rss_timeline")
+def rss_series(row, metric: str = "rss_kb_total", timeline_key: str = "resources.rss_timeline",
+               scale: float = 1 / 1024.0) -> tuple[list[float], list[float]] | None:
+    timeline = row.value(timeline_key)
     if not timeline or not timeline.get(metric):
         return None
     values = timeline[metric]
@@ -570,11 +578,40 @@ def rss_series(row, metric: str = "rss_kb_total") -> tuple[list[float], list[flo
     anchor_us = window[0] or first_us
     start = (first_us - anchor_us) / 1e6
     times = [start + index * bin_seconds for index in range(len(values))]
-    return times, [value / 1024.0 for value in values]
+    return times, [value * scale for value in values]
+
+
+# convert humantime to seconds
+def duration_seconds(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    for suffix, factor in (("ms", 1e-3), ("us", 1e-6), ("s", 1.0), ("m", 60.0), ("h", 3600.0)):
+        if text.endswith(suffix):
+            try:
+                return float(text[:-len(suffix)]) * factor
+            except ValueError:
+                return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+# how long a node keeps a closed case: grace period + 2 * ttl
+def retention_seconds(params: dict) -> float | None:
+    grace = duration_seconds(params.get("case_end_grace_period"))
+    ttl = duration_seconds(params.get("case_end_ttl"))
+    if grace is None or ttl is None:
+        return None
+    return grace + 2 * ttl
 
 
 def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total",
-                           scope="all nodes", max_panels=RSS_TIMELINE_MAX_PANELS):
+                           scope="all nodes", max_panels=RSS_TIMELINE_MAX_PANELS, timeline=RSS_TIMELINE):
+    timeline_key, scale, unit, quantity = timeline
     by_value: dict = defaultdict(dict)
     for row in sorted(rows, key=lambda item: (item.replicate, item.run_id)):
         value = row.params.get(x_key) if x_key else None
@@ -593,8 +630,9 @@ def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total"
     drawn = False
     for index, value in enumerate(values):
         axes = axes_grid[index // columns][index % columns]
+        retention_marked = False
         for system, row in sorted(by_value[value].items()):
-            series = rss_series(row, metric)
+            series = rss_series(row, metric, timeline_key, scale)
             if series is None:
                 continue
             times, totals = series
@@ -603,19 +641,23 @@ def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total"
                       label=style.get("label", system), linewidth=1.4)
             window = (row.value("windows.load") or [None, None]) + [None, None]
             if window[0] and window[1]:
-                axes.axvline((window[1] - window[0]) / 1e6, color=style.get("color"),
-                             linestyle=":", linewidth=1.0)
+                load_end = (window[1] - window[0]) / 1e6
+                axes.axvline(load_end, color=style.get("color"), linestyle=":", linewidth=1.0)
+                retention = retention_seconds(row.params)
+                if retention is not None and not retention_marked:
+                    axes.axvline(load_end + retention, color="#999999", linestyle="-.", linewidth=0.8)
+                    retention_marked = True
             drawn = True
         axes.axvline(0.0, color="#999999", linestyle="--", linewidth=0.8)
-        title = "resident memory" if value is None else f"{x_key} = {value}"
-        style_axes(axes, title, "seconds since the load window started", f"MB, {scope}")
+        title = quantity if value is None else f"{x_key} = {value}"
+        style_axes(axes, title, "seconds since the load window started", f"{unit}, {scope}")
     if not drawn:
         plt.close(figure)
         return None
     for index in range(len(values), figure_rows * columns):
         axes_grid[index // columns][index % columns].axis("off")
-    figure.suptitle(f"resident memory over the run, {scope} "
-                    f"(dotted = end of the load window)")
+    figure.suptitle(f"{quantity} over the run, {scope} "
+                    f"(dotted = end of the load window, dash-dotted = end of the case retention)")
     handles, labels = figure_handles(figure)
     place_legend(figure, handles, labels)
     return write_figure(figure, out_path, formats)
@@ -1630,6 +1672,8 @@ CSV_METRICS = [
     ("host_busy_pct", "resources.host_cpu_busy_fraction", 100.0),
     ("threads_total_max", "resources.threads_total_max", 1.0),
     ("rss_mb_max_node", "resources.rss_kb_max_node", 1 / 1024),
+    ("state_entries_max_node", "state.entries_max_node", 1.0),
+    ("state_entries_end_total", "state.entries_end_total", 1.0),
     ("gossip_reach_fraction", "latency_us.gossip_dissemination.reach_fraction", 1.0),
     ("revision_pairs", "revisions.pairs", 1.0),
     ("expected_pairs", "quality.expected_pairs", 1.0),
@@ -1839,10 +1883,10 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
             if figure:
                 written.append(figure)
 
-        for metric, scope, name in RSS_TIMELINE_SERIES:
-            note(f"memory over time ({scope})")
+        for timeline, metric, scope, name in RSS_TIMELINE_SERIES:
+            note(f"{timeline[3]} over time ({scope})")
             figure = memory_timeline_figure(workload_rows, x_key, target / name, formats,
-                                            metric=metric, scope=scope)
+                                            metric=metric, scope=scope, timeline=timeline)
             if figure:
                 written.append(figure)
 
