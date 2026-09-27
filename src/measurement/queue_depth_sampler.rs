@@ -130,41 +130,50 @@ fn do_report(state: &AppState, accumulators: &mut Accumulators, tick: u64) {
     state_sizes(tick, read_state_sizes(state));
 }
 
-/// count the entries of every per-case store
-/// each lock is held only for a `len()`, so this does not disturb the node
+/// count the entries of every per-case store (keeping the lock order for AppState)
 fn read_state_sizes(state: &AppState) -> StateSizes {
     let (cases, ended_cases) = {
         let case_state = state.case_state.lock().unwrap();
         (case_state.case_count(), case_state.ended_count())
     };
-    let gossip_cache = state
-        .dist
-        .as_ref()
-        .map(|dist| dist.ce_gossip_cache.lock().unwrap().len());
+    let sensor_cases = state.sensor_events.lock().unwrap().case_count();
+    let evaluations = state.evaluations.lock().unwrap().case_count();
+    let token_in = state.token_in.lock().unwrap().case_count();
+    let token_out = state.token_out.lock().unwrap().case_count();
+    let timer_tokens = state.timer_token_store.lock().unwrap().token_count();
+    let meta_tokens = state.meta_token_store.lock().unwrap().case_count();
+    let watchdog_tokens = state.watchdog_cancel_tokens.lock().unwrap().token_count();
+    let results = state.cc_results.lock().unwrap().case_count();
+    let revisions = state
+        .result_revisions
+        .lock()
+        .unwrap()
+        .stored_revision_count();
     let (send_buffer_pending, send_buffer_open) = {
         let buffer = state.result_send_buffer.lock().unwrap();
         (buffer.pending_count(), buffer.open_window_count())
     };
+    let pending_requests = state.pending.lock().unwrap().len();
+    let gossip_cache = state
+        .dist
+        .as_ref()
+        .map(|dist| dist.ce_gossip_cache.lock().unwrap().len());
     StateSizes {
         cases,
         ended_cases,
         gossip_cache,
-        revisions: state
-            .result_revisions
-            .lock()
-            .unwrap()
-            .stored_revision_count(),
-        results: state.cc_results.lock().unwrap().case_count(),
-        token_in: state.token_in.lock().unwrap().case_count(),
-        token_out: state.token_out.lock().unwrap().case_count(),
-        meta_tokens: state.meta_token_store.lock().unwrap().case_count(),
-        evaluations: state.evaluations.lock().unwrap().case_count(),
-        timer_tokens: state.timer_token_store.lock().unwrap().token_count(),
-        watchdog_tokens: state.watchdog_cancel_tokens.lock().unwrap().token_count(),
+        revisions,
+        results,
+        token_in,
+        token_out,
+        meta_tokens,
+        evaluations,
+        timer_tokens,
+        watchdog_tokens,
         send_buffer_pending,
         send_buffer_open,
-        sensor_cases: state.sensor_events.lock().unwrap().case_count(),
-        pending_requests: state.pending.lock().unwrap().len(),
+        sensor_cases,
+        pending_requests,
     }
 }
 

@@ -20,6 +20,9 @@ use crate::types::{CaseEnd, TracedEvent};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+/// lock order to avoid deadlocks:
+///   case_state -> sensor_events -> evaluations -> token_in -> token_out -> timer_token_store -> meta_token_store -> watchdog_cancel_tokens -> cc_results
+///     -> result_revisions -> result_send_buffer -> pending -> ce_gossip_cache
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<NodeConfig>,
