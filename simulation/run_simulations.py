@@ -23,6 +23,7 @@ what one run does
 from __future__ import annotations
 
 import argparse
+import copy
 import atexit
 import fnmatch
 import itertools
@@ -217,10 +218,29 @@ class RunPaths:
             p.mkdir(parents=True, exist_ok=True)
 
 
+def overlay_baseline(baseline: dict, params: dict) -> dict:
+    result = copy.deepcopy(baseline)
+    for key, value in params.items():
+        parts = key.split(".")
+        table = result
+        for part in parts[:-1]:
+            if not isinstance(table.get(part), dict):
+                table = None
+                break
+            table = table[part]
+        if table is None or parts[-1] not in table:
+            continue
+        current = table[parts[-1]]
+        if isinstance(current, dict) or isinstance(value, (dict, list)):
+            continue
+        table[parts[-1]] = value
+    return result
+
+
 def generate_configs(plan: dict, repo: Path, paths: RunPaths, params: dict) -> None:
     gen_config_cmd = binary_cmd(repo, plan["defaults"].get("bin_dir"), "gen-config",
                      plan["defaults"].get("use_cargo", False))
-    baseline = plan.get("baseline") or {}
+    baseline = overlay_baseline(plan.get("baseline") or {}, params)
     if baseline:
         baseline_path = paths.root / "baseline.toml"
         write_toml(baseline_path, baseline)
