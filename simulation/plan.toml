@@ -409,6 +409,7 @@ systems = ["decentralized", "central"]
   msgtrace = false
   case_end_grace_period = "5s"    # cleaning up cases depends on it
   case_end_ttl = 20               # cleaning up gossip state depends on it
+  settle_after_complete_s = 60    # record longer settle window to see the memory drop to 0
   [experiment.grid]
   case_gap_secs = [4.0, 2.0, 1.0, 0.5, 0.25, 0.1]
 
@@ -494,7 +495,6 @@ systems = ["decentralized", "central"]
   msgtrace = true
   burst = 8
   rate = 1000
-  case_end_grace_period = "180s"    # ensure that central has enough time to settle after the stream
   quiescence_s = 900                # ensure that central has enough time to settle after the stream
   max_wait_for_settlement_s = 960   # ensure that central has enough time to settle after the stream
   [experiment.grid]
