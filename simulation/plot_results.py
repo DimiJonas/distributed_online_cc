@@ -625,7 +625,9 @@ def memory_timeline_figure(rows, x_key, out_path, formats, metric="rss_kb_total"
 
     columns = min(3, len(values))
     figure_rows = math.ceil(len(values) / columns)
-    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(4.6 * columns, 3.4 * figure_rows),
+    # a single panel (nothing swept or one configuration) gets the width of two, since a long run is drawn into it
+    panel_width = 9.2 if len(values) == 1 else 4.6
+    figure, axes_grid = plt.subplots(figure_rows, columns, figsize=(panel_width * columns, 3.4 * figure_rows),
                                      squeeze=False)
     drawn = False
     for index, value in enumerate(values):
@@ -1054,6 +1056,7 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
         for index, size in enumerate(picks):
             axes = axes_grid[index // columns][index % columns]
             annotations = []
+            medians = [] # of the pooled draws, to keep the annotation out of the curves
             for system in sorted(sizes_by_system):
                 runs = per_run.get((system, x, size)) or {}
                 if not runs:
@@ -1073,14 +1076,26 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
                               linestyle="--" if (system, x, size) in approximate else "-",
                               label=style["label"])
                     drawn = True
+                    half = sum(pooled.values()) / 2
+                    seen = 0.0
+                    for value in sorted(pooled):
+                        seen += pooled[value]
+                        if seen >= half:
+                            medians.append(value)
+                            break
                 pool = pools.get((system, x))
                 share = f", {round(100 * size / pool)}% of {pool}" if pool else ""
                 note = ", quantiles" if (system, x, size) in approximate else ""
                 annotations.append(f"{style['label']}: {share.lstrip(', ')}, {len(runs)} runs{note}")
             style_axes(axes, f"k = {size} nodes compromised", label, "fraction of draws at or below")
             if annotations:
-                axes.text(0.97, 0.05, "\n".join(annotations), transform=axes.transAxes,
-                          ha="right", va="bottom", fontsize=7, color="#444444")
+                # bottom right unless the curves rise there, then top left
+                if medians and min(medians) > 0.5 * x_right:
+                    axes.text(0.03, 0.95, "\n".join(annotations), transform=axes.transAxes,
+                              ha="left", va="top", fontsize=7, color="#444444")
+                else:
+                    axes.text(0.97, 0.05, "\n".join(annotations), transform=axes.transAxes,
+                              ha="right", va="bottom", fontsize=7, color="#444444")
             axes.set_xlim(x_left, x_right * 1.02)
             axes.set_ylim(-0.02, 1.05)
         if not drawn:
@@ -1092,8 +1107,10 @@ def ecdf_figure(privacy, experiment, metric, label, out_path, formats, x_key=Non
         place_legend(figure, handles, labels)
         where = f", {x_key} = {x}" if x_key and x is not None else ""
         zoom_note = f", x-axis zoomed to [0, {x_right:.2f}]" if zoomed else ""
+        dashed_note = ", dashed = from quantiles" if any((system, x, size) in approximate
+                                                         for system in sizes_by_system for size in picks) else ""
         figure.suptitle(f"{experiment}{where}: distribution of {label} over the compromised sets "
-                        f"(thin = one replicate, thick = pooled, dashed = from quantiles{zoom_note})", fontsize=12)
+                        f"(thin = one replicate, thick = pooled{dashed_note}{zoom_note})", fontsize=12)
         suffix = f"_{x_key}{x}" if x_key and x is not None else ""
         written.append(write_figure(figure, Path(str(out_path) + suffix), formats))
     return written
@@ -1844,7 +1861,12 @@ def plot_experiment(experiment: str, rows: list[Row], privacy: dict, out_dir: Pa
     x_key = numeric[0] if numeric else (varied[0] if varied else None)
     series_key = numeric[1] if len(numeric) > 1 and not is_sensitivity(rows, numeric) else None
     if x_key is None:
-        # nothing varies so there are no scalability panels to draw, except for the privacy figures per compromise size
+        for timeline, metric, scope, name in RSS_TIMELINE_SERIES:
+            note(f"{timeline[3]} over time ({scope})")
+            figure = memory_timeline_figure(workload_rows, None, target / name, formats,
+                                            metric=metric, scope=scope, timeline=timeline)
+            if figure:
+                written.append(figure)
         return written + privacy_figures(experiment, privacy, experiment_privacy, target, formats, None, sensitivity, note)
 
     distinct_x = len({row.params.get(x_key) for row in rows})
