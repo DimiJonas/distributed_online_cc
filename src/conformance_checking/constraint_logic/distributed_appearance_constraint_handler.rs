@@ -521,6 +521,10 @@ impl ConstraintHandler for DistributedAppearanceTriggerHandler {
         );
 
         let (info, result) = evaluate_distributed_count(&self.mode, self.frequency, corrected);
+        if !publish_now(&result, &state, &message.case_id, &self.constraint_id) {
+            // skip satisfied verdicts is the case has not ended and its not a correction
+            return;
+        }
         emit_result_stamped(
             stamp,
             &message.case_id,
@@ -703,6 +707,20 @@ fn evaluate_distributed_count(
     }
 }
 
+/// decide if verdict has to be published right away (violation or correction)
+fn publish_now(
+    result: &ConstraintResultType,
+    state: &AppState,
+    case_id: &CaseId,
+    constraint_id: &ConstraintId,
+) -> bool {
+    if matches!(result, ConstraintResultType::Violated) {
+        return true;
+    }
+    let results = state.cc_results.lock().unwrap();
+    results.get_constraint(case_id, constraint_id).is_some()
+}
+
 /// everything the counter pull of one trigger event needs so it can run detached in its own task
 struct CounterPull {
     index: HandlerIndex,
@@ -791,6 +809,16 @@ impl CounterPull {
         let Some((stamp, info, result)) = pending else {
             return;
         };
+
+        if !publish_now(&result, &state, &self.case_id, &self.constraint_id) {
+            log::debug!(
+                "distributed appearance trigger handler: ({}/{}) is satisfied so far ({}). leaving the verdict to the case end",
+                self.case_id,
+                self.constraint_id,
+                info
+            );
+            return;
+        }
 
         // check if the case was closed during the pull
         {
@@ -1041,21 +1069,29 @@ mod tests {
         ));
     }
 
-    /// both: distributed count meets Min frequency -> Satisfied is published by the trigger event
-    /// itself, it is no longer left to the case end fallback
+    /// both: distributed count meets Min frequency -> the trigger event publishes nothing
+    /// the satisfied verdict is left to the case end, which decides on the recorded (finished) pull
     #[tokio::test]
     async fn both_min_no_violation() {
         let case = "c3";
         let (state, peers) = trigger_state(26020, Some(26021), case, MinMaxMode::Min, 2);
         let mut mgr_rx = register_manager(&state, PeerAddress::new_conformance_address(peers[0]));
 
-        let h = handler(MinMaxMode::Min, 2, peers);
+        let h = handler(MinMaxMode::Min, 2, peers.clone());
         let ev = make_traced_event_with_fixed_timestamp(case, EID);
         h.handle_event(&ev, state.clone()).await;
         answer_one_conformance_request(state.clone(), &mut mgr_rx, counter_response(case, 3)).await;
 
+        // give the detached pull time to finish: it must not publish a satisfied verdict
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            result_type(&state, case).is_none(),
+            "a satisfied verdict must wait for the case end"
+        );
+
+        h.handle_case_end(&case.to_string(), state.clone()).await;
         assert!(matches!(
-            await_result(&state, case).await,
+            result_type(&state, case),
             Some(ConstraintResultType::Satisfied)
         ));
     }
