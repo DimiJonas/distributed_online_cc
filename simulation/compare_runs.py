@@ -25,7 +25,7 @@ from pathlib import Path
 
 
 DEFAULT_METRICS = ("achieved_rate", "detection_p50_ms", "detection_p95_ms", "cpu_s_total",
-                   "cpu_pct_max_node", "cpu_ms_per_event", "coord_msgs_per_event", "load_bytes_per_event",
+                   "cpu_pct_max_node", "cpu_ms_per_event", "load_msgs_per_event", "load_bytes_per_event",
                    "fixed_bytes_per_node_s_idle",
                    "rss_mb_total", "pacer_max_lag_ms", "event_q_max", "accuracy")
 

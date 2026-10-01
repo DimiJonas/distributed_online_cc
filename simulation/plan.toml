@@ -399,7 +399,7 @@ systems = ["decentralized", "central"]
 # E8: case concurrency (memory load, problem scale, bounded memory)
 # metrics: rss and state size per node, peak event queue depth
 [[experiment]]
-id = "E8"
+id = "E8a"
 seeds = [2, 3, 5]
 replicates = 2
 systems = ["decentralized", "central"]
@@ -447,7 +447,7 @@ systems = ["decentralized", "central"]
   idle_only = true
   msgtrace = true
   [experiment.grid]
-  nodes = [3, 5, 7, 12, 23, 32, 46, 64, 92]
+  nodes = [3, 5, 7, 12, 23, 32, 46, 64, 92]    # includes the sink
 
 # E3a: system scale round robin
 # metrics: messages/case, messages/event, cpu total, cpu max (busiest node), idle-normalized overhead, detection latency
@@ -462,7 +462,7 @@ systems = ["decentralized", "central"]
   role_assignment = "round-robin"
   msgtrace = true
   [experiment.grid]
-  nodes = [3, 5, 7, 12, 23, 32, 46, 64]
+  nodes = [3, 5, 7, 12, 23, 32, 46, 64]       # includes the sink
 
 # E3b: system scale blocked
 # metrics: (same as E3a)
@@ -477,7 +477,7 @@ systems = ["decentralized", "central"]
   role_assignment = "blocked"
   msgtrace = true
   [experiment.grid]
-  nodes = [3, 5, 7, 12]
+  nodes = [3, 5, 7, 12]                       # includes the sink
 
 # E5a: main privacy run sepsis
 # metrics: all privacy metrics, bytes/event by payload class

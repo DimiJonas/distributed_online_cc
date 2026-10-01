@@ -21,12 +21,8 @@ which figures an experiment gets is decided by what is in its runs:
 
   a parameter sweep -> scalability panels against that parameter (rate, nodes, repeat, cap, ...)
   runs with no workload -> idle cost panels (per node cost against node count)
-  netem varies -> latency against the delay (one line per rate)
   privacy.json present -> exposure, disclosure and first spy curves against the compromise size,
-  one factor at a time -> sensitivity panels (one small multiple per varied parameter)
 
-the x axis is the parameter that actually varies inside the experiment
-if two parameters vary, the second becomes the series
 """
 
 from __future__ import annotations
@@ -55,14 +51,16 @@ SERIES_LINESTYLES = ["-", "--", ":", "-."]
 PAYLOAD_COLORS = {"conformance": "#0072B2", "ce_gossip": "#56B4E9", "overlay": "#009E73", "event": "#D55E00", "result": "#CC79A7", 
                   "hello": "#999999", "cli": "#666666"}
 
-LOAD_CLASSES = ("conformance", "gossip_case_end", "event", "result")
-# exclude the result message form the message breakdown panels because its not part of the system
-LOAD_BREAKDOWN_CLASSES = tuple(name for name in LOAD_CLASSES if name != "result")
+# gossip_case_end = gossip_push + gossip_repair
+LOAD_CLASSES = ("conformance", "gossip_push", "gossip_repair", "gossip_case_end", "event", "result")
+LOAD_BREAKDOWN_CLASSES = ("conformance", "gossip_push", "gossip_repair", "event")
 FIXED_CLASSES = ("overlay", "gossip_anti_entropy", "connection_setup")
-CLASS_COLORS = {"conformance": "#0072B2", "gossip_case_end": "#56B4E9", "event": "#D55E00",
+CLASS_COLORS = {"conformance": "#0072B2", "gossip_push": "#56B4E9", "gossip_repair": "#8C6BB1",
+                "gossip_case_end": "#56B4E9", "event": "#D55E00",
                 "result": "#CC79A7", "overlay": "#009E73", "gossip_anti_entropy": "#E69F00",
                 "connection_setup": "#999999"}
-CLASS_LABELS = {"conformance": "constraint coordination", "gossip_case_end": "case end gossip (push + repair)",
+CLASS_LABELS = {"conformance": "constraint coordination", "gossip_push": "case end push gossip",
+                "gossip_repair": "case end anti entropy repair", "gossip_case_end": "case end gossip (push + repair)",
                 "event": "event transport", "result": "result delivery",
                 "overlay": "overlay maintenance", "gossip_anti_entropy": "anti entropy digests",
                 "connection_setup": "connection setup"}
@@ -157,11 +155,21 @@ def traffic_decomposition(metrics: dict) -> dict:
         if digest_bytes is None:
             digests, digest_bytes = 0.0, 0.0
         digest_bytes = min(gossip_bytes, digest_bytes)
+        case_end_sent = max(0.0, gossip_sent - digests)
+        case_end_bytes = max(0.0, gossip_bytes - digest_bytes)
+        push_sent = _bucket_subtype(bucket, "by_gossip_msg_type", "Push", "sent") or 0.0
+        push_bytes = _bucket_subtype(bucket, "by_gossip_msg_type", "Push", "bytes_sent")
+        repair_sent = _bucket_subtype(bucket, "by_gossip_msg_type", "AeSet", "sent") or 0.0
+        repair_bytes = _bucket_subtype(bucket, "by_gossip_msg_type", "AeSet", "bytes_sent")
+        if push_bytes is None or repair_bytes is None:
+            push_sent, push_bytes = case_end_sent, case_end_bytes
+            repair_sent, repair_bytes = 0.0, 0.0
         classes[window] = {
             "conformance": {"sent": _bucket_payload(bucket, "conformance", "sent"),
                             "bytes": _bucket_payload(bucket, "conformance", "bytes_sent")},
-            "gossip_case_end": {"sent": max(0.0, gossip_sent - digests),
-                                "bytes": max(0.0, gossip_bytes - digest_bytes)},
+            "gossip_push": {"sent": push_sent, "bytes": push_bytes},
+            "gossip_repair": {"sent": repair_sent, "bytes": repair_bytes},
+            "gossip_case_end": {"sent": case_end_sent, "bytes": case_end_bytes},
             "event": {"sent": _bucket_payload(bucket, "event", "sent"),
                       "bytes": _bucket_payload(bucket, "event", "bytes_sent")},
             "result": {"sent": _bucket_payload(bucket, "result", "sent"),
@@ -184,17 +192,13 @@ def traffic_decomposition(metrics: dict) -> dict:
     workload = classes.get("workload") or {}
     if workload:
         # load driven traffic, normalised per event and per case
-        coordination_sent = workload["conformance"]["sent"] + workload["gossip_case_end"]["sent"]
-        coordination_bytes = workload["conformance"]["bytes"] + workload["gossip_case_end"]["bytes"]
-        load_sent = coordination_sent + workload["event"]["sent"]
-        load_bytes = coordination_bytes + workload["event"]["bytes"]
+        load_sent = sum(workload[name]["sent"] for name in LOAD_BREAKDOWN_CLASSES)
+        load_bytes = sum(workload[name]["bytes"] for name in LOAD_BREAKDOWN_CLASSES)
         for unit_name, denominator in (("per_event", events), ("per_case", cases)):
             if not denominator:
                 continue
             out[f"bytes_{unit_name}"] = {name: workload[name]["bytes"] / denominator for name in LOAD_CLASSES}
             out[f"messages_{unit_name}"] = {name: workload[name]["sent"] / denominator for name in LOAD_CLASSES}
-            out[f"bytes_{unit_name}"]["coordination"] = coordination_bytes / denominator
-            out[f"messages_{unit_name}"]["coordination"] = coordination_sent / denominator
             out[f"bytes_{unit_name}"]["load_driven_excl_sink"] = load_bytes / denominator
             out[f"messages_{unit_name}"]["load_driven_excl_sink"] = load_sent / denominator
 
@@ -451,14 +455,14 @@ GOSSIP_PANELS = [
     ("traffic.gossip.push_share", "push share of gossip messages", "fraction", 1.0, False),
     ("traffic.gossip.digests_per_node_second", "anti entropy digests per node", "messages/s per node", 1.0, False),
 ]
-# load driven traffic only to a per event denominator
+# load driven traffic as curves against the varied factor
 MESSAGE_PANELS = [
-    ("traffic.bytes_per_event.coordination", "coordination bytes per event", "bytes", 1.0, False),
-    ("traffic.messages_per_event.coordination", "coordination messages per event", "messages", 1.0, False),
-    ("traffic.messages_per_case.coordination", "coordination messages per case", "messages", 1.0, False),
     ("traffic.bytes_per_event.load_driven_excl_sink", "load driven bytes per event", "bytes", 1.0, False),
-    ("traffic.bytes_per_event.event", "event transport bytes per event", "bytes", 1.0, False),
-    ("traffic.messages_per_case.gossip_case_end", "case end gossip messages per case", "messages", 1.0, False),
+    ("traffic.messages_per_event.load_driven_excl_sink", "load driven messages per event", "messages", 1.0, False),
+    ("traffic.messages_per_case.load_driven_excl_sink", "load driven messages per case", "messages", 1.0, False),
+    ("traffic.messages_per_event.conformance", "constraint coordination messages per event", "messages", 1.0, False),
+    ("traffic.bytes_per_event.conformance", "constraint coordination bytes per event", "bytes", 1.0, False),
+    ("traffic.messages_per_case.gossip_case_end", "case end gossip messages per case (push + repair)", "messages", 1.0, False),
 ]
 CORRECTNESS_PANELS = [
     ("correctness.wrong", "wrong verdicts", "pairs", 1.0, False),
@@ -810,11 +814,13 @@ def load_traffic_breakdown_figure(rows, x_key, out_path, formats):
     panels = [("bytes per event", "bytes/event", "traffic.bytes_per_event", LOAD_BREAKDOWN_CLASSES),
               ("messages per event", "messages/event", "traffic.messages_per_event", LOAD_BREAKDOWN_CLASSES),
               ("messages per case", "messages/case", "traffic.messages_per_case", LOAD_BREAKDOWN_CLASSES)]
-    split = all(row.value("traffic.gossip_split_recorded") for row in rows)
-    note = ("case end gossip is push and repair only; the periodic anti entropy digests are in the "
-            "fixed cost figure" if split else
-            "these runs predate per subtype byte recording, so the periodic anti entropy digests "
-            "are counted inside case end gossip")
+    # only the decentralized runs send gossip
+    gossip_rows = [row for row in rows if row.system == "decentralized"]
+    split = all(row.value("traffic.gossip_split_recorded") for row in gossip_rows) if gossip_rows else True
+    note = ("case end gossip is split into push and anti entropy repair; the periodic anti entropy digests "
+            "are in the fixed cost figure" if split else
+            "these runs predate per subtype byte recording, so push and repair are not separable and the "
+            "periodic anti entropy digests are counted inside the push class")
     return stacked_breakdown_figure(rows, x_key, panels, "load driven traffic by class",
                                     out_path, formats, note)
 
@@ -1666,9 +1672,11 @@ CSV_METRICS = [
     ("cpu_pct_max_node", "resources.cpu_percent_max_node", 1.0),
     ("rss_mb_total", "resources.rss_kb_total_max", 1 / 1024),
     ("idle_cpu_per_node_s", "resources.idle.cpu_seconds_per_node_second", 1.0),
-    ("coord_bytes_per_event", "traffic.bytes_per_event.coordination", 1.0),
-    ("coord_msgs_per_event", "traffic.messages_per_event.coordination", 1.0),
-    ("coord_msgs_per_case", "traffic.messages_per_case.coordination", 1.0),
+    ("conformance_bytes_per_event", "traffic.bytes_per_event.conformance", 1.0),
+    ("conformance_msgs_per_event", "traffic.messages_per_event.conformance", 1.0),
+    ("conformance_msgs_per_case", "traffic.messages_per_case.conformance", 1.0),
+    ("gossip_msgs_per_case", "traffic.messages_per_case.gossip_case_end", 1.0),
+    ("load_msgs_per_event", "traffic.messages_per_event.load_driven_excl_sink", 1.0),
     ("transport_bytes_per_event", "traffic.bytes_per_event.event", 1.0),
     ("load_bytes_per_event", "traffic.bytes_per_event.load_driven_excl_sink", 1.0),
     ("gossip_push_per_case", "traffic.gossip.push_per_case", 1.0),
